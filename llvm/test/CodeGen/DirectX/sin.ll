@@ -33,6 +33,19 @@ entry:
 ; Function Attrs: nocallback nofree nosync nounwind readnone speculatable willreturn
 declare half @llvm.sin.f16(half) #1
 
+; Function Attrs: noinline nounwind optnone
+define noundef <4 x float> @"?test_sin_float4@@YAT?$__vector@M$03@__clang@@T12@@Z"(<4 x float> noundef %p0) #0 {
+entry:
+  %p0.addr = alloca <4 x float>, align 16
+  store <4 x float> %p0, ptr %p0.addr, align 16
+  %0 = load <4 x float>, ptr %p0.addr, align 16
+  %elt.sin = call <4 x float> @llvm.sin.v4f32(<4 x float> %0)
+  ret <4 x float> %elt.sin
+}
+
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare <4 x float> @llvm.sin.v4f32(<4 x float>) #1
+
 attributes #0 = { noinline nounwind optnone "frame-pointer"="none" "min-legal-vector-width"="0" "no-trapping-math"="true" "stack-protector-buffer-size"="8" }
 attributes #1 = { nocallback nofree nosync nounwind readnone speculatable willreturn }
 

@@ -28,6 +28,13 @@ void initializeDXILPrepareModulePass(PassRegistry &);
 /// Pass to convert modules into DXIL-compatable modules
 ModulePass *createDXILPrepareModulePass();
 
+/// Initializer for DXIL Elementwise Expansion
+void initializeDXILElementwiseExpansionLegacyPass(PassRegistry &);
+
+/// Pass to expand elementwise operations into multiple calls for
+/// vectors operands before lowering to DXIL-compatable operands
+ModulePass *createDXILElementwiseExpansionLegacyPass();
+
 /// Initializer for DXILOpLowering
 void initializeDXILOpLoweringLegacyPass(PassRegistry &);
 

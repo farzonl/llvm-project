@@ -28,6 +28,7 @@ add_llvm_target(DirectXCodeGen
   DXILResourceAnalysis.cpp
   DXILShaderFlags.cpp
   DXILTranslateMetadata.cpp
+  DXILElementwiseExpansion.cpp
 
   LINK_COMPONENTS
   Analysis
