@@ -51,6 +51,7 @@
 #include "llvm/IR/IntrinsicsR600.h"
 #include "llvm/IR/IntrinsicsRISCV.h"
 #include "llvm/IR/IntrinsicsS390.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/IntrinsicsVE.h"
 #include "llvm/IR/IntrinsicsWebAssembly.h"
 #include "llvm/IR/IntrinsicsX86.h"
@@ -18181,7 +18182,18 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
   if (!getLangOpts().HLSL)
     return nullptr;
 
+  llvm::Triple::ArchType Arch = CGM.getTarget().getTriple().getArch();
+  StringRef ArchPrefix = llvm::Triple::getArchTypePrefix(Arch);
+  StringRef BuiltinName = getContext().BuiltinInfo.getName(BuiltinID);
+
   switch (BuiltinID) {
+  case Builtin::BI__builtin_hlsl_elementwise_all: {
+    Value *Op0 = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateIntrinsic(
+        /*ReturnType=*/llvm::Type::getInt1Ty(getLLVMContext()),
+        Intrinsic::getIntrinsicForClangBuiltin(ArchPrefix.data(), BuiltinName),
+        ArrayRef<Value *>{Op0}, nullptr, "hlsl.all");
+  }
   case Builtin::BI__builtin_hlsl_elementwise_any: {
     Value *Op0 = EmitScalarExpr(E->getArg(0));
     return Builder.CreateIntrinsic(
