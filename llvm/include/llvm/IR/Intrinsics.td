@@ -2645,6 +2645,11 @@ def int_experimental_convergence_loop
   : DefaultAttrsIntrinsic<[llvm_token_ty], [], [IntrNoMem, IntrConvergent]>;
 
 //===----------------------------------------------------------------------===//
+// HLSL multi-target intrinsic definitions
+//===----------------------------------------------------------------------===//
+include "llvm/IR/HLSLIntrinsics.td"
+
+//===----------------------------------------------------------------------===//
 // Target-specific intrinsics
 //===----------------------------------------------------------------------===//
 
