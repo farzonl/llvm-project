@@ -306,7 +306,7 @@ static bool isNonMangledOCLBuiltin(StringRef Name) {
 std::string getOclOrSpirvBuiltinDemangledName(StringRef Name) {
   bool IsNonMangledOCL = isNonMangledOCLBuiltin(Name);
   bool IsNonMangledSPIRV = Name.starts_with("__spirv_");
-  bool IsNonMangledHLSL = Name.starts_with("__hlsl_");
+  bool IsNonMangledHLSL = Name.starts_with("__hlsl_") || Name.starts_with("__builtin_hlsl_");
   bool IsMangled = Name.starts_with("_Z");
 
   // Otherwise use simple demangling to return the function name.

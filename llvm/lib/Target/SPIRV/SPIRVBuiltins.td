@@ -496,6 +496,7 @@ defm : DemangledNativeBuiltin<"any", OpenCL_std, Relational, 1, 1, OpAny>;
 defm : DemangledNativeBuiltin<"__spirv_Any", OpenCL_std, Relational, 1, 1, OpAny>;
 defm : DemangledNativeBuiltin<"all", OpenCL_std, Relational, 1, 1, OpAll>;
 defm : DemangledNativeBuiltin<"__spirv_All", OpenCL_std, Relational, 1, 1, OpAll>;
+defm : DemangledNativeBuiltin<"__builtin_hlsl_elementwise_all",GLSL_std_450, Relational, 1, 1, OpAll>;
 
 // Atomic builtin records:
 defm : DemangledNativeBuiltin<"atomic_init", OpenCL_std, Atomic, 2, 2, OpStore>;

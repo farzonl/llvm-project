@@ -16,6 +16,7 @@
 #include "CGObjCRuntime.h"
 #include "CGOpenCLRuntime.h"
 #include "CGRecordLayout.h"
+#include "CGValue.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
 #include "ConstantEmitter.h"
@@ -51,6 +52,7 @@
 #include "llvm/IR/IntrinsicsR600.h"
 #include "llvm/IR/IntrinsicsRISCV.h"
 #include "llvm/IR/IntrinsicsS390.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/IntrinsicsVE.h"
 #include "llvm/IR/IntrinsicsWebAssembly.h"
 #include "llvm/IR/IntrinsicsX86.h"
@@ -6181,6 +6183,10 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
   // EmitHLSLBuiltinExpr will check getLangOpts().HLSL
   if (Value *V = EmitHLSLBuiltinExpr(BuiltinID, E))
     return RValue::get(V);
+  
+  /*RValue rv;
+  if(EmitHLSLLibraryFunctions(BuiltinID, GD, E,rv))
+    return rv;*/
 
   if (getLangOpts().HIPStdPar && getLangOpts().CUDAIsDevice)
     return EmitHipStdParUnsupportedBuiltin(this, FD);
@@ -18176,12 +18182,54 @@ Intrinsic::ID getDotProductIntrinsic(QualType QT, int elementCount) {
   return Intrinsic::dx_udot;
 }
 
+/*Intrinsic::ID getAllIntrinsic(const llvm::Triple::ArchType Arch) {
+  switch (Arch) {
+  case llvm::Triple::dxil:
+    return Intrinsic::dx_all;
+  case llvm::Triple::spirv:
+    return Intrinsic::spv_all;
+  default:
+    llvm_unreachable("Input semantic not supported by target");
+  }
+}*/
+
+bool CodeGenFunction::EmitHLSLLibraryFunctions(unsigned BuiltinID,
+                                            const GlobalDecl GD,
+                                            const CallExpr *E, RValue& RV) {
+  if (!getLangOpts().HLSL)
+    return false;
+  const FunctionDecl *FD = GD.getDecl()->getAsFunction();
+
+  switch (BuiltinID) {
+    case Builtin::BI__builtin_hlsl_elementwise_all: {
+      if (getContext().BuiltinInfo.isLibFunction(BuiltinID)) {
+        RV = emitLibraryCall(*this, FD, E,
+                           CGM.getBuiltinLibFunction(FD, BuiltinID));
+        return true;
+      }
+    }
+  }
+  return false;                                     
+}
+
 Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
                                             const CallExpr *E) {
   if (!getLangOpts().HLSL)
     return nullptr;
 
   switch (BuiltinID) {
+  case Builtin::BI__builtin_hlsl_elementwise_all: {
+    Value *Op0 = EmitScalarExpr(E->getArg(0));
+    return EmitRuntimeCall(CGM.CreateRuntimeFunction(
+        llvm::FunctionType::get(llvm::Type::getInt1Ty(getLLVMContext()), 
+        {Op0->getType()}, false), "__builtin_hlsl_elementwise_all",
+        {}, false, false), ArrayRef<Value *>{Op0});
+
+    //return Builder.CreateIntrinsic(
+    //    llvm::Type::getInt1Ty(getLLVMContext()),
+    //    getAllIntrinsic(CGM.getTarget().getTriple().getArch()),
+    //    ArrayRef<Value *>{Op0}, nullptr, "hlsl.all");
+  }
   case Builtin::BI__builtin_hlsl_elementwise_any: {
     Value *Op0 = EmitScalarExpr(E->getArg(0));
     return Builder.CreateIntrinsic(
