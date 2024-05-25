@@ -1,4 +1,4 @@
-; RUN: opt -vector-library=MASSV -mtriple=powerpc64le-unknown-linux-gnu -passes=inject-tli-mappings,loop-vectorize -force-vector-interleave=1 -S < %s | FileCheck %s
+; RUN: opt -vector-library=MASSV -mtriple=powerpc64le-unknown-linux-gnu -passes=inject-tli-mappings,loop-vectorize -force-vector-interleave=1 -S < %s | FileCheck %s --check-prefixes=CHECK,TEMP_CHECK
 ; RUN: opt -vector-library=MASSV -vec-extabi -mattr=+altivec -mtriple=powerpc64-ibm-aix-xcoff -passes=inject-tli-mappings,loop-vectorize -force-vector-interleave=1 -S < %s | FileCheck %s
 
 declare double @cbrt(double) #0
@@ -54,7 +54,9 @@ declare float @cosf(float) #0
 declare float @llvm.cos.f32(float) #0
 
 declare double @tan(double) #0
+declare double @llvm.tan.f64(double) #0
 declare float @tanf(float) #0
+declare float @llvm.tan.f32(float) #0
 
 declare double @asin(double) #0
 declare float @asinf(float) #0
@@ -1050,6 +1052,54 @@ for.body:
   %tmp = trunc i64 %iv to i32
   %conv = sitofp i32 %tmp to float
   %call = tail call float @tanf(float %conv)
+  %arrayidx = getelementptr inbounds float, ptr %varray, i64 %iv
+  store float %call, ptr %arrayidx, align 4
+  %iv.next = add nuw nsw i64 %iv, 1
+  %exitcond = icmp eq i64 %iv.next, 1000
+  br i1 %exitcond, label %for.end, label %for.body
+
+for.end:
+  ret void
+}
+
+define void @tan_v2f64_intrinsic(ptr nocapture %varray) {
+; CHECK-LABEL: @tan_v2f64_intrinsic(
+; NOTE: this is not __tand2 because we haven't implemented powerpc lowering for tan intrinsics
+; Further, target powerpc64-ibm-aix-xcoff does not generate intrinsic vector.
+; TEMP_CHECK: = call <2 x double> @llvm.tan.v2f64(<2 x double> {{.*}})
+; CHECK: ret void
+;
+entry:
+  br label %for.body
+
+for.body:
+  %iv = phi i64 [ 0, %entry ], [ %iv.next, %for.body ]
+  %tmp = trunc i64 %iv to i32
+  %conv = sitofp i32 %tmp to double
+  %call = tail call double @llvm.tan.f64(double %conv)
+  %arrayidx = getelementptr inbounds double, ptr %varray, i64 %iv
+  store double %call, ptr %arrayidx, align 4
+  %iv.next = add nuw nsw i64 %iv, 1
+  %exitcond = icmp eq i64 %iv.next, 1000
+  br i1 %exitcond, label %for.end, label %for.body
+
+for.end:
+  ret void
+}
+
+define void @tan_v4f32_intrinsic(ptr nocapture %varray) {
+; CHECK-LABEL: @tan_v4f32_intrinsic(
+; CHECK: = call <4 x float> @llvm.tan.v4f32(<4 x float> {{.*}})
+; CHECK: ret void
+;
+entry:
+  br label %for.body
+
+for.body:
+  %iv = phi i64 [ 0, %entry ], [ %iv.next, %for.body ]
+  %tmp = trunc i64 %iv to i32
+  %conv = sitofp i32 %tmp to float
+  %call = tail call float @llvm.tan.f32(float %conv)
   %arrayidx = getelementptr inbounds float, ptr %varray, i64 %iv
   store float %call, ptr %arrayidx, align 4
   %iv.next = add nuw nsw i64 %iv, 1
