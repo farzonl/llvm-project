@@ -23,3 +23,9 @@ entry:
   %1 = call half @llvm.sin.f16(half %0)
   ret half %1
 }
+
+define noundef <4 x float> @sin_float4(<4 x float> noundef %a) #0 {
+entry:
+  %2 = tail call <4 x float> @llvm.sin.v4f32(<4 x float> %a) 
+  ret <4 x float> %2
+}

@@ -48,6 +48,11 @@ public:
 
   TargetTransformInfo getTargetTransformInfo(const Function &F) const override;
   void registerPassBuilderCallbacks(PassBuilder &PB) override;
+
+  Error buildCodeGenPipeline(ModulePassManager &, raw_pwrite_stream &,
+                             raw_pwrite_stream *, CodeGenFileType,
+                             const CGPassBuilderOption &,
+                             PassInstrumentationCallbacks *) override;
 };
 } // namespace llvm
 
