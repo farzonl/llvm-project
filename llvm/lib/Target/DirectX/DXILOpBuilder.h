@@ -53,6 +53,9 @@ public:
   /// Get the `%dx.types.splitdouble` type.
   StructType *getSplitDoubleType(LLVMContext &Context);
 
+  /// Get the `%dx.types.Dimensions` type.
+  StructType *getDimensionsType(LLVMContext &Context);
+
   /// Get the `%dx.types.Handle` type.
   StructType *getHandleType();
 

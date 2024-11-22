@@ -4813,6 +4813,12 @@ def HLSLWaveReadLaneAt : LangBuiltin<"HLSL_LANG"> {
   let Prototype = "void(...)";
 }
 
+def HLSLBufferGetDimensions : LangBuiltin<"HLSL_LANG"> {
+  let Spellings = ["__builtin_hlsl_buffer_get_dimensions"];
+  let Attributes = [NoThrow, CustomTypeChecking];
+  let Prototype = "void(...)";
+}
+
 def HLSLClamp : LangBuiltin<"HLSL_LANG"> {
   let Spellings = ["__builtin_hlsl_elementwise_clamp"];
   let Attributes = [NoThrow, Const];

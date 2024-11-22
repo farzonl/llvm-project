@@ -180,7 +180,18 @@ public:
     Record->addDecl(Constructor);
     return *this;
   }
+  BuiltinTypeDeclBuilder &addGetDimensionsMethods(Sema &S) {
+    if (Record->isCompleteDefinition())
+      return *this;
 
+    ASTContext &AST = Record->getASTContext();
+    IdentifierInfo &II = AST.Idents.get("GetDimensions", tok::TokenKind::identifier);
+    DeclarationName GetDimensions(&II);
+    //addHandleAccessFunction(S, GetDimensions, /*IsConst=*/false, /*IsRef=*/false);
+
+    return *this;
+  }
+  
   BuiltinTypeDeclBuilder &addArraySubscriptOperators() {
     ASTContext &AST = Record->getASTContext();
     DeclarationName Subscript =
@@ -1004,6 +1015,7 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
                     /*RawBuffer=*/false)
         .addArraySubscriptOperators()
         .addLoadMethods()
+        .addGetDimensionsMethods(*SemaPtr)
         .completeDefinition();
   });
 
@@ -1028,6 +1040,7 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
                     /*IsROV=*/false, /*RawBuffer=*/true)
         .addArraySubscriptOperators()
         .addLoadMethods()
+        .addGetDimensionsMethods(*SemaPtr)
         .completeDefinition();
   });
 
@@ -1041,6 +1054,7 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
         .addLoadMethods()
         .addIncrementCounterMethod()
         .addDecrementCounterMethod()
+        .addGetDimensionsMethods(*SemaPtr)
         .completeDefinition();
   });
 
@@ -1052,6 +1066,7 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
     setupBufferType(Decl, *SemaPtr, ResourceClass::UAV, ResourceKind::RawBuffer,
                     /*IsROV=*/false, /*RawBuffer=*/true)
         .addAppendMethod()
+        .addGetDimensionsMethods(*SemaPtr)
         .completeDefinition();
   });
 
@@ -1063,6 +1078,7 @@ void HLSLExternalSemaSource::defineHLSLTypesWithForwardDeclarations() {
     setupBufferType(Decl, *SemaPtr, ResourceClass::UAV, ResourceKind::RawBuffer,
                     /*IsROV=*/false, /*RawBuffer=*/true)
         .addConsumeMethod()
+        .addGetDimensionsMethods(*SemaPtr)
         .completeDefinition();
   });
 

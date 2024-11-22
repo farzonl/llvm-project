@@ -19186,6 +19186,10 @@ static Intrinsic::ID getFirstBitHighIntrinsic(CGHLSLRuntime &RT, QualType QT) {
   return RT.getFirstBitUHighIntrinsic();
 }
 
+static Value *EmitHLSLGetDimensions(const CallExpr *E, CodeGenFunction *CGF) {
+
+}
+
 Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
                                             const CallExpr *E,
                                             ReturnValueSlot ReturnValue) {
@@ -19220,6 +19224,9 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
   }
   case Builtin::BI__builtin_hlsl_asdouble:
     return handleAsDoubleBuiltin(*this, E);
+  case Builtin::BI__builtin_hlsl_buffer_get_dimensions: {
+    llvm_unreachable("TODO: Need to figure out how to look up Resource Type");
+  }
   case Builtin::BI__builtin_hlsl_elementwise_clamp: {
     Value *OpX = EmitScalarExpr(E->getArg(0));
     Value *OpMin = EmitScalarExpr(E->getArg(1));

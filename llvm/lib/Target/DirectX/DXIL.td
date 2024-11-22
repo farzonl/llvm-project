@@ -50,6 +50,7 @@ def HandleTy : DXILOpParamType;
 def ResBindTy : DXILOpParamType;
 def ResPropsTy : DXILOpParamType;
 def SplitDoubleTy : DXILOpParamType;
+def DimensionsTy : DXILOpParamType;
 
 class DXILOpClass;
 

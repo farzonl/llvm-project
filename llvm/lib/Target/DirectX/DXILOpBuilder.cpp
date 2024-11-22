@@ -236,6 +236,14 @@ static StructType *getSplitDoubleType(LLVMContext &Context) {
   return StructType::create({Int32Ty, Int32Ty}, "dx.types.splitdouble");
 }
 
+static StructType *getDimensionsType(LLVMContext &Context) {
+  const char* DimensionsTypeName = "dx.types.Dimensions";
+  if (auto *ST = StructType::getTypeByName(Context, DimensionsTypeName))
+    return ST;
+  Type *Int32Ty = Type::getInt32Ty(Context);
+  return StructType::create({Int32Ty, Int32Ty, Int32Ty, Int32Ty}, DimensionsTypeName);
+}
+
 static Type *getTypeFromOpParamType(OpParamType Kind, LLVMContext &Ctx,
                                     Type *OverloadTy) {
   switch (Kind) {
@@ -279,6 +287,8 @@ static Type *getTypeFromOpParamType(OpParamType Kind, LLVMContext &Ctx,
     return getResPropsType(Ctx);
   case OpParamType::SplitDoubleTy:
     return getSplitDoubleType(Ctx);
+  case OpParamType::DimensionsTy:
+    return getDimensionsType(Ctx);
   }
   llvm_unreachable("Invalid parameter kind");
   return nullptr;
@@ -482,6 +492,10 @@ StructType *DXILOpBuilder::getResRetType(Type *ElementTy) {
 
 StructType *DXILOpBuilder::getSplitDoubleType(LLVMContext &Context) {
   return ::getSplitDoubleType(Context);
+}
+
+StructType *DXILOpBuilder::getDimensionsType(LLVMContext &Context) {
+  return ::getDimensionsType(Context);
 }
 
 StructType *DXILOpBuilder::getHandleType() {
