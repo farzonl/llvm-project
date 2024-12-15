@@ -17,6 +17,11 @@ class ModulePass;
 class PassRegistry;
 class raw_ostream;
 
+class DirectXTargetMachine;
+class DirectXSubtarget;
+class InstructionSelector;
+class RegisterBankInfo;
+
 /// Initializer for dxil writer pass
 void initializeWriteDXILPassPass(PassRegistry &);
 
@@ -49,6 +54,11 @@ ModulePass *createDXILFlattenArraysLegacyPass();
 
 /// Initializer for DXILOpLowering
 void initializeDXILOpLoweringLegacyPass(PassRegistry &);
+
+InstructionSelector *
+createDirectXInstructionSelector(const DirectXTargetMachine &TM,
+                                 const DirectXSubtarget &Subtarget,
+                                 const RegisterBankInfo &RBI);
 
 /// Pass to lowering LLVM intrinsic call to DXIL op function call.
 ModulePass *createDXILOpLoweringLegacyPass();

@@ -14,6 +14,16 @@
 #ifndef LLVM_DIRECTX_DIRECTXMCTARGETDESC_H
 #define LLVM_DIRECTX_DIRECTXMCTARGETDESC_H
 
+namespace llvm {
+
+class MCCodeEmitter;
+class MCContext;
+class MCInstrInfo;
+
+MCCodeEmitter *createDirectXMCCodeEmitter(const MCInstrInfo &MCII,
+                                          MCContext &Ctx);
+} // namespace llvm
+
 // Include DirectX stub register info
 #define GET_REGINFO_ENUM
 #include "DirectXGenRegisterInfo.inc"

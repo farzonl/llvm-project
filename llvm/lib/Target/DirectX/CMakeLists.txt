@@ -3,8 +3,11 @@ add_llvm_component_group(DirectX)
 set(LLVM_TARGET_DEFINITIONS DirectX.td)
 
 tablegen(LLVM DirectXGenSubtargetInfo.inc -gen-subtarget)
+tablegen(LLVM DirectXGenGlobalISel.inc -gen-global-isel)
+tablegen(LLVM DirectXGenMCCodeEmitter.inc -gen-emitter)
 tablegen(LLVM DirectXGenInstrInfo.inc -gen-instr-info)
 tablegen(LLVM DirectXGenRegisterInfo.inc -gen-register-info)
+tablegen(LLVM DirectXGenRegisterBank.inc -gen-register-bank)
 
 set(LLVM_TARGET_DEFINITIONS DXIL.td)
 tablegen(LLVM DXILOperation.inc -gen-dxil-operation)
@@ -14,7 +17,12 @@ add_public_tablegen_target(DirectXCommonTableGen)
 add_llvm_target(DirectXCodeGen
   CBufferDataLayout.cpp
   DirectXAsmPrinter.cpp
+  DirectXCallLowering.cpp
   DirectXInstrInfo.cpp
+  DirectXInstructionSelector.cpp
+  DirectXLegalizerInfo.cpp
+  DirectXMCCodeEmitter.cpp
+  DirectXRegisterBanks.cpp
   DirectXRegisterInfo.cpp
   DirectXSubtarget.cpp
   DirectXTargetMachine.cpp
