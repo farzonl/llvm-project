@@ -13,6 +13,7 @@
 #include "DirectXRegisterInfo.h"
 #include "DirectXFrameLowering.h"
 #include "MCTargetDesc/DirectXMCTargetDesc.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 
@@ -22,3 +23,23 @@
 using namespace llvm;
 
 DirectXRegisterInfo::~DirectXRegisterInfo() {}
+
+const MCPhysReg *
+DirectXRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
+  return nullptr;
+}
+BitVector
+DirectXRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
+  return BitVector();
+}
+bool DirectXRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
+                                              int SPAdj, unsigned FIOperandNum,
+                                              RegScavenger *RS) const {
+  return false;
+}
+
+// Debug information queries.
+Register
+DirectXRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
+  return Register();
+}

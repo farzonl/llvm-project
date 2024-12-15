@@ -12,7 +12,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectXSubtarget.h"
+#include "DirectX.h"
 #include "DirectXTargetLowering.h"
+#include "DirectXTargetMachine.h"
 
 using namespace llvm;
 
@@ -24,6 +26,15 @@ using namespace llvm;
 
 DirectXSubtarget::DirectXSubtarget(const Triple &TT, StringRef CPU,
                                    StringRef FS, const DirectXTargetMachine &TM)
-    : DirectXGenSubtargetInfo(TT, CPU, CPU, FS), FL(*this), TL(TM, *this) {}
+    : DirectXGenSubtargetInfo(TT, CPU, CPU, FS), FL(*this), TL(TM, *this) {
+
+  if (EnableDirectXGlobalIsel) {
+    CallLoweringInfo = std::make_unique<DirectXCallLowering>(TL);
+    Legalizer = std::make_unique<DirectXLegalizerInfo>(*this);
+    RegBankInfo = std::make_unique<DirectXRegisterBankInfo>();
+    InstSelector.reset(
+        createDirectXInstructionSelector(TM, *this, *RegBankInfo.get()));
+  }
+}
 
 void DirectXSubtarget::anchor() {}
