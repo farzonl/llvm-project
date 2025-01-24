@@ -28,7 +28,7 @@ DirectXSubtarget::DirectXSubtarget(const Triple &TT, StringRef CPU,
                                    StringRef FS, const DirectXTargetMachine &TM)
     : DirectXGenSubtargetInfo(TT, CPU, CPU, FS), FL(*this), TL(TM, *this) {
 
-  if (EnableDirectXGlobalIsel) {
+  if (EnableDirectXGlobalIsel == cl::BOU_TRUE) {
     CallLoweringInfo = std::make_unique<DirectXCallLowering>(TL);
     Legalizer = std::make_unique<DirectXLegalizerInfo>(*this);
     RegBankInfo = std::make_unique<DirectXRegisterBankInfo>();

@@ -5,6 +5,7 @@
 
 ; CHECK-LABEL: Pass Arguments:
 ; CHECK-NEXT: Target Library Information
+; CHECK-NEXT: Target Pass Configuration
 ; CHECK-NEXT: DXIL Resource Type Analysis
 ; CHECK-NEXT: Target Transform Information
 
