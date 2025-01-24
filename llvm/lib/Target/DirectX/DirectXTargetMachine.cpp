@@ -45,6 +45,7 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/CodeGen.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
@@ -55,8 +56,7 @@ using namespace llvm;
 
 cl::opt<bool> llvm::EnableDirectXGlobalIsel(
     "enable-directx-global-isel",
-    cl::desc("Enable the DirectX GlobalIsel target"),
-    cl::Optional,
+    cl::desc("Enable the DirectX GlobalIsel target"), cl::Optional,
     cl::init(false));
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTarget() {
@@ -70,8 +70,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTarget() {
   initializeEmbedDXILPassPass(*PR);
   initializeWriteDXILPassPass(*PR);
   initializeDXContainerGlobalsPass(*PR);
-  if (EnableDirectXGlobalIsel)
-    initializeGlobalISel(*PR);
+  initializeGlobalISel(*PR);
   initializeDXILOpLoweringLegacyPass(*PR);
   initializeDXILResourceAccessLegacyPass(*PR);
   initializeDXILTranslateMetadataLegacyPass(*PR);
@@ -105,6 +104,13 @@ public:
     return getTM<DirectXTargetMachine>();
   }
 
+  // GlobalISel Specific Passes Start
+  bool addLegalizeMachineIR() override;
+  bool addGlobalInstructionSelect() override;
+  bool addIRTranslator() override;
+  bool addRegBankSelect() override;
+  // GlobalISel Specific Passes End
+
   FunctionPass *createTargetRegisterAllocator(bool) override { return nullptr; }
   void addCodeGenPrepare() override {
     addPass(createDXILFinalizeLinkageLegacyPass());
@@ -116,16 +122,14 @@ public:
     DxilScalarOptions.ScalarizeLoadStore = true;
     addPass(createScalarizerPass(DxilScalarOptions));
     addPass(createDXILTranslateMetadataLegacyPass());
-    addPass(createDXILOpLoweringLegacyPass());
+    if (EnableDirectXGlobalIsel) {
+      addCoreISelPasses();
+      addMachinePasses();
+    } else
+      addPass(createDXILOpLoweringLegacyPass());
+
     addPass(createDXILPrepareModulePass());
   }
-
-  // GlobalISel Specific Passes Start
-  bool addLegalizeMachineIR() override;
-  bool addGlobalInstructionSelect() override;
-  bool addIRTranslator() override;
-  bool addRegBankSelect() override;
-  // GlobalISel Specific Passes End
 };
 
 DirectXTargetMachine::DirectXTargetMachine(const Target &T, const Triple &TT,
@@ -142,7 +146,7 @@ DirectXTargetMachine::DirectXTargetMachine(const Target &T, const Triple &TT,
       TLOF(std::make_unique<DXILTargetObjectFile>()),
       Subtarget(std::make_unique<DirectXSubtarget>(TT, CPU, FS, *this)) {
   initAsmInfo();
-  setGlobalISel(EnableDirectXGlobalIsel);
+  setGlobalISel(EnableDirectXGlobalIsel == cl::BOU_TRUE);
 }
 
 DirectXTargetMachine::~DirectXTargetMachine() {}
@@ -157,6 +161,7 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     CodeGenFileType FileType, bool DisableVerify,
     MachineModuleInfoWrapperPass *MMIWP) {
   TargetPassConfig *PassConfig = createPassConfig(PM);
+  PM.add(PassConfig);
   PassConfig->addCodeGenPrepare();
 
   switch (FileType) {
@@ -233,8 +238,11 @@ bool DirectXPassConfig::addGlobalInstructionSelect() {
 
 // Do not add the RegBankSelect pass, as we only ever need virtual registers.
 bool DirectXPassConfig::addRegBankSelect() {
-  disablePass(&RegBankSelect::ID);
-  return false;
+  if (EnableDirectXGlobalIsel) {
+    disablePass(&RegBankSelect::ID);
+    return false;
+  }
+  return true;
 }
 
 bool DirectXPassConfig::addIRTranslator() {
