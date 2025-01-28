@@ -19,3 +19,20 @@ using namespace llvm;
 
 DirectXCallLowering::DirectXCallLowering(const DirectXTargetLowering &TLI)
     : CallLowering(&TLI) {}
+
+bool DirectXCallLowering::lowerFormalArguments(
+    MachineIRBuilder &MIRBuilder, const Function &F,
+    ArrayRef<ArrayRef<Register>> VRegs, FunctionLoweringInfo &FLI) const {
+  return true;
+}
+
+bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuiler, const Value *Val,
+                   ArrayRef<Register> VRegs, FunctionLoweringInfo &FLI,
+                   Register SwiftErrorVReg) const {
+  return true;
+}
+
+bool DirectXCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
+                 CallLoweringInfo &Info) const {
+  return true;
+}
