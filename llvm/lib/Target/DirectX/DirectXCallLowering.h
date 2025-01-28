@@ -25,6 +25,14 @@ class DirectXCallLowering : public CallLowering {
 
 public:
   DirectXCallLowering(const DirectXTargetLowering &TLI);
+  bool lowerFormalArguments(MachineIRBuilder &MIRBuilder, const Function &F,
+                            ArrayRef<ArrayRef<Register>> VRegs,
+                            FunctionLoweringInfo &FLI) const override;
+  bool lowerReturn(MachineIRBuilder &MIRBuiler, const Value *Val,
+                   ArrayRef<Register> VRegs, FunctionLoweringInfo &FLI,
+                   Register SwiftErrorVReg) const override;
+  bool lowerCall(MachineIRBuilder &MIRBuilder,
+                 CallLoweringInfo &Info) const override;
 };
 } // end namespace llvm
 
