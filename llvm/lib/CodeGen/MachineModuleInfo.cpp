@@ -153,6 +153,9 @@ FunctionPass *llvm::createFreeMachineFunctionPass() {
 MachineModuleInfoWrapperPass::MachineModuleInfoWrapperPass(
     const TargetMachine *TM)
     : ImmutablePass(ID), MMI(TM) {
+  assert(TM != nullptr &&
+         "Trying to construct MachineModuleInfo without a target "
+         "machine.");
   initializeMachineModuleInfoWrapperPassPass(*PassRegistry::getPassRegistry());
 }
 

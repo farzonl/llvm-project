@@ -109,6 +109,9 @@ public:
   bool addGlobalInstructionSelect() override;
   bool addIRTranslator() override;
   bool addRegBankSelect() override;
+  void addPostRegAlloc() override;
+  void addFastRegAlloc() override {}
+  void addOptimizedRegAlloc() override {}
   // GlobalISel Specific Passes End
 
   FunctionPass *createTargetRegisterAllocator(bool) override { return nullptr; }
@@ -161,8 +164,15 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     CodeGenFileType FileType, bool DisableVerify,
     MachineModuleInfoWrapperPass *MMIWP) {
   TargetPassConfig *PassConfig = createPassConfig(PM);
+  // Set PassConfig options provided by TargetMachine.
+  PassConfig->setDisableVerify(DisableVerify);
   PM.add(PassConfig);
+  // Need to sooner for Analysis Passes
+  if (!MMIWP)
+    MMIWP = new MachineModuleInfoWrapperPass(this);
+  PM.add(MMIWP);
   PassConfig->addCodeGenPrepare();
+  PassConfig->setInitialized();
 
   switch (FileType) {
   case CodeGenFileType::AssemblyFile:
@@ -176,9 +186,6 @@ bool DirectXTargetMachine::addPassesToEmitFile(
       // globals don't pollute the DXIL.
       PM.add(createDXContainerGlobalsPass());
 
-      if (!MMIWP)
-        MMIWP = new MachineModuleInfoWrapperPass(this);
-      PM.add(MMIWP);
       if (addAsmPrinter(PM, Out, DwoOut, FileType,
                         MMIWP->getMMI().getContext()))
         return true;
@@ -243,6 +250,27 @@ bool DirectXPassConfig::addRegBankSelect() {
     return false;
   }
   return true;
+}
+
+// Disable passes that break from assuming no virtual registers exist.
+void DirectXPassConfig::addPostRegAlloc() {
+  // Do not work with vregs instead of physical regs.
+  disablePass(&MachineCopyPropagationID);
+  disablePass(&PostRAMachineSinkingID);
+  disablePass(&PostRASchedulerID);
+  disablePass(&FuncletLayoutID);
+  disablePass(&StackMapLivenessID);
+  disablePass(&PatchableFunctionID);
+  disablePass(&ShrinkWrapID);
+  disablePass(&LiveDebugValuesID);
+  disablePass(&MachineLateInstrsCleanupID);
+  disablePass(&RemoveLoadsIntoFakeUsesID);
+
+  // Do not work with OpPhi.
+  disablePass(&BranchFolderPassID);
+  disablePass(&MachineBlockPlacementID);
+
+  TargetPassConfig::addPostRegAlloc();
 }
 
 bool DirectXPassConfig::addIRTranslator() {
