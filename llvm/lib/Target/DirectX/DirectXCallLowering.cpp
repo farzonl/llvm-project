@@ -26,13 +26,15 @@ bool DirectXCallLowering::lowerFormalArguments(
   return true;
 }
 
-bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuiler, const Value *Val,
-                   ArrayRef<Register> VRegs, FunctionLoweringInfo &FLI,
-                   Register SwiftErrorVReg) const {
+bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuiler,
+                                      const Value *Val,
+                                      ArrayRef<Register> VRegs,
+                                      FunctionLoweringInfo &FLI,
+                                      Register SwiftErrorVReg) const {
   return true;
 }
 
 bool DirectXCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
-                 CallLoweringInfo &Info) const {
+                                    CallLoweringInfo &Info) const {
   return true;
 }
