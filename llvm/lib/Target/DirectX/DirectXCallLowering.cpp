@@ -14,6 +14,8 @@
 
 #include "DirectXCallLowering.h"
 #include "DirectXTargetLowering.h"
+#include "DirectXTargetMachine.h"
+#include "MCTargetDesc/DirectXMCTargetDesc.h"
 
 using namespace llvm;
 
@@ -26,11 +28,46 @@ bool DirectXCallLowering::lowerFormalArguments(
   return true;
 }
 
-bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuiler,
+static std::string typeIdToName(llvm::Type *Ty) {
+  switch (Ty->getTypeID()) {
+  case llvm::Type::VoidTyID:
+    return "void";
+  case llvm::Type::HalfTyID:
+    return "half";
+  case llvm::Type::FloatTyID:
+    return "float";
+  case llvm::Type::DoubleTyID:
+    return "double";
+  case llvm::Type::IntegerTyID:
+    return "int" + std::to_string(Ty->getIntegerBitWidth());
+  default:
+    llvm::report_fatal_error("unsupported type");
+  }
+}
+
+bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
                                       const Value *Val,
                                       ArrayRef<Register> VRegs,
                                       FunctionLoweringInfo &FLI,
                                       Register SwiftErrorVReg) const {
+
+  if (VRegs.size() > 1)
+    return false;
+  if (Val) {
+    llvm::Type *RetTy = Val->getType();
+    llvm::Metadata *OpType =
+        llvm::MDString::get(MIRBuilder.getContext(), typeIdToName(RetTy));
+    llvm::MDNode *OpTypeNode =
+        llvm::MDNode::get(MIRBuilder.getContext(), OpType);
+    const auto &STI = MIRBuilder.getMF().getSubtarget();
+    return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
+        .addUse(VRegs[0])
+        // Save type as meta data for now.
+        .addMetadata(OpTypeNode)
+        .constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
+                          *STI.getRegBankInfo());
+  }
+  MIRBuilder.buildInstr(dxil::ReturnDXILInst);
   return true;
 }
 

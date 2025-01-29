@@ -11,3 +11,8 @@
 //===----------------------------------------------------------------------===//
 
 include "DirectXInstrFormats.td"
+
+
+def ReturnDXILInst: SimplePseudoDXILInst<"ret void">;
+//def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret, TYPE:$type), "ret $type $ret">;
+def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret), "ret $ret">;

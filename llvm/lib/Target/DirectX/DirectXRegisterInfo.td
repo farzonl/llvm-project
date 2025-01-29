@@ -17,6 +17,10 @@
 
 let Namespace = "dxil" in {
     
+    // // Class for type registers
+    // def TYPE0 : Register<"TYPE0">;
+    // def TYPE : RegisterClass<"dxil", [i32], 32, (add TYPE0)>;
+
     def ID0 : Register<"ID0">;
     def fID0 : Register<"fID0">;
     def iID : RegisterClass<"dxil", [i32], 32, (add ID0)>;
