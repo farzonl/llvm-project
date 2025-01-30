@@ -6,6 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
+def StringImm: Operand<i32>{
+  let PrintMethod="printStringImm";
+}
+
 class DXILInst<bits<16> Opcode, dag outs, dag ins, string asmstr, list<dag> pattern = []>
   : Instruction {
   field bits<16> Inst;

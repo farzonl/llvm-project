@@ -16,17 +16,14 @@
 #include "DirectXTargetLowering.h"
 #include "DirectXTargetMachine.h"
 #include "MCTargetDesc/DirectXMCTargetDesc.h"
+#include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include <cstdint>
 
 using namespace llvm;
 
 DirectXCallLowering::DirectXCallLowering(const DirectXTargetLowering &TLI)
     : CallLowering(&TLI) {}
-
-bool DirectXCallLowering::lowerFormalArguments(
-    MachineIRBuilder &MIRBuilder, const Function &F,
-    ArrayRef<ArrayRef<Register>> VRegs, FunctionLoweringInfo &FLI) const {
-  return true;
-}
 
 static std::string typeIdToName(llvm::Type *Ty) {
   switch (Ty->getTypeID()) {
@@ -39,10 +36,103 @@ static std::string typeIdToName(llvm::Type *Ty) {
   case llvm::Type::DoubleTyID:
     return "double";
   case llvm::Type::IntegerTyID:
-    return "int" + std::to_string(Ty->getIntegerBitWidth());
+    return "i" + std::to_string(Ty->getIntegerBitWidth());
   default:
     llvm::report_fatal_error("unsupported type");
   }
+}
+
+static std::string typeIdTShortName(llvm::Type *Ty) {
+  switch (Ty->getTypeID()) {
+  case llvm::Type::HalfTyID:
+    return "f16";
+  case llvm::Type::FloatTyID:
+    return "f32";
+  case llvm::Type::DoubleTyID:
+    return "f64";
+  case llvm::Type::IntegerTyID:
+    return "i" + std::to_string(Ty->getIntegerBitWidth());
+  default:
+    llvm::report_fatal_error("unsupported type");
+  }
+}
+
+static uint64_t typeIdToAlignment(llvm::Type *Ty) {
+  switch (Ty->getTypeID()) {
+  case llvm::Type::HalfTyID:
+    return 2;
+  case llvm::Type::FloatTyID:
+    return 4;
+  case llvm::Type::DoubleTyID:
+    return 8;
+  case llvm::Type::IntegerTyID:
+    switch (Ty->getIntegerBitWidth()) {
+    case 8:
+      return 1;
+    case 16:
+      return 2;
+    case 32:
+      return 4;
+    case 64:
+      return 8;
+    }
+  default:
+    llvm::report_fatal_error("unsupported type");
+  }
+}
+
+bool DirectXCallLowering::lowerFormalArguments(
+    MachineIRBuilder &MIRBuilder, const Function &F,
+    ArrayRef<ArrayRef<Register>> VRegs, FunctionLoweringInfo &FLI) const {
+
+  MachineFunction &MF = MIRBuilder.getMF();
+  MachineRegisterInfo *MRI = MIRBuilder.getMRI();
+  MachineBasicBlock &MBB = MIRBuilder.getMBB();
+  if (F.isDeclaration())
+    return false;
+
+  if (!MBB.isEntryBlock())
+    return false;
+
+  auto &BB = F.getEntryBlock();
+  // llvm::DenseMap<std::string, const AllocaInst*> AllocaMap;
+  std::map<std::string, const AllocaInst *> AllocaMap;
+  for (const Instruction &I : BB) {
+    if (const AllocaInst *AI = dyn_cast<const AllocaInst>(&I))
+      AllocaMap[AI->getName().str()] = AI;
+  }
+
+  const auto &STI = MIRBuilder.getMF().getSubtarget();
+  unsigned VRegsIndex = 0;
+  for (const Argument &Arg : F.args()) {
+    if (MIRBuilder.getDataLayout().getTypeStoreSize(Arg.getType()).isZero())
+      continue; // Don't handle zero sized types.
+
+    llvm::Type *ArgTy = Arg.getType();
+    LLT ArgLLT = LLT::scalar(Arg.getType()->getScalarSizeInBits());
+    MRI->setRegClass(VRegs[VRegsIndex][0], &dxil::IDRegClass);
+    MRI->setType(VRegs[VRegsIndex][0], ArgLLT);
+    MF.addLiveIn(VRegs[VRegsIndex][0], &dxil::IDRegClass);
+
+    auto MIB = MIRBuilder.buildInstr(dxil::AllocaDXILInst);
+    MIB.addDef(VRegs[VRegsIndex][0]).addImm(ArgTy->getTypeID());
+    auto It = AllocaMap.find(Arg.getName().str());
+    if (It == AllocaMap.end()) {
+      MIB.addImm(typeIdToAlignment(Arg.getType()));
+    } else {
+      MIB.addImm(It->second->getAlign().value());
+    }
+    llvm::Metadata *OpType =
+        llvm::MDString::get(MIRBuilder.getContext(), typeIdTShortName(ArgTy));
+    llvm::MDNode *OpTypeNode =
+        llvm::MDNode::get(MIRBuilder.getContext(), OpType);
+    MIB.addMetadata(OpTypeNode);
+    MIB.constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
+                         *STI.getRegBankInfo());
+
+    ++VRegsIndex;
+  }
+  return true;
 }
 
 bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
@@ -61,6 +151,7 @@ bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
         llvm::MDNode::get(MIRBuilder.getContext(), OpType);
     const auto &STI = MIRBuilder.getMF().getSubtarget();
     return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
+        .addImm(RetTy->getTypeID())
         .addUse(VRegs[0])
         // Save type as meta data for now.
         .addMetadata(OpTypeNode)

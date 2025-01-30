@@ -12,7 +12,7 @@
 
 include "DirectXInstrFormats.td"
 
-
+def AllocaDXILInst : PseudoDXILInst<(outs ID:$res), (ins i32imm:$typeEnum, i32imm:$a), "$res = alloca $typeEnum, align $a">;
 def ReturnDXILInst: SimplePseudoDXILInst<"ret void">;
 //def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret, TYPE:$type), "ret $type $ret">;
-def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret), "ret $ret">;
+def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;

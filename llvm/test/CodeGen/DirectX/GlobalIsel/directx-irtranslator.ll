@@ -9,24 +9,49 @@ define void @test_void_return() #0 {
 define float @test_float_return() #0 {
   ; CHECK-LABEL: name: test_float_return
   ; CHECK: G_FCONSTANT float 0.000000e+00
-  ; CHECK: ReturnValueDXILInst %0(s32), <{{.*}}>
+  ; CHECK: ReturnValueDXILInst 2, %0(s32), <{{.*}}>
   ret float 0.000000e+00
 }
 
-;declare float @llvm.cos.f32(float)
-;define float @test_cos_f32(float %x) #0 {
-;  ; IGNORE-LABEL: name: test_cos_f32
-;  ; IGNORE: %{{[0-9]+}}:_(s32) = G_FCOS %{{[0-9]+}}
-;  %y = call float @llvm.cos.f32(float %x)
-;  ret float %y
-;}
+define float @test_float_return_arg(float %x) #0 {
+  ; CHECK-LABEL: name: test_float_return_arg
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 2, 4, <{{.*}}>
+  ; CHECK-NEXT: ReturnValueDXILInst 2, %0(s32), <{{.*}}>
+  ret float %x
+}
 
-;declare float @llvm.sin.f32(float)
-;define float @test_sin_f32(float %x) #0 {
-;  ; IGNORE-LABEL: name: test_sin_f32
-;  ; IGNORE: %{{[0-9]+}}:_(s32) = G_FSIN %{{[0-9]+}}
-;  %y = call float @llvm.sin.f32(float %x)
-;  ret float %y
-;}
+define i32 @test_i32_add_args(i32 %x, i32 %y) #0 {
+  ; CHECK-LABEL: name: test_i32_add_args
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 12, 4, <{{.*}}>
+  ; CHECK-NEXT: %1:id(s32) = AllocaDXILInst 12, 4, <{{.*}}>
+  ; CHECK-NEXT: %4:id(s32) = G_ADD %0, %1
+  ; CHECK-NEXT: ReturnValueDXILInst 12, %4(s32), <{{.*}}>
+  %z = add i32 %x, %y
+  ret i32 %z
+}
+
+declare float @llvm.cos.f32(float)
+define float @test_cos_f32(float %x) #0 {
+  ; CHECK-LABEL: name: test_cos_f32
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 2, 4, <{{.*}}>
+  ; CHECK-NEXT: %{{[0-9]+}}:id(s32) = G_FCOS %{{[0-9]+}}
+  ; CHECK-NEXT: ReturnValueDXILInst 2, %2(s32), <{{.*}}>
+  %y = call float @llvm.cos.f32(float %x)
+  ret float %y
+}
+
+declare float @llvm.sin.f32(float)
+define float @test_sin_f32(float %x) #0 {
+  ; CHECK-LABEL: name: test_sin_f32
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 2, 4, <{{.*}}>
+  ; CHECK-NEXT: %{{[0-9]+}}:id(s32) = G_FSIN %{{[0-9]+}}
+  ; CHECK-NEXT: ReturnValueDXILInst 2, %2(s32), <{{.*}}>
+  %y = call float @llvm.sin.f32(float %x)
+  ret float %y
+}
 
 attributes #0 = { convergent norecurse nounwind "hlsl.export"}
