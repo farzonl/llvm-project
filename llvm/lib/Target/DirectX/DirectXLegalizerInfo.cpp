@@ -39,7 +39,7 @@ DirectXLegalizerInfo::DirectXLegalizerInfo(const DirectXSubtarget &ST)
   auto AllIntScalars = {S16, S32, S64};
 
   getActionDefinitionsBuilder(
-      {G_FPOW,    G_FEXP2,   G_FLOG2,           G_FABS,
+      {G_FADD,G_FPOW,    G_FEXP2,   G_FLOG2,           G_FABS,
        G_FMINNUM, G_FMAXNUM, G_FCEIL,           G_FCOS,
        G_FSIN,    G_FTAN,    G_FACOS,           G_FASIN,
        G_FATAN,   G_FCOSH,   G_FSINH,           G_FTANH,
@@ -47,7 +47,7 @@ DirectXLegalizerInfo::DirectXLegalizerInfo(const DirectXSubtarget &ST)
        G_FMA})
       .legalFor(AllFloatScalars);
 
-  getActionDefinitionsBuilder({G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_BITREVERSE})
+  getActionDefinitionsBuilder({G_ADD, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_BITREVERSE})
       .legalFor(AllIntScalars);
 
   getActionDefinitionsBuilder({G_LOAD, G_STORE}).legalIf(typeInSet(1, AllPtrs));

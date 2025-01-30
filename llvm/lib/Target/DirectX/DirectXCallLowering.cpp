@@ -109,10 +109,6 @@ bool DirectXCallLowering::lowerFormalArguments(
       continue; // Don't handle zero sized types.
 
     llvm::Type *ArgTy = Arg.getType();
-    LLT ArgLLT = LLT::scalar(Arg.getType()->getScalarSizeInBits());
-    MRI->setRegClass(VRegs[VRegsIndex][0], &dxil::IDRegClass);
-    MRI->setType(VRegs[VRegsIndex][0], ArgLLT);
-    MF.addLiveIn(VRegs[VRegsIndex][0], &dxil::IDRegClass);
 
     auto MIB = MIRBuilder.buildInstr(dxil::AllocaDXILInst);
     MIB.addDef(VRegs[VRegsIndex][0]).addImm(ArgTy->getTypeID());
