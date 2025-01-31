@@ -30,8 +30,9 @@ DirectXRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
 }
 BitVector
 DirectXRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
-  return BitVector();
+  return BitVector(getNumRegs());
 }
+
 bool DirectXRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
                                               int SPAdj, unsigned FIOperandNum,
                                               RegScavenger *RS) const {

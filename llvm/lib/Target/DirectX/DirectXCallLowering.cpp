@@ -18,6 +18,8 @@
 #include "MCTargetDesc/DirectXMCTargetDesc.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Type.h"
 #include <cstdint>
 
 using namespace llvm;
@@ -25,47 +27,57 @@ using namespace llvm;
 DirectXCallLowering::DirectXCallLowering(const DirectXTargetLowering &TLI)
     : CallLowering(&TLI) {}
 
-static std::string typeIdToName(llvm::Type *Ty) {
+static std::string typeIdToName(Type *Ty) {
   switch (Ty->getTypeID()) {
-  case llvm::Type::VoidTyID:
+  case Type::VoidTyID:
     return "void";
-  case llvm::Type::HalfTyID:
+  case Type::HalfTyID:
     return "half";
-  case llvm::Type::FloatTyID:
+  case Type::FloatTyID:
     return "float";
-  case llvm::Type::DoubleTyID:
+  case Type::DoubleTyID:
     return "double";
-  case llvm::Type::IntegerTyID:
+  case Type::IntegerTyID:
     return "i" + std::to_string(Ty->getIntegerBitWidth());
+  case Type::FixedVectorTyID: {
+    auto *VecTy = static_cast<FixedVectorType*>(Ty);
+    Type* ElementType = VecTy->getElementType();
+    return "<" +  std::to_string(VecTy->getNumElements()) + " x " + typeIdToName(ElementType)+">";
+  }
   default:
-    llvm::report_fatal_error("unsupported type");
+    report_fatal_error("unsupported type");
   }
 }
 
-static std::string typeIdTShortName(llvm::Type *Ty) {
+static std::string typeIdTShortName(Type *Ty) {
   switch (Ty->getTypeID()) {
-  case llvm::Type::HalfTyID:
+  case Type::HalfTyID:
     return "f16";
-  case llvm::Type::FloatTyID:
+  case Type::FloatTyID:
     return "f32";
-  case llvm::Type::DoubleTyID:
+  case Type::DoubleTyID:
     return "f64";
-  case llvm::Type::IntegerTyID:
+  case Type::IntegerTyID:
     return "i" + std::to_string(Ty->getIntegerBitWidth());
+  case llvm::Type::FixedVectorTyID: {
+    auto *VecTy = static_cast<FixedVectorType*>(Ty);
+    Type* ElementType = VecTy->getElementType();
+    return "v"+ std::to_string(VecTy->getNumElements())+ typeIdTShortName(ElementType);
+  }
   default:
-    llvm::report_fatal_error("unsupported type");
+    report_fatal_error("unsupported type");
   }
 }
 
-static uint64_t typeIdToAlignment(llvm::Type *Ty) {
+static uint64_t typeIdToAlignment(Type *Ty) {
   switch (Ty->getTypeID()) {
-  case llvm::Type::HalfTyID:
+  case Type::HalfTyID:
     return 2;
-  case llvm::Type::FloatTyID:
+  case Type::FloatTyID:
     return 4;
-  case llvm::Type::DoubleTyID:
+  case Type::DoubleTyID:
     return 8;
-  case llvm::Type::IntegerTyID:
+  case Type::IntegerTyID:
     switch (Ty->getIntegerBitWidth()) {
     case 8:
       return 1;
@@ -76,8 +88,13 @@ static uint64_t typeIdToAlignment(llvm::Type *Ty) {
     case 64:
       return 8;
     }
+  case Type::FixedVectorTyID: {
+     auto *VecTy = static_cast<FixedVectorType*>(Ty);
+    Type* ElementType = VecTy->getElementType();
+    return typeIdToAlignment(ElementType);
+  }
   default:
-    llvm::report_fatal_error("unsupported type");
+    report_fatal_error("unsupported type");
   }
 }
 
@@ -85,8 +102,6 @@ bool DirectXCallLowering::lowerFormalArguments(
     MachineIRBuilder &MIRBuilder, const Function &F,
     ArrayRef<ArrayRef<Register>> VRegs, FunctionLoweringInfo &FLI) const {
 
-  MachineFunction &MF = MIRBuilder.getMF();
-  MachineRegisterInfo *MRI = MIRBuilder.getMRI();
   MachineBasicBlock &MBB = MIRBuilder.getMBB();
   if (F.isDeclaration())
     return false;
@@ -95,7 +110,7 @@ bool DirectXCallLowering::lowerFormalArguments(
     return false;
 
   auto &BB = F.getEntryBlock();
-  // llvm::DenseMap<std::string, const AllocaInst*> AllocaMap;
+  // DenseMap<std::string, const AllocaInst*> AllocaMap;
   std::map<std::string, const AllocaInst *> AllocaMap;
   for (const Instruction &I : BB) {
     if (const AllocaInst *AI = dyn_cast<const AllocaInst>(&I))
@@ -108,7 +123,7 @@ bool DirectXCallLowering::lowerFormalArguments(
     if (MIRBuilder.getDataLayout().getTypeStoreSize(Arg.getType()).isZero())
       continue; // Don't handle zero sized types.
 
-    llvm::Type *ArgTy = Arg.getType();
+    Type *ArgTy = Arg.getType();
 
     auto MIB = MIRBuilder.buildInstr(dxil::AllocaDXILInst);
     MIB.addDef(VRegs[VRegsIndex][0]).addImm(ArgTy->getTypeID());
@@ -118,10 +133,10 @@ bool DirectXCallLowering::lowerFormalArguments(
     } else {
       MIB.addImm(It->second->getAlign().value());
     }
-    llvm::Metadata *OpType =
-        llvm::MDString::get(MIRBuilder.getContext(), typeIdTShortName(ArgTy));
-    llvm::MDNode *OpTypeNode =
-        llvm::MDNode::get(MIRBuilder.getContext(), OpType);
+    Metadata *OpType =
+        MDString::get(MIRBuilder.getContext(), typeIdTShortName(ArgTy));
+    MDNode *OpTypeNode =
+        MDNode::get(MIRBuilder.getContext(), OpType);
     MIB.addMetadata(OpTypeNode);
     MIB.constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
                          *STI.getRegBankInfo());
@@ -140,11 +155,11 @@ bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
   if (VRegs.size() > 1)
     return false;
   if (Val) {
-    llvm::Type *RetTy = Val->getType();
-    llvm::Metadata *OpType =
-        llvm::MDString::get(MIRBuilder.getContext(), typeIdToName(RetTy));
-    llvm::MDNode *OpTypeNode =
-        llvm::MDNode::get(MIRBuilder.getContext(), OpType);
+    Type *RetTy = Val->getType();
+    Metadata *OpType =
+        MDString::get(MIRBuilder.getContext(), typeIdToName(RetTy));
+    MDNode *OpTypeNode =
+        MDNode::get(MIRBuilder.getContext(), OpType);
     const auto &STI = MIRBuilder.getMF().getSubtarget();
     return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
         .addImm(RetTy->getTypeID())
