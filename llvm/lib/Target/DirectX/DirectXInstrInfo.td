@@ -13,6 +13,16 @@
 include "DirectXInstrFormats.td"
 
 def AllocaDXILInst : PseudoDXILInst<(outs ID:$res), (ins i32imm:$typeEnum, i32imm:$a), "$res = alloca $typeEnum, align $a">;
-def ReturnDXILInst: SimplePseudoDXILInst<"ret void">;
-//def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret, TYPE:$type), "ret $type $ret">;
-def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;
+
+let isReturn = 1, hasDelaySlot = 0, isBarrier = 0, isTerminator = 1, isNotDuplicable = 1 in {
+    def ReturnDXILInst: SimplePseudoDXILInst<"ret void">;
+    def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;
+}
+
+//def SinDXILInst : UnaryDXILInst<13>;
+
+def UnaryDXILInst:  
+  DXILInst<0, 
+          (outs ID:$res), 
+          (ins i32imm:$Opcode, ID:$arg, i32imm:$typeEnum), 
+          "call $typeEnum @dx.op.unary.f32(i32 $Opcode, $typeEnum $arg)">{}
