@@ -31,4 +31,10 @@ class PseudoDXILInst<dag outs, dag ins, string asmstr> :  DXILInst<0, outs, ins,
   let hasSideEffects = 0;
 }
 
+//class UnaryDXILInst<bits<16> Opcode>:  
+//  DXILInst<Opcode, 
+//          (outs ID:$res), 
+//          (ins ID:$arg, i32imm:$typeEnum), 
+//          "call $typeEnum @dx.op.unary.f32(i32 $Opcode, $typeEnum $arg)">{}
+
 class SimplePseudoDXILInst<string name>: PseudoDXILInst<(outs), (ins), name>;
