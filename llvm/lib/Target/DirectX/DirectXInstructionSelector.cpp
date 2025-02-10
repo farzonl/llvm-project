@@ -12,13 +12,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DXILConstants.h"
 #include "DirectXTargetMachine.h"
+#include "MCTargetDesc/DirectXMCTargetDesc.h"
 #include "llvm/CodeGen/GlobalISel/GIMatchTableExecutorImpl.h" // need for DirectXGenGlobalISel.inc
 #include "llvm/CodeGen/GlobalISel/InstructionSelector.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
-#include "DXILConstants.h"
-#include "MCTargetDesc/DirectXMCTargetDesc.h"
 
 #define DEBUG_TYPE "directx-isel"
 
@@ -57,7 +57,8 @@ private:
   bool selectImpl(MachineInstr &I, CodeGenCoverage &CoverageInfo) const;
 
   bool dxilSelect(Register ResVReg, MachineInstr &I) const;
-  bool dxilSelectOp(Register ResVReg, MachineInstr &I, int MCIDOpcode, dxil::OpCode Op) const;
+  bool dxilSelectOp(Register ResVReg, MachineInstr &I, int MCIDOpcode,
+                    dxil::OpCode Op) const;
 };
 
 #define GET_GLOBALISEL_IMPL
@@ -78,11 +79,20 @@ DirectXInstructionSelector::DirectXInstructionSelector(
 {
 }
 
-bool DirectXInstructionSelector::select(MachineInstr &I) { 
+bool DirectXInstructionSelector::select(MachineInstr &I) {
+
+  assert(I.getParent() && "Instruction should be in a basic block!");
+  assert(I.getParent()->getParent() && "Instruction should be in a function!");
+
+  Register Opcode = I.getOpcode();
+  if (!isPreISelGenericOpcode(Opcode)) {
+
+    return constrainSelectedInstRegOperands(I, TII, TRI, RBI);
+  }
 
   bool HasDefs = I.getNumDefs() > 0;
   Register ResVReg = HasDefs ? I.getOperand(0).getReg() : Register(0);
-  assert(!HasDefs || I.getOpcode() == TargetOpcode::G_GLOBAL_VALUE);
+  // assert(!HasDefs || I.getOpcode() == TargetOpcode::G_GLOBAL_VALUE);
   if (dxilSelect(ResVReg, I)) {
     I.removeFromParent();
     return true;
@@ -90,30 +100,31 @@ bool DirectXInstructionSelector::select(MachineInstr &I) {
   return false;
 }
 
-bool DirectXInstructionSelector::dxilSelectOp(Register ResVReg, MachineInstr &I, int MCIDOpcode, dxil::OpCode Op) const {
+bool DirectXInstructionSelector::dxilSelectOp(Register ResVReg, MachineInstr &I,
+                                              int MCIDOpcode,
+                                              dxil::OpCode Op) const {
   MachineBasicBlock &BB = *I.getParent();
-  auto MIB = BuildMI(BB, I, I.getDebugLoc(), /*I.getDesc()*/TII.get(MCIDOpcode))
-            .addDef(ResVReg)
-            .addImm(static_cast<uint64_t>(Op));
+  auto MIB =
+      BuildMI(BB, I, I.getDebugLoc(), /*I.getDesc()*/ TII.get(MCIDOpcode))
+          .addDef(ResVReg);
   const unsigned NumOps = I.getNumOperands();
   unsigned Index = 1;
   for (; Index < NumOps; ++Index)
     MIB.add(I.getOperand(Index));
   return MIB.constrainAllUses(TII, TRI, RBI);
-  
 }
 
 bool DirectXInstructionSelector::dxilSelect(Register ResVReg,
-                                         MachineInstr &I) const {
+                                            MachineInstr &I) const {
 
   const unsigned Opcode = I.getOpcode();
   switch (Opcode) {
-    case TargetOpcode::G_FCOS:
-      return dxilSelectOp(ResVReg, I, dxil::UnaryDXILInst, dxil::OpCode::Cos);
-    case TargetOpcode::G_FSIN:
-      return dxilSelectOp(ResVReg, I, dxil::UnaryDXILInst, dxil::OpCode::Sin);
-    default:
-      return false;
+  case TargetOpcode::G_FCOS:
+    return dxilSelectOp(ResVReg, I, dxil::CosfDXILInst, dxil::OpCode::Cos);
+  case TargetOpcode::G_FSIN:
+    return dxilSelectOp(ResVReg, I, dxil::SinfDXILInst, dxil::OpCode::Sin);
+  default:
+    return false;
   }
 }
 namespace llvm {

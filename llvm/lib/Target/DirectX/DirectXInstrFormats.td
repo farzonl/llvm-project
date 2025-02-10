@@ -31,10 +31,13 @@ class PseudoDXILInst<dag outs, dag ins, string asmstr> :  DXILInst<0, outs, ins,
   let hasSideEffects = 0;
 }
 
-//class UnaryDXILInst<bits<16> Opcode>:  
-//  DXILInst<Opcode, 
-//          (outs ID:$res), 
-//          (ins ID:$arg, i32imm:$typeEnum), 
-//          "call $typeEnum @dx.op.unary.f32(i32 $Opcode, $typeEnum $arg)">{}
+class UnaryDXILInst<bits<16> Opcode, string TypeName, string TypeNameShort>:  
+  DXILInst<Opcode, 
+           (outs ID:$res),           
+           (ins ID:$arg), 
+          "call #TypeName# @dx.op.unary.#TypeNameShort#(i32 $Opcode, #TypeName# $arg)">{}
+
+class UnaryDXILInstFloat<bits<16> Opcode>: UnaryDXILInst<Opcode, "float", "f32">{}
+class UnaryDXILInstHalf<bits<16> Opcode>: UnaryDXILInst<Opcode,  "half", "f16">{}
 
 class SimplePseudoDXILInst<string name>: PseudoDXILInst<(outs), (ins), name>;

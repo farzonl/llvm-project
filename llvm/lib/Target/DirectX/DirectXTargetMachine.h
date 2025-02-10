@@ -33,6 +33,8 @@ public:
 
   ~DirectXTargetMachine() override;
 
+  bool usesPhysRegsForValues() const override { return false; }
+
   bool addPassesToEmitFile(PassManagerBase &PM, raw_pwrite_stream &Out,
                            raw_pwrite_stream *DwoOut, CodeGenFileType FileType,
                            bool DisableVerify,

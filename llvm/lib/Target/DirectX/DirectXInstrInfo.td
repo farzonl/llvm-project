@@ -19,10 +19,7 @@ let isReturn = 1, hasDelaySlot = 0, isBarrier = 0, isTerminator = 1, isNotDuplic
     def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;
 }
 
-//def SinDXILInst : UnaryDXILInst<13>;
-
-def UnaryDXILInst:  
-  DXILInst<0, 
-          (outs ID:$res), 
-          (ins i32imm:$Opcode, ID:$arg, i32imm:$typeEnum), 
-          "call $typeEnum @dx.op.unary.f32(i32 $Opcode, $typeEnum $arg)">{}
+def SinfDXILInst : UnaryDXILInstFloat<13>;
+def Sinf16DXILInst : UnaryDXILInstHalf<13>;
+def CosfDXILInst : UnaryDXILInstFloat<12>;
+def Cosf16DXILInst : UnaryDXILInstHalf<12>;
