@@ -1,5 +1,4 @@
-//===- DirectXInstructionSelector.cpp ------------------------------*- C++
-//-*-==//
+//===- DirectXInstructionSelector.cpp -----------------------------*- C++-*-==//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -120,9 +119,9 @@ bool DirectXInstructionSelector::dxilSelect(Register ResVReg,
   const unsigned Opcode = I.getOpcode();
   switch (Opcode) {
   case TargetOpcode::G_FCOS:
-    return dxilSelectOp(ResVReg, I, dxil::CosfDXILInst, dxil::OpCode::Cos);
+    return dxilSelectOp(ResVReg, I, dxil::CosDXILInst, dxil::OpCode::Cos);
   case TargetOpcode::G_FSIN:
-    return dxilSelectOp(ResVReg, I, dxil::SinfDXILInst, dxil::OpCode::Sin);
+    return dxilSelectOp(ResVReg, I, dxil::SinDXILInst, dxil::OpCode::Sin);
   default:
     return false;
   }

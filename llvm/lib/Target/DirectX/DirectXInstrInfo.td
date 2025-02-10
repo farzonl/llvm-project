@@ -19,7 +19,13 @@ let isReturn = 1, hasDelaySlot = 0, isBarrier = 0, isTerminator = 1, isNotDuplic
     def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;
 }
 
-def SinfDXILInst : UnaryDXILInstFloat<13>;
-def Sinf16DXILInst : UnaryDXILInstHalf<13>;
-def CosfDXILInst : UnaryDXILInstFloat<12>;
-def Cosf16DXILInst : UnaryDXILInstHalf<12>;
+def SinDXILInst : UnaryDXILInst<13> {
+  let arguments = [OverloadTy];
+  let result = OverloadTy;
+  let overloads = [Overloads<[HalfTy, FloatTy]>];
+}
+def CosDXILInst : UnaryDXILInst<12> {
+  let arguments = [OverloadTy];
+  let result = OverloadTy;
+  let overloads = [Overloads<[HalfTy, FloatTy]>];
+}
