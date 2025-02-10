@@ -40,9 +40,10 @@ static std::string typeIdToName(Type *Ty) {
   case Type::IntegerTyID:
     return "i" + std::to_string(Ty->getIntegerBitWidth());
   case Type::FixedVectorTyID: {
-    auto *VecTy = static_cast<FixedVectorType*>(Ty);
-    Type* ElementType = VecTy->getElementType();
-    return "<" +  std::to_string(VecTy->getNumElements()) + " x " + typeIdToName(ElementType)+">";
+    auto *VecTy = static_cast<FixedVectorType *>(Ty);
+    Type *ElementType = VecTy->getElementType();
+    return "<" + std::to_string(VecTy->getNumElements()) + " x " +
+           typeIdToName(ElementType) + ">";
   }
   default:
     report_fatal_error("unsupported type");
@@ -60,9 +61,10 @@ static std::string typeIdTShortName(Type *Ty) {
   case Type::IntegerTyID:
     return "i" + std::to_string(Ty->getIntegerBitWidth());
   case llvm::Type::FixedVectorTyID: {
-    auto *VecTy = static_cast<FixedVectorType*>(Ty);
-    Type* ElementType = VecTy->getElementType();
-    return "v"+ std::to_string(VecTy->getNumElements())+ typeIdTShortName(ElementType);
+    auto *VecTy = static_cast<FixedVectorType *>(Ty);
+    Type *ElementType = VecTy->getElementType();
+    return "v" + std::to_string(VecTy->getNumElements()) +
+           typeIdTShortName(ElementType);
   }
   default:
     report_fatal_error("unsupported type");
@@ -89,8 +91,8 @@ static uint64_t typeIdToAlignment(Type *Ty) {
       return 8;
     }
   case Type::FixedVectorTyID: {
-     auto *VecTy = static_cast<FixedVectorType*>(Ty);
-    Type* ElementType = VecTy->getElementType();
+    auto *VecTy = static_cast<FixedVectorType *>(Ty);
+    Type *ElementType = VecTy->getElementType();
     return typeIdToAlignment(ElementType);
   }
   default:
@@ -135,8 +137,7 @@ bool DirectXCallLowering::lowerFormalArguments(
     }
     Metadata *OpType =
         MDString::get(MIRBuilder.getContext(), typeIdTShortName(ArgTy));
-    MDNode *OpTypeNode =
-        MDNode::get(MIRBuilder.getContext(), OpType);
+    MDNode *OpTypeNode = MDNode::get(MIRBuilder.getContext(), OpType);
     MIB.addMetadata(OpTypeNode);
     MIB.constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
                          *STI.getRegBankInfo());
@@ -158,8 +159,7 @@ bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
     Type *RetTy = Val->getType();
     Metadata *OpType =
         MDString::get(MIRBuilder.getContext(), typeIdToName(RetTy));
-    MDNode *OpTypeNode =
-        MDNode::get(MIRBuilder.getContext(), OpType);
+    MDNode *OpTypeNode = MDNode::get(MIRBuilder.getContext(), OpType);
     const auto &STI = MIRBuilder.getMF().getSubtarget();
     return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
         .addImm(RetTy->getTypeID())
