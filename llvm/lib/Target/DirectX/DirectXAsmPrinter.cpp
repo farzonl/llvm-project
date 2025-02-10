@@ -104,8 +104,7 @@ bool DXILAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
   if (EnableDirectXGlobalIsel)
     return true;
   if (ExtraCode && ExtraCode[0])
-    return true; // Invalid instruction - SPIR-V does not have special modifiers
-
+    return true; // Invalid instruction
   printOperand(MI, OpNo, O);
   return false;
 }

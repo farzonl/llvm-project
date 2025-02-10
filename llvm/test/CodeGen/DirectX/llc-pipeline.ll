@@ -6,10 +6,10 @@
 ; CHECK-LABEL: Pass Arguments:
 ; CHECK-NEXT: Target Library Information
 ; CHECK-NEXT: Target Pass Configuration
+; CHECK-NEXT: Machine Module Information
 ; CHECK-NEXT: DXIL Resource Type Analysis
 ; CHECK-NEXT: Target Transform Information
 
-; CHECK-OBJ-NEXT: Machine Module Information
 ; CHECK-OBJ-NEXT: Machine Branch Probability Analysis
 ; CHECK-OBJ-NEXT: Create Garbage Collector Module Metadata
 

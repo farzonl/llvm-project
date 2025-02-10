@@ -1,5 +1,4 @@
-//===- DirectXLegalizerInfo.h --- SPIR-V Legalization Rules --------*- C++
-//-*-==//
+//===- DirectXLegalizerInfo.h --- DX Legalization Rules -----------*- C++-*-==//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares the targeting of the MachineLegalizer class for SPIR-V.
+// This file declares the targeting of the MachineLegalizer class for DirectX.
 //
 //===----------------------------------------------------------------------===//
 

@@ -7,12 +7,30 @@ define void @test_void_return() #0 {
   ret void
 }
 
+define float @test_float_return() #0 {
+  ; CHECK-LABEL: name: test_float_return
+  ; CHECK: G_FCONSTANT float 0.000000e+00
+  ; CHECK: ReturnValueDXILInst 2, %0(s32), <{{.*}}>
+  ret float 0.000000e+00
+}
+
 define float @test_float_return_arg(float %x) #0 {
   ; CHECK-LABEL: name: test_float_return_arg
   ; CHECK: bb.1 (%ir-block.0):
   ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 2, 4, <{{.*}}>
   ; CHECK-NEXT: ReturnValueDXILInst 2, %0(s32), <{{.*}}>
   ret float %x
+}
+
+define i32 @test_i32_add_args(i32 %x, i32 %y) #0 {
+  ; CHECK-LABEL: name: test_i32_add_args
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id(s32) = AllocaDXILInst 12, 4, <{{.*}}>
+  ; CHECK-NEXT: %1:id(s32) = AllocaDXILInst 12, 4, <{{.*}}>
+  ; CHECK-NEXT: %2:id(s32) = G_ADD %0, %1
+  ; CHECK-NEXT: ReturnValueDXILInst 12, %2(s32), <{{.*}}>
+  %z = add i32 %x, %y
+  ret i32 %z
 }
 
 declare float @llvm.cos.f32(float)
