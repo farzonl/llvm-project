@@ -1,5 +1,6 @@
 add_llvm_component_library(LLVMDirectXInfo
   DirectXTargetInfo.cpp
+  DirectXFlags.cpp
 
   LINK_COMPONENTS
   MC

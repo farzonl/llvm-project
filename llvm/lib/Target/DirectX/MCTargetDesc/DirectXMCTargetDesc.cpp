@@ -143,6 +143,7 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTargetMC() {
   TargetRegistry::RegisterMCInstPrinter(T, createDXILMCInstPrinter);
   TargetRegistry::RegisterMCRegInfo(T, createDirectXMCRegisterInfo);
   TargetRegistry::RegisterMCSubtargetInfo(T, createDirectXMCSubtargetInfo);
+  //TargetRegistry::RegisterMCCodeEmitter(T, createDirectXMCCodeEmitter);
   TargetRegistry::RegisterMCCodeEmitter(T, createDXILMCCodeEmitter);
   TargetRegistry::RegisterMCAsmBackend(T, createDXILMCAsmBackend);
 }

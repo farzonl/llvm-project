@@ -21,6 +21,7 @@
 #include "DXILResourceAnalysis.h"
 #include "DXILShaderFlags.h"
 #include "DXILTranslateMetadata.h"
+#include "TargetInfo/DirectXFlags.h"
 #include "DXILWriter/DXILWriterPass.h"
 #include "DirectX.h"
 #include "DirectXSubtarget.h"
@@ -53,11 +54,6 @@
 #include <optional>
 
 using namespace llvm;
-
-cl::opt<bool> llvm::EnableDirectXGlobalIsel(
-    "enable-directx-global-isel",
-    cl::desc("Enable the DirectX GlobalIsel target"), cl::Optional,
-    cl::init(false));
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTarget() {
   RegisterTargetMachine<DirectXTargetMachine> X(getTheDirectXTarget());

@@ -14,6 +14,8 @@
 #include "llvm/MC/MCCodeEmitter.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCInstrInfo.h"
+#include "TargetInfo/DirectXFlags.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "directx-mccodeemitter"
@@ -45,8 +47,10 @@ void DirectXMCCodeEmitter::encodeInstruction(const MCInst &MI,
                                              SmallVectorImpl<char> &CB,
                                              SmallVectorImpl<MCFixup> &Fixups,
                                              const MCSubtargetInfo &STI) const {
+  if(EnableDirectXGlobalIsel) {
   /*const uint64_t OpCode =*/getBinaryCodeForInstr(MI, Fixups, STI);
   /// TODO
+  }
 }
 
 MCCodeEmitter *llvm::createDirectXMCCodeEmitter(const MCInstrInfo &MCII,

@@ -14,7 +14,7 @@
 #include "DirectXSubtarget.h"
 #include "DirectX.h"
 #include "DirectXTargetLowering.h"
-#include "DirectXTargetMachine.h"
+#include "TargetInfo/DirectXFlags.h"
 
 using namespace llvm;
 

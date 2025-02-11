@@ -17,8 +17,6 @@
 
 namespace llvm {
 
-extern llvm::cl::opt<bool> EnableDirectXGlobalIsel;
-
 class Function;
 class DirectXTargetMachine : public CodeGenTargetMachineImpl {
   std::unique_ptr<TargetLoweringObjectFile> TLOF;

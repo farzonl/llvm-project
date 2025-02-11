@@ -1,6 +1,7 @@
 add_llvm_component_library(LLVMDirectXDesc
   DirectXContainerObjectWriter.cpp
   DirectXMCTargetDesc.cpp
+  DirectXMCCodeEmitter.cpp
 
   LINK_COMPONENTS
   DirectXInfo

@@ -38,9 +38,6 @@ public:
   StringRef getPassName() const override { return "DXIL Assembly Printer"; }
   void emitGlobalVariable(const GlobalVariable *GV) override;
   bool runOnMachineFunction(MachineFunction &MF) override { return false; }
-  void printOperand(const MachineInstr *MI, int OpNum, raw_ostream &O);
-  bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
-                       const char *ExtraCode, raw_ostream &O) override;
 };
 } // namespace
 
@@ -55,58 +52,6 @@ void DXILAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   MCSection *TheSection = getObjFileLowering().SectionForGlobal(GV, GVKind, TM);
   OutStreamer->switchSection(TheSection);
   emitGlobalConstant(GV->getDataLayout(), GV->getInitializer());
-}
-
-void DXILAsmPrinter::printOperand(const MachineInstr *MI, int OpNum,
-                                  raw_ostream &O) {
-  const MachineOperand &MO = MI->getOperand(OpNum);
-
-  switch (MO.getType()) {
-  case MachineOperand::MO_Register:
-    O << MO.getReg();
-    break;
-
-  case MachineOperand::MO_Immediate:
-    O << MO.getImm();
-    break;
-
-  case MachineOperand::MO_FPImmediate:
-    O << MO.getFPImm();
-    break;
-
-  case MachineOperand::MO_MachineBasicBlock:
-    O << *MO.getMBB()->getSymbol();
-    break;
-
-  case MachineOperand::MO_GlobalAddress:
-    O << *getSymbol(MO.getGlobal());
-    break;
-
-  case MachineOperand::MO_BlockAddress: {
-    MCSymbol *BA = GetBlockAddressSymbol(MO.getBlockAddress());
-    O << BA->getName();
-    break;
-  }
-
-  case MachineOperand::MO_ExternalSymbol:
-    O << *GetExternalSymbolSymbol(MO.getSymbolName());
-    break;
-
-  case MachineOperand::MO_JumpTableIndex:
-  case MachineOperand::MO_ConstantPoolIndex:
-  default:
-    llvm_unreachable("<unknown operand type>");
-  }
-}
-
-bool DXILAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
-                                     const char *ExtraCode, raw_ostream &O) {
-  if (EnableDirectXGlobalIsel)
-    return true;
-  if (ExtraCode && ExtraCode[0])
-    return true; // Invalid instruction
-  printOperand(MI, OpNo, O);
-  return false;
 }
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXAsmPrinter() {
