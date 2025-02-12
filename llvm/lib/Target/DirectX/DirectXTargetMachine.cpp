@@ -172,7 +172,9 @@ bool DirectXTargetMachine::addPassesToEmitFile(
 
   if (EnableDirectXGlobalIsel && FileType != CodeGenFileType::Null) {
     PM.add(createPrintMIRPass(Out));
-    // return false;
+    if (addAsmPrinter(PM, Out, DwoOut, FileType, MMIWP->getMMI().getContext()))
+      return true;
+    return false;
   }
   switch (FileType) {
   case CodeGenFileType::AssemblyFile:

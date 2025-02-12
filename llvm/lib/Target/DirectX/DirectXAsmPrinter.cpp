@@ -19,7 +19,10 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 
-#include "DirectXTargetMachine.h" //
+#include "DirectXInstrInfo.h"
+#include "DirectXMCInstLower.h"
+#include "DirectXSubtarget.h"
+#include "TargetInfo/DirectXFlags.h"
 
 using namespace llvm;
 
@@ -37,9 +40,105 @@ public:
 
   StringRef getPassName() const override { return "DXIL Assembly Printer"; }
   void emitGlobalVariable(const GlobalVariable *GV) override;
-  bool runOnMachineFunction(MachineFunction &MF) override { return false; }
+  bool runOnMachineFunction(MachineFunction &MF) override;
+  // helpers
+  void outputMCInst(MCInst &Inst);
+  void outputInstruction(const MachineInstr *MI);
+
+  // overides
+  void emitInstruction(const MachineInstr *MI) override;
+  void emitFunctionHeader() override;
+  void emitFunctionBodyEnd() override;
+  void emitBasicBlockStart(const MachineBasicBlock &MBB) override;
+
+private:
+  dxil::ModuleAnalysisInfo *MAI;
 };
 } // namespace
+
+bool DXILAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
+  if (!EnableDirectXGlobalIsel)
+    return false;
+  return AsmPrinter::runOnMachineFunction(MF);
+}
+
+void DXILAsmPrinter::outputMCInst(MCInst &Inst) {
+  const DirectXSubtarget *ST = &MF->getSubtarget<DirectXSubtarget>();
+  OutStreamer->emitInstruction(Inst, *ST);
+}
+
+void DXILAsmPrinter::outputInstruction(const MachineInstr *MI) {
+  DirectXMCInstLower MCInstLowering;
+  MCInst TmpInst;
+  MCInstLowering.lower(MI, TmpInst, MAI);
+  outputMCInst(TmpInst);
+}
+
+void DXILAsmPrinter::emitInstruction(const MachineInstr *MI) {
+
+  if (!EnableDirectXGlobalIsel)
+    return;
+
+  outputInstruction(MI);
+}
+
+void DXILAsmPrinter::emitBasicBlockStart(const MachineBasicBlock &MBB) {
+
+  if (!EnableDirectXGlobalIsel)
+    return;
+
+  // Do not emit anything if it's an internal service function.
+  if (MBB.empty())
+    return;
+
+  // If it's the first MBB in MF, it has OpFunction and OpFunctionParameter, so
+  // OpLabel should be output after them.
+  if (MBB.getNumber() == MF->front().getNumber()) {
+    OutStreamer->getCommentOS()
+        << "-- Begin Basic Block "
+        << GlobalValue::dropLLVMManglingEscape(MBB.getName()) << '\n';
+    for (const MachineInstr &MI : MBB)
+      OutStreamer->getCommentOS()
+          << "-- Instruction " << MI.getOpcode() << '\n';
+  }
+}
+
+void DXILAsmPrinter::emitFunctionHeader() {
+
+  if (!EnableDirectXGlobalIsel)
+    return;
+
+  // Get the subtarget from the current MachineFunction.
+  // const DirectXSubtarget* ST = &MF->getSubtarget<DirectXSubtarget>();
+  // const DirectXInstrInfo* TII = ST->getInstrInfo();
+  const Function &F = MF->getFunction();
+
+  if (isVerbose()) {
+    OutStreamer->getCommentOS()
+        << "-- Begin function "
+        << GlobalValue::dropLLVMManglingEscape(F.getName()) << '\n';
+  }
+
+  // auto *Section = getObjFileLowering().SectionForGlobal(&F, TM);
+  // MF->setSection(Section);
+}
+
+void DXILAsmPrinter::emitFunctionBodyEnd() {
+
+  if (!EnableDirectXGlobalIsel)
+    return;
+
+  // Get the subtarget from the current MachineFunction.
+  // const DirectXSubtarget* ST = &MF->getSubtarget<DirectXSubtarget>();
+  // const DirectXInstrInfo* TII = ST->getInstrInfo();
+  const Function &F = MF->getFunction();
+
+  if (isVerbose()) {
+    OutStreamer->getCommentOS()
+        << "-- End function "
+        << GlobalValue::dropLLVMManglingEscape(F.getName()) << '\n';
+  }
+}
 
 void DXILAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   // If there is no initializer, or no explicit section do nothing

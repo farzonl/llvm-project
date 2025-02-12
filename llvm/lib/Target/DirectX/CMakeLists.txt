@@ -22,6 +22,7 @@ add_llvm_target(DirectXCodeGen
   DirectXInstrInfo.cpp
   DirectXInstructionSelector.cpp
   DirectXLegalizerInfo.cpp
+  DirectXMCInstLower.cpp
   DirectXRegisterBanks.cpp
   DirectXRegisterInfo.cpp
   DirectXSubtarget.cpp
