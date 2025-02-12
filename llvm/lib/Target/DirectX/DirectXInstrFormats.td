@@ -82,7 +82,7 @@ class UnaryDXILInst<bits<16> Opcode>:
   DXILInst<Opcode, 
            (outs ID:$res),           
            (ins ID:$arg), 
-           "call #OverloadTy.TypeName# @dx.op.unary.#OverloadTy.TypeNameShort#(i32 $Opcode, #OverloadTy.TypeName# $arg)">
+           "call #OverloadTy.TypeName# @dx.op.unary.#OverloadTy.TypeNameShort#(i32 #Opcode#, #OverloadTy.TypeName# $arg)">
 {
   list<DXILType> arguments = [];
   list<Overloads> overloads = [];

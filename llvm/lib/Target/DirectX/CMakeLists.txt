@@ -2,9 +2,10 @@ add_llvm_component_group(DirectX)
 
 set(LLVM_TARGET_DEFINITIONS DirectX.td)
 
+tablegen(LLVM DirectXGenAsmWriter.inc -gen-asm-writer)
 tablegen(LLVM DirectXGenSubtargetInfo.inc -gen-subtarget)
 tablegen(LLVM DirectXGenGlobalISel.inc -gen-global-isel)
-tablegen(LLVM DXILMCCodeEmitter.inc -gen-emitter)
+tablegen(LLVM DirectXMCCodeEmitter.inc -gen-emitter)
 tablegen(LLVM DirectXGenInstrInfo.inc -gen-instr-info)
 tablegen(LLVM DirectXGenRegisterInfo.inc -gen-register-info)
 tablegen(LLVM DirectXGenRegisterBank.inc -gen-register-bank)

@@ -29,6 +29,8 @@
 #include "llvm/TargetParser/Triple.h"
 #include <memory>
 
+#include "DirectXInstPrinter.h"
+
 using namespace llvm;
 
 #define GET_INSTRINFO_MC_DESC
@@ -42,33 +44,6 @@ using namespace llvm;
 #include "DirectXGenRegisterInfo.inc"
 
 namespace {
-
-// DXILInstPrinter is a null stub because DXIL instructions aren't printed.
-class DXILInstPrinter : public MCInstPrinter {
-public:
-  DXILInstPrinter(const MCAsmInfo &MAI, const MCInstrInfo &MII,
-                  const MCRegisterInfo &MRI)
-      : MCInstPrinter(MAI, MII, MRI) {}
-
-  void printInst(const MCInst *MI, uint64_t Address, StringRef Annot,
-                 const MCSubtargetInfo &STI, raw_ostream &O) override {}
-
-  std::pair<const char *, uint64_t>
-  getMnemonic(const MCInst &MI) const override {
-    return std::make_pair<const char *, uint64_t>("", 0ull);
-  }
-
-private:
-};
-
-class DXILMCCodeEmitter : public MCCodeEmitter {
-public:
-  DXILMCCodeEmitter() {}
-
-  void encodeInstruction(const MCInst &Inst, SmallVectorImpl<char> &CB,
-                         SmallVectorImpl<MCFixup> &Fixups,
-                         const MCSubtargetInfo &STI) const override {}
-};
 
 class DXILAsmBackend : public MCAsmBackend {
 
@@ -103,19 +78,14 @@ public:
 
 } // namespace
 
-static MCInstPrinter *createDXILMCInstPrinter(const Triple &T,
-                                              unsigned SyntaxVariant,
-                                              const MCAsmInfo &MAI,
-                                              const MCInstrInfo &MII,
-                                              const MCRegisterInfo &MRI) {
+static MCInstPrinter *createDirectXMCInstPrinter(const Triple &T,
+                                                 unsigned SyntaxVariant,
+                                                 const MCAsmInfo &MAI,
+                                                 const MCInstrInfo &MII,
+                                                 const MCRegisterInfo &MRI) {
   if (SyntaxVariant == 0)
-    return new DXILInstPrinter(MAI, MII, MRI);
+    return new DirectXInstPrinter(MAI, MII, MRI);
   return nullptr;
-}
-
-MCCodeEmitter *createDXILMCCodeEmitter(const MCInstrInfo &MCII,
-                                       MCContext &Ctx) {
-  return new DXILMCCodeEmitter();
 }
 
 MCAsmBackend *createDXILMCAsmBackend(const Target &T,
@@ -140,10 +110,9 @@ extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXTargetMC() {
   Target &T = getTheDirectXTarget();
   RegisterMCAsmInfo<DirectXMCAsmInfo> X(T);
   TargetRegistry::RegisterMCInstrInfo(T, createDirectXMCInstrInfo);
-  TargetRegistry::RegisterMCInstPrinter(T, createDXILMCInstPrinter);
+  TargetRegistry::RegisterMCInstPrinter(T, createDirectXMCInstPrinter);
   TargetRegistry::RegisterMCRegInfo(T, createDirectXMCRegisterInfo);
   TargetRegistry::RegisterMCSubtargetInfo(T, createDirectXMCSubtargetInfo);
-  //TargetRegistry::RegisterMCCodeEmitter(T, createDirectXMCCodeEmitter);
-  TargetRegistry::RegisterMCCodeEmitter(T, createDXILMCCodeEmitter);
+  TargetRegistry::RegisterMCCodeEmitter(T, createDirectXMCCodeEmitter);
   TargetRegistry::RegisterMCAsmBackend(T, createDXILMCAsmBackend);
 }
