@@ -12,20 +12,18 @@
 
 include "DirectXInstrFormats.td"
 
-def AllocaDXILInst : PseudoDXILInst<(outs ID:$res), (ins i32imm:$typeEnum, i32imm:$a), "$res = alloca $typeEnum, align $a">;
+def AllocaDXILInst : PseudoDXILInst<(outs ID:$res), (ins i32imm:$a), "$res = alloca align $a">;
 
 let isReturn = 1, hasDelaySlot = 0, isBarrier = 0, isTerminator = 1, isNotDuplicable = 1 in {
     def ReturnDXILInst: SimplePseudoDXILInst<"ret void">;
-    def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins i32imm:$typeEnum, ID:$ret), "ret $typeEnum $ret">;
+    def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret), "ret $ret">;
 }
 
-def SinDXILInst : UnaryDXILInst<13> {
-  let arguments = [OverloadTy];
-  let result = OverloadTy;
+// Note: need to come back and make this work for float or half
+
+def SinDXILInst : UnaryDXILInst<13, FloatTy> {
   let overloads = [Overloads<[HalfTy, FloatTy]>];
 }
-def CosDXILInst : UnaryDXILInst<12> {
-  let arguments = [OverloadTy];
-  let result = OverloadTy;
+def CosDXILInst : UnaryDXILInst<12, FloatTy> {
   let overloads = [Overloads<[HalfTy, FloatTy]>];
 }

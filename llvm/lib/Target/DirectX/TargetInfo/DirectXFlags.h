@@ -13,4 +13,5 @@
 namespace llvm {
 
 extern llvm::cl::opt<bool> EnableDirectXGlobalIsel;
+extern llvm::cl::opt<bool> EnableDirectXGlobalIselASMPrinter;
 } // namespace llvm

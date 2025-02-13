@@ -6,8 +6,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-def StringImm: Operand<i32>{
-  let PrintMethod="printStringImm";
+class DXILType {
+  int isOverload = 0;
+  string TypeName = "";
+  string TypeNameShort = "";
+}
+
+let isOverload = 1 in {
+  def OverloadTy : DXILType;
+}
+
+class Overloads<list<DXILType> oloads> {
+  list<DXILType> overload_types = oloads;
 }
 
 class DXILInst<bits<16> Opcode, dag outs, dag ins, string asmstr, list<dag> pattern = []>
@@ -23,22 +33,16 @@ class DXILInst<bits<16> Opcode, dag outs, dag ins, string asmstr, list<dag> patt
   dag InOperandList = ins;
   let AsmString = asmstr;
   let Pattern = pattern;
+
+  list<DXILType> arguments = [];
+  list<Overloads> overloads = [];
+  DXILType result;
 }
 
 // Pseudo instructions
 class PseudoDXILInst<dag outs, dag ins, string asmstr> :  DXILInst<0, outs, ins, asmstr> {
   let isPseudo = 1;
   let hasSideEffects = 0;
-}
-
-class DXILType {
-  int isOverload = 0;
-  string TypeName = "";
-  string TypeNameShort = "";
-}
-
-let isOverload = 1 in {
-  def OverloadTy : DXILType;
 }
 
 def VoidTy : DXILType {
@@ -74,19 +78,15 @@ def DoubleTy : DXILType {
   let TypeNameShort = "f64";
 }
 
-class Overloads<list<DXILType> oloads> {
-  list<DXILType> overload_types = oloads;
-}
-
-class UnaryDXILInst<bits<16> Opcode>:  
+class UnaryDXILInst<bits<16> Opcode, DXILType Ty>:  
   DXILInst<Opcode, 
            (outs ID:$res),           
            (ins ID:$arg), 
-           "call #OverloadTy.TypeName# @dx.op.unary.#OverloadTy.TypeNameShort#(i32 #Opcode#, #OverloadTy.TypeName# $arg)">
+           "$res = call " #Ty.TypeName# " @dx.op.unary." #Ty.TypeNameShort# "(i32 " #Opcode# ", " #Ty.TypeName# " $arg)">
 {
-  list<DXILType> arguments = [];
+  list<DXILType> arguments = [Ty];
   list<Overloads> overloads = [];
-  DXILType result;
+  DXILType result = Ty;
 }
 
 class SimplePseudoDXILInst<string name>: PseudoDXILInst<(outs), (ins), name>;

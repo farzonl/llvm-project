@@ -14,6 +14,7 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -101,6 +102,7 @@ void DXILAsmPrinter::emitBasicBlockStart(const MachineBasicBlock &MBB) {
       OutStreamer->getCommentOS()
           << "-- Instruction " << MI.getOpcode() << '\n';
   }
+  AsmPrinter::emitBasicBlockStart(MBB);
 }
 
 void DXILAsmPrinter::emitFunctionHeader() {
@@ -108,9 +110,6 @@ void DXILAsmPrinter::emitFunctionHeader() {
   if (!EnableDirectXGlobalIsel)
     return;
 
-  // Get the subtarget from the current MachineFunction.
-  // const DirectXSubtarget* ST = &MF->getSubtarget<DirectXSubtarget>();
-  // const DirectXInstrInfo* TII = ST->getInstrInfo();
   const Function &F = MF->getFunction();
 
   if (isVerbose()) {
@@ -119,8 +118,9 @@ void DXILAsmPrinter::emitFunctionHeader() {
         << GlobalValue::dropLLVMManglingEscape(F.getName()) << '\n';
   }
 
-  // auto *Section = getObjFileLowering().SectionForGlobal(&F, TM);
-  // MF->setSection(Section);
+  // MCSection* Section = getObjFileLowering().SectionForGlobal(&F, TM);
+  MCSection *Section = getObjFileLowering().getTextSection();
+  MF->setSection(Section);
 }
 
 void DXILAsmPrinter::emitFunctionBodyEnd() {
@@ -128,9 +128,6 @@ void DXILAsmPrinter::emitFunctionBodyEnd() {
   if (!EnableDirectXGlobalIsel)
     return;
 
-  // Get the subtarget from the current MachineFunction.
-  // const DirectXSubtarget* ST = &MF->getSubtarget<DirectXSubtarget>();
-  // const DirectXInstrInfo* TII = ST->getInstrInfo();
   const Function &F = MF->getFunction();
 
   if (isVerbose()) {
@@ -138,9 +135,14 @@ void DXILAsmPrinter::emitFunctionBodyEnd() {
         << "-- End function "
         << GlobalValue::dropLLVMManglingEscape(F.getName()) << '\n';
   }
+  AsmPrinter::emitFunctionBodyEnd();
 }
 
 void DXILAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+
+  if (EnableDirectXGlobalIsel) // don't do anything if global isel is on
+    return;
+
   // If there is no initializer, or no explicit section do nothing
   if (!GV->hasInitializer() || GV->hasImplicitSection() || !GV->hasSection())
     return;

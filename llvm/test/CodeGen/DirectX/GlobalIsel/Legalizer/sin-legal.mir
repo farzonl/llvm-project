@@ -59,9 +59,9 @@ machineFunctionInfo: {}
 body:             |
   bb.0:
     ; CHECK-LABEL: name: test_sin_f32
-    %0:id(s32) = AllocaDXILInst 2, 4
+    %0:id(s32) = AllocaDXILInst 4
     %1:id(s32) = G_FSIN %0
-    ReturnValueDXILInst 2, %1(s32)
+    ReturnValueDXILInst %1(s32)
 
 ...
 ---
@@ -123,6 +123,6 @@ machineFunctionInfo: {}
 body:             |
   bb.1:
     ; CHECK-LABEL: name: test_sin_f16
-    %0:id(s16) = AllocaDXILInst 0, 2
+    %0:id(s16) = AllocaDXILInst 2
     %1:id(s16) = G_FSIN %0
-    ReturnValueDXILInst 0, %1(s16)
+    ReturnValueDXILInst %1(s16)

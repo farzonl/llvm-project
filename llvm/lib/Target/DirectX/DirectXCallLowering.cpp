@@ -14,6 +14,7 @@
 #include "DirectXCallLowering.h"
 #include "DirectXTargetLowering.h"
 #include "DirectXTargetMachine.h"
+#include "DirectXTypeMap.h"
 #include "MCTargetDesc/DirectXMCTargetDesc.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -26,7 +27,7 @@ using namespace llvm;
 DirectXCallLowering::DirectXCallLowering(const DirectXTargetLowering &TLI)
     : CallLowering(&TLI) {}
 
-static std::string typeIdToName(Type *Ty) {
+/*static std::string typeIdToName(Type *Ty) {
   switch (Ty->getTypeID()) {
   case Type::VoidTyID:
     return "void";
@@ -68,7 +69,7 @@ static std::string typeIdTShortName(Type *Ty) {
   default:
     report_fatal_error("unsupported type");
   }
-}
+}*/
 
 static uint64_t typeIdToAlignment(Type *Ty) {
   switch (Ty->getTypeID()) {
@@ -127,17 +128,17 @@ bool DirectXCallLowering::lowerFormalArguments(
     Type *ArgTy = Arg.getType();
 
     auto MIB = MIRBuilder.buildInstr(dxil::AllocaDXILInst);
-    MIB.addDef(VRegs[VRegsIndex][0]).addImm(ArgTy->getTypeID());
+
+    DirectXTypeMap &TypeMap = llvm::DirectXTypeMap::getInstance();
+    TypeMap.setType(MIRBuilder.getMF(), VRegs[VRegsIndex][0], *ArgTy);
+
+    MIB.addDef(VRegs[VRegsIndex][0]);
     auto It = AllocaMap.find(Arg.getName().str());
     if (It == AllocaMap.end()) {
       MIB.addImm(typeIdToAlignment(Arg.getType()));
     } else {
       MIB.addImm(It->second->getAlign().value());
     }
-    Metadata *OpType =
-        MDString::get(MIRBuilder.getContext(), typeIdTShortName(ArgTy));
-    MDNode *OpTypeNode = MDNode::get(MIRBuilder.getContext(), OpType);
-    MIB.addMetadata(OpTypeNode);
     MIB.constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
                          *STI.getRegBankInfo());
 
@@ -156,15 +157,11 @@ bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
     return false;
   if (Val) {
     Type *RetTy = Val->getType();
-    Metadata *OpType =
-        MDString::get(MIRBuilder.getContext(), typeIdToName(RetTy));
-    MDNode *OpTypeNode = MDNode::get(MIRBuilder.getContext(), OpType);
     const auto &STI = MIRBuilder.getMF().getSubtarget();
+    DirectXTypeMap &TypeMap = llvm::DirectXTypeMap::getInstance();
+    TypeMap.setType(MIRBuilder.getMF(), VRegs[0], *RetTy);
     return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
-        .addImm(RetTy->getTypeID())
         .addUse(VRegs[0])
-        // Save type as meta data for now.
-        .addMetadata(OpTypeNode)
         .constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),
                           *STI.getRegBankInfo());
   }

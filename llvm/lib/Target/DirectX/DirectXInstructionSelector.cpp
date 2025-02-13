@@ -56,8 +56,7 @@ private:
   bool selectImpl(MachineInstr &I, CodeGenCoverage &CoverageInfo) const;
 
   bool dxilSelect(Register ResVReg, MachineInstr &I) const;
-  bool dxilSelectOp(Register ResVReg, MachineInstr &I, int MCIDOpcode,
-                    dxil::OpCode Op) const;
+  bool dxilSelectOp(Register ResVReg, MachineInstr &I, int MCIDOpcode) const;
 };
 
 #define GET_GLOBALISEL_IMPL
@@ -100,8 +99,7 @@ bool DirectXInstructionSelector::select(MachineInstr &I) {
 }
 
 bool DirectXInstructionSelector::dxilSelectOp(Register ResVReg, MachineInstr &I,
-                                              int MCIDOpcode,
-                                              dxil::OpCode Op) const {
+                                              int MCIDOpcode) const {
   MachineBasicBlock &BB = *I.getParent();
   auto MIB =
       BuildMI(BB, I, I.getDebugLoc(), /*I.getDesc()*/ TII.get(MCIDOpcode))
@@ -119,9 +117,9 @@ bool DirectXInstructionSelector::dxilSelect(Register ResVReg,
   const unsigned Opcode = I.getOpcode();
   switch (Opcode) {
   case TargetOpcode::G_FCOS:
-    return dxilSelectOp(ResVReg, I, dxil::CosDXILInst, dxil::OpCode::Cos);
+    return dxilSelectOp(ResVReg, I, dxil::CosDXILInst);
   case TargetOpcode::G_FSIN:
-    return dxilSelectOp(ResVReg, I, dxil::SinDXILInst, dxil::OpCode::Sin);
+    return dxilSelectOp(ResVReg, I, dxil::SinDXILInst);
   default:
     return false;
   }
