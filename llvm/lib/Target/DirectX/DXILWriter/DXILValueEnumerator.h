@@ -17,6 +17,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/UniqueVector.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/UseListOrder.h"
 #include <cassert>
@@ -63,6 +64,7 @@ private:
 
   using ValueMapType = DenseMap<const Value *, unsigned>;
   ValueMapType ValueMap;
+  ValueMapType MachineValueMap;
   ValueList Values;
 
   using ComdatSetType = UniqueVector<const Comdat *>;
@@ -120,11 +122,19 @@ private:
 
   using InstructionMapType = DenseMap<const Instruction *, unsigned>;
   InstructionMapType InstructionMap;
+
+  using MachineInstructionMapType = DenseMap<const MachineInstr *, unsigned>;
+  MachineInstructionMapType MachineInstructionMap;
+
   unsigned InstructionCount;
 
   /// BasicBlocks - This contains all the basic blocks for the currently
   /// incorporated function.  Their reverse mapping is stored in ValueMap.
   std::vector<const BasicBlock *> BasicBlocks;
+
+  /// MachineBasicBlocks - This contains all the basic blocks for the currently
+  /// incorporated function.  Their reverse mapping is stored in ValueMap.
+  std::vector<const MachineBasicBlock *> MachineBasicBlocks;
 
   /// When a function is incorporated, this is the size of the Values list
   /// before incorporation.
@@ -170,6 +180,7 @@ public:
 
   unsigned getInstructionID(const Instruction *I) const;
   void setInstructionID(const Instruction *I);
+  void setMachineInstructionID(const MachineInstr *I);
 
   unsigned getAttributeListID(AttributeList PAL) const {
     if (PAL.isEmpty())
@@ -235,6 +246,10 @@ public:
   /// use these two methods to get its data into the ValueEnumerator!
   void incorporateFunction(const Function &F);
 
+  /// incorporateFunction/purgeFunction - If you'd like to deal with a function,
+  /// use these two methods to get its data into the ValueEnumerator!
+  void incorporateFunction(const MachineFunction &F);
+
   void purgeFunction();
   uint64_t computeBitsRequiredForTypeIndices() const;
 
@@ -256,6 +271,12 @@ private:
   /// This should be called before enumerating LocalAsMetadata for the
   /// function.
   void incorporateFunctionMetadata(const Function &F);
+
+    /// Incorporate the MachineFunction metadata.
+  ///
+  /// This should be called before enumerating LocalAsMetadata for the
+  /// function.
+  void incorporateFunctionMetadata(const MachineFunction &MF);
 
   /// Enumerate a single instance of metadata with the given function tag.
   ///

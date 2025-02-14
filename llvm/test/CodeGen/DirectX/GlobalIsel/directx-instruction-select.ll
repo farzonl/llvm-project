@@ -5,7 +5,7 @@ define float @test_cos_f32(float %x) #0 {
   ; CHECK-LABEL: name: test_cos_f32
   ; CHECK: bb.1 (%ir-block.0):
   ; CHECK-NEXT: %0:id = AllocaDXILInst 4
-  ; CHECK-NEXT: %1:id = CosDXILInst %0
+  ; CHECK-NEXT: %1:id = CosFloat %0
   ; CHECK-NEXT: ReturnValueDXILInst %1
   %y = call float @llvm.cos.f32(float %x)
   ret float %y
@@ -16,10 +16,21 @@ define float @test_sin_f32(float %x) #0 {
   ; CHECK-LABEL: name: test_sin_f32
   ; CHECK: bb.1 (%ir-block.0):
   ; CHECK-NEXT: %0:id = AllocaDXILInst 4
-  ; CHECK-NEXT: %1:id = SinDXILInst %0
+  ; CHECK-NEXT: %1:id = SinFloat %0
   ; CHECK-NEXT: ReturnValueDXILInst %1
   %y = call float @llvm.sin.f32(float %x)
   ret float %y
+}
+
+declare half @llvm.sin.f16(half)
+define half @test_sin_f16(half %x) #0 {
+  ; CHECK-LABEL: name: test_sin_f16
+  ; CHECK: bb.1 (%ir-block.0):
+  ; CHECK-NEXT: %0:id = AllocaDXILInst 4
+  ; CHECK-NEXT: %1:id = SinHalf %0
+  ; CHECK-NEXT: ReturnValueDXILInst %1
+  %y = call half @llvm.sin.f16(half %x)
+  ret half %y
 }
 
 attributes #0 = { convergent norecurse nounwind "hlsl.export"}

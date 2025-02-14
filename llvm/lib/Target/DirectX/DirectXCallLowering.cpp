@@ -129,8 +129,8 @@ bool DirectXCallLowering::lowerFormalArguments(
 
     auto MIB = MIRBuilder.buildInstr(dxil::AllocaDXILInst);
 
-    DirectXTypeMap &TypeMap = llvm::DirectXTypeMap::getInstance();
-    TypeMap.setType(MIRBuilder.getMF(), VRegs[VRegsIndex][0], *ArgTy);
+    
+    DirectXTypeMap::getInstance().setType(MIRBuilder.getMF(), VRegs[VRegsIndex][0], *ArgTy);
 
     MIB.addDef(VRegs[VRegsIndex][0]);
     auto It = AllocaMap.find(Arg.getName().str());
@@ -158,8 +158,7 @@ bool DirectXCallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
   if (Val) {
     Type *RetTy = Val->getType();
     const auto &STI = MIRBuilder.getMF().getSubtarget();
-    DirectXTypeMap &TypeMap = llvm::DirectXTypeMap::getInstance();
-    TypeMap.setType(MIRBuilder.getMF(), VRegs[0], *RetTy);
+    DirectXTypeMap::getInstance().setType(MIRBuilder.getMF(), VRegs[0], *RetTy);
     return MIRBuilder.buildInstr(dxil::ReturnValueDXILInst)
         .addUse(VRegs[0])
         .constrainAllUses(MIRBuilder.getTII(), *STI.getRegisterInfo(),

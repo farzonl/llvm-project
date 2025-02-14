@@ -19,11 +19,7 @@ let isReturn = 1, hasDelaySlot = 0, isBarrier = 0, isTerminator = 1, isNotDuplic
     def ReturnValueDXILInst: PseudoDXILInst<(outs), (ins ID:$ret), "ret $ret">;
 }
 
-// Note: need to come back and make this work for float or half
-
-def SinDXILInst : UnaryDXILInst<13, FloatTy> {
-  let overloads = [Overloads<[HalfTy, FloatTy]>];
-}
-def CosDXILInst : UnaryDXILInst<12, FloatTy> {
-  let overloads = [Overloads<[HalfTy, FloatTy]>];
-}
+def SinFloat : UnaryDXILInst<13, FloatTy>;
+def SinHalf : UnaryDXILInst<13, HalfTy>;
+def CosFloat : UnaryDXILInst<12, FloatTy>;
+def CosHalf : UnaryDXILInst<12, HalfTy>;

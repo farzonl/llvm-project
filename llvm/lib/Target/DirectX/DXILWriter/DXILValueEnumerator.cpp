@@ -514,6 +514,10 @@ void ValueEnumerator::setInstructionID(const Instruction *I) {
   InstructionMap[I] = InstructionCount++;
 }
 
+void ValueEnumerator::setMachineInstructionID(const MachineInstr *I) {
+  MachineInstructionMap[I] = InstructionCount++;
+}
+
 unsigned ValueEnumerator::getValueID(const Value *V) const {
   if (auto *MD = dyn_cast<MetadataAsValue>(V))
     return getMetadataID(MD->getMetadata());
@@ -859,6 +863,15 @@ void ValueEnumerator::organizeMetadata() {
   FunctionMDInfo[PrevF] = R;
 }
 
+void ValueEnumerator::incorporateFunctionMetadata(const MachineFunction &MF) {
+  NumModuleMDs = MDs.size();
+  // This isn't right don't think you can get value ids off of MFs.
+  auto R = FunctionMDInfo.lookup(getValueID(&MF.getFunction()) + 1);
+  NumMDStrings = R.NumStrings;
+  MDs.insert(MDs.end(), FunctionMDs.begin() + R.First,
+             FunctionMDs.begin() + R.Last);
+}
+
 void ValueEnumerator::incorporateFunctionMetadata(const Function &F) {
   NumModuleMDs = MDs.size();
 
@@ -1021,6 +1034,44 @@ void ValueEnumerator::EnumerateAttributes(AttributeList PAL) {
           EnumerateType(Attr.getValueAsType());
       }
     }
+  }
+}
+
+void ValueEnumerator::incorporateFunction(const MachineFunction &MF) {
+  InstructionCount = 0;
+  NumModuleValues = Values.size();
+
+  // Add global metadata to the function block.  This doesn't include
+  // LocalAsMetadata.
+  incorporateFunctionMetadata(MF);
+
+  // Adding function arguments to the value table.
+  for (const auto &I : MF.getFunction().args()) {
+    EnumerateValue(&I);
+    if (I.hasAttribute(Attribute::ByVal))
+      EnumerateType(I.getParamByValType());
+    else if (I.hasAttribute(Attribute::StructRet))
+      EnumerateType(I.getParamStructRetType());
+    else if (I.hasAttribute(Attribute::ByRef))
+      EnumerateType(I.getParamByRefType());
+  }
+  FirstFuncConstantID = Values.size();
+
+  // Add all function-level constants to the value table.
+  for (const MachineBasicBlock &MBB : MF) {
+    for (const MachineInstr &MI : MBB) {
+      for (const MachineOperand &MO : MI.operands()) {
+        if(!MO.isUse())
+          continue;
+        if (!MO.isGlobal())
+        //if ((isa<Constant>(MO) && !isa<GlobalValue>(MO)) || isa<InlineAsm>(MO))
+          EnumerateValue(MO.getGlobal());
+      }
+      //if (auto *SVI = dyn_cast<ShuffleVectorInst>(&MI))
+      //  EnumerateValue(SVI->getShuffleMaskForBitcode());
+    }
+    MachineBasicBlocks.push_back(&MBB);
+    //MachineValueMap[&MBB] = MachineBasicBlocks.size();
   }
 }
 

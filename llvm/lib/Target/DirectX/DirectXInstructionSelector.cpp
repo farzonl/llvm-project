@@ -11,13 +11,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "DXILConstants.h"
+#include "DirectXTypeMap.h"
 #include "DirectXTargetMachine.h"
 #include "MCTargetDesc/DirectXMCTargetDesc.h"
 #include "llvm/CodeGen/GlobalISel/GIMatchTableExecutorImpl.h" // need for DirectXGenGlobalISel.inc
 #include "llvm/CodeGen/GlobalISel/InstructionSelector.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/IR/Type.h"
 
 #define DEBUG_TYPE "directx-isel"
 
@@ -113,13 +114,16 @@ bool DirectXInstructionSelector::dxilSelectOp(Register ResVReg, MachineInstr &I,
 
 bool DirectXInstructionSelector::dxilSelect(Register ResVReg,
                                             MachineInstr &I) const {
-
   const unsigned Opcode = I.getOpcode();
+  DirectXTypeMap &TypeMap = llvm::DirectXTypeMap::getInstance();
+  llvm::Type *RetrievedTy = TypeMap.getType(*I.getMF(), ResVReg);
   switch (Opcode) {
   case TargetOpcode::G_FCOS:
-    return dxilSelectOp(ResVReg, I, dxil::CosDXILInst);
+    assert(RetrievedTy->getTypeID() == llvm::Type::FloatTyID || RetrievedTy->getTypeID() == llvm::Type::HalfTyID);
+    return dxilSelectOp(ResVReg, I, RetrievedTy->getTypeID() == llvm::Type::FloatTyID ? dxil::CosFloat : dxil::CosHalf);
   case TargetOpcode::G_FSIN:
-    return dxilSelectOp(ResVReg, I, dxil::SinDXILInst);
+    assert(RetrievedTy->getTypeID() == llvm::Type::FloatTyID || RetrievedTy->getTypeID() == llvm::Type::HalfTyID);
+    return dxilSelectOp(ResVReg, I, RetrievedTy->getTypeID() == llvm::Type::FloatTyID ? dxil::SinFloat : dxil::SinHalf);
   default:
     return false;
   }

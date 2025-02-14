@@ -19,6 +19,11 @@
 #include "llvm/Bitcode/LLVMBitCodes.h"
 #include "llvm/Bitstream/BitCodes.h"
 #include "llvm/Bitstream/BitstreamWriter.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Comdat.h"
@@ -51,7 +56,7 @@
 #include "llvm/Support/ModRef.h"
 #include "llvm/Support/SHA1.h"
 #include "llvm/TargetParser/Triple.h"
-
+#include "TargetInfo/DirectXFlags.h"
 namespace llvm {
 namespace dxil {
 
@@ -102,6 +107,10 @@ class DXILBitcodeWriter {
 
   /// The Module to write to bitcode.
   const Module &M;
+
+  /// The MachineModule to write to bitcode.
+  const MachineModuleInfo* MMI;
+
 
   /// Enumerates ids for all values in the module.
   ValueEnumerator VE;
@@ -323,7 +332,8 @@ private:
                             std::vector<unsigned> *MDAbbrevs = nullptr,
                             std::vector<uint64_t> *IndexPos = nullptr);
   void writeModuleMetadata();
-  void writeFunctionMetadata(const Function &F);
+  void writeFunctionMetadata(/*const Function &F*/);
+  void writeMachineFunctionMetadataAttachment(const MachineFunction &MF);
   void writeFunctionMetadataAttachment(const Function &F);
   void pushGlobalMetadataAttachment(SmallVectorImpl<uint64_t> &Record,
                                     const GlobalObject &GO);
@@ -341,10 +351,13 @@ private:
                        SmallVectorImpl<uint64_t> &Vals);
   void writeInstruction(const Instruction &I, unsigned InstID,
                         SmallVectorImpl<unsigned> &Vals);
+  void writeMachineInstruction(const MachineInstr &MI, unsigned InstID,
+                        SmallVectorImpl<unsigned> &Vals);
   void writeFunctionLevelValueSymbolTable(const ValueSymbolTable &VST);
   void writeGlobalValueSymbolTable(
       DenseMap<const Function *, uint64_t> &FunctionToBitcodeIndex);
   void writeFunction(const Function &F);
+  void writeMachineFunction(const MachineFunction &MF);
   void writeBlockInfo();
 
   unsigned getEncodedSyncScopeID(SyncScope::ID SSID) { return unsigned(SSID); }
@@ -1827,7 +1840,7 @@ void DXILBitcodeWriter::writeModuleMetadata() {
   Stream.ExitBlock();
 }
 
-void DXILBitcodeWriter::writeFunctionMetadata(const Function &F) {
+void DXILBitcodeWriter::writeFunctionMetadata(/*const Function &F*/) {
   if (!VE.hasMDs())
     return;
 
@@ -1835,6 +1848,46 @@ void DXILBitcodeWriter::writeFunctionMetadata(const Function &F) {
   SmallVector<uint64_t, 64> Record;
   writeMetadataStrings(VE.getMDStrings(), Record);
   writeMetadataRecords(VE.getNonMDStrings(), Record);
+  Stream.ExitBlock();
+}
+
+void DXILBitcodeWriter::writeMachineFunctionMetadataAttachment(const MachineFunction &MF) {
+Stream.EnterSubblock(bitc::METADATA_ATTACHMENT_ID, 3);
+
+  SmallVector<uint64_t, 64> Record;
+
+  // Write metadata attachments
+  // METADATA_ATTACHMENT - [m x [value, [n x [id, mdnode]]]
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  // TODO find MF.getAllMetadata(MDs);
+  if (!MDs.empty()) {
+    for (const auto &I : MDs) {
+      Record.push_back(I.first);
+      Record.push_back(VE.getMetadataID(I.second));
+    }
+    Stream.EmitRecord(bitc::METADATA_ATTACHMENT, Record, 0);
+    Record.clear();
+  }
+
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB) {
+      MDs.clear();
+      //MDs.append(std::pair(MI, MI.getMMRAMetadata())); // TODO find equivalent of getAllMetadataOtherThanDebugLoc(MDs);
+
+      // If no metadata, ignore instruction.
+      if (MDs.empty())
+        continue;
+
+      //Record.push_back(VE.getInstructionID(&I));
+
+      for (unsigned I = 0, E = MDs.size(); I != E; ++I) {
+        Record.push_back(MDs[I].first);
+        Record.push_back(VE.getMetadataID(MDs[I].second));
+      }
+      Stream.EmitRecord(bitc::METADATA_ATTACHMENT, Record, 0);
+      Record.clear();
+    }
+
   Stream.ExitBlock();
 }
 
@@ -2216,6 +2269,26 @@ void DXILBitcodeWriter::pushValueSigned(const Value *V, unsigned InstID,
   unsigned ValID = VE.getValueID(V);
   int64_t diff = ((int32_t)InstID - (int32_t)ValID);
   emitSignedInt64(Vals, diff);
+}
+
+void DXILBitcodeWriter::writeMachineInstruction(const MachineInstr &MI, unsigned InstID,
+                        SmallVectorImpl<unsigned> &Vals) {
+    unsigned Code = 0;
+  unsigned AbbrevToUse = 0;
+  VE.setMachineInstructionID(&MI);
+  const MachineRegisterInfo &MRI = MI.getMF()->getRegInfo();
+  switch (MI.getOpcode()) {
+    case TargetOpcode::G_EXTRACT: {
+      Code = bitc::FUNC_CODE_INST_EXTRACTVAL;
+      Register VReg = MI.getOperand(0).getReg();
+      //pushValueAndType(VReg, InstID, Vals);
+      //const ExtractValueInst *EVI = cast<ExtractValueInst>(&MI);
+      //Vals.append(EVI->idx_begin(), EVI->idx_end());
+      break;
+    }
+  }
+  Stream.EmitRecord(Code, Vals, AbbrevToUse);
+  Vals.clear();
 }
 
 /// WriteInstruction - Emit an instruction
@@ -2604,6 +2677,89 @@ void DXILBitcodeWriter::writeFunctionLevelValueSymbolTable(
   Stream.ExitBlock();
 }
 
+bool hasMetadataOtherThanDebugLoc(const MachineInstr &MI) {
+  for (const MachineOperand &MO : MI.operands()) {
+      if (MO.isMetadata()) {
+          return true;
+      }
+  }
+  return false;
+}
+
+
+void DXILBitcodeWriter::writeMachineFunction(const MachineFunction &MF) {
+  Stream.EnterSubblock(bitc::FUNCTION_BLOCK_ID, 4);
+  VE.incorporateFunction(MF);
+
+  SmallVector<unsigned, 64> Vals;
+
+  // Emit the number of basic blocks, so the reader can create them ahead of
+  // time.
+  Vals.push_back(VE.getBasicBlocks().size());
+  Stream.EmitRecord(bitc::FUNC_CODE_DECLAREBLOCKS, Vals);
+  Vals.clear();
+
+  // If there are function-local constants, emit them now.
+  unsigned CstStart, CstEnd;
+  VE.getFunctionConstantRange(CstStart, CstEnd);
+  writeConstants(CstStart, CstEnd, false);
+
+  // If there is function-local metadata, emit it now.
+  writeFunctionMetadata();
+
+  // Keep a running idea of what the instruction ID is.
+  unsigned InstID = CstEnd;
+
+  bool NeedsMetadataAttachment = MF.getFunction().hasMetadata();
+
+  DILocation *LastDL = nullptr;
+
+  // Finally, emit all the instructions, in order.
+  for (MachineFunction::const_iterator MBB = MF.begin(), E = MF.end(); MBB != E; ++MBB)
+    for (MachineBasicBlock::const_iterator MI = MBB->begin(), E = MBB->end(); MI != E;
+         ++MI) {
+      writeMachineInstruction(*MI, InstID, Vals);
+      const MachineRegisterInfo &MRI = MF.getRegInfo();
+      Register DestReg = MI->getOperand(0).getReg();
+      const LLT Type = MRI.getType(DestReg);
+      if (Type.isValid())
+        ++InstID;
+
+      // If the instruction has metadata, write a metadata attachment later.
+      NeedsMetadataAttachment |= hasMetadataOtherThanDebugLoc(*MI);
+
+      // If the instruction has a debug location, emit it.
+      DILocation *DL = MI->getDebugLoc();
+      if (!DL)
+        continue;
+
+      if (DL == LastDL) {
+        // Just repeat the same debug loc as last time.
+        Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC_AGAIN, Vals);
+        continue;
+      }
+
+      Vals.push_back(DL->getLine());
+      Vals.push_back(DL->getColumn());
+      Vals.push_back(VE.getMetadataOrNullID(DL->getScope()));
+      Vals.push_back(VE.getMetadataOrNullID(DL->getInlinedAt()));
+      Stream.EmitRecord(bitc::FUNC_CODE_DEBUG_LOC, Vals);
+      Vals.clear();
+
+      LastDL = DL;
+    }
+
+  // Emit names for all the instructions etc.
+  if (auto *Symtab = MF.getFunction().getValueSymbolTable())
+    writeFunctionLevelValueSymbolTable(*Symtab);
+
+  if (NeedsMetadataAttachment)
+    writeMachineFunctionMetadataAttachment(MF);
+
+  VE.purgeFunction();
+  Stream.ExitBlock();
+}
+
 /// Emit a function body to the module stream.
 void DXILBitcodeWriter::writeFunction(const Function &F) {
   Stream.EnterSubblock(bitc::FUNCTION_BLOCK_ID, 4);
@@ -2623,7 +2779,7 @@ void DXILBitcodeWriter::writeFunction(const Function &F) {
   writeConstants(CstStart, CstEnd, false);
 
   // If there is function-local metadata, emit it now.
-  writeFunctionMetadata(F);
+  writeFunctionMetadata(/*F*/);
 
   // Keep a running idea of what the instruction ID is.
   unsigned InstID = CstEnd;
@@ -2879,6 +3035,19 @@ void DXILBitcodeWriter::write() {
   writeTypeTable();
 
   writeComdats();
+  
+  if(EnableDirectXGlobalIsel) {
+    for (const Function &F : M) {
+      if (F.isDeclaration())
+        continue;
+      MachineFunction *MF = MMI->getMachineFunction(F);
+      if(MF)
+        writeMachineFunction(*MF);
+    }
+
+    Stream.ExitBlock();
+    return;
+  }
 
   // Emit top-level description of module, including target triple, inline asm,
   // descriptors for global variables, and function prototype info.

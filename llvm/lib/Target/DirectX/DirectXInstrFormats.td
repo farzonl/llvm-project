@@ -12,14 +12,6 @@ class DXILType {
   string TypeNameShort = "";
 }
 
-let isOverload = 1 in {
-  def OverloadTy : DXILType;
-}
-
-class Overloads<list<DXILType> oloads> {
-  list<DXILType> overload_types = oloads;
-}
-
 class DXILInst<bits<16> Opcode, dag outs, dag ins, string asmstr, list<dag> pattern = []>
   : Instruction {
   field bits<16> Inst;
@@ -35,7 +27,6 @@ class DXILInst<bits<16> Opcode, dag outs, dag ins, string asmstr, list<dag> patt
   let Pattern = pattern;
 
   list<DXILType> arguments = [];
-  list<Overloads> overloads = [];
   DXILType result;
 }
 
@@ -85,7 +76,6 @@ class UnaryDXILInst<bits<16> Opcode, DXILType Ty>:
            "$res = call " #Ty.TypeName# " @dx.op.unary." #Ty.TypeNameShort# "(i32 " #Opcode# ", " #Ty.TypeName# " $arg)">
 {
   list<DXILType> arguments = [Ty];
-  list<Overloads> overloads = [];
   DXILType result = Ty;
 }
 
