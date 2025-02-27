@@ -1296,13 +1296,13 @@ const inline float fmod(float X, float Y) {
   return __detail::fmod_impl(X, Y);
 }
 
-template <int N>
+template <int N, typename = __detail::enable_if_t<(N > 1 && N <=4)>>
 _HLSL_16BIT_AVAILABILITY(shadermodel, 6.2)
 const inline half fmod(vector<half, N> X, vector<half, N> Y) {
   return __detail::fmod_vec_impl(X, Y);
 }
 
-template <int N>
+template <int N, typename = __detail::enable_if_t<(N > 1 && N <=4)>>
 const inline float fmod(vector<float, N> X, vector<float, N> Y) {
   return __detail::fmod_vec_impl(X, Y);
 }
