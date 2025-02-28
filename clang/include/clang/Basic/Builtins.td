@@ -26,6 +26,9 @@ class FPMathWithF128Template :
 class F16F128MathTemplate : Template<["__fp16", "__float128"],
                                      ["f16",    "f128"]>;
 
+class HLSLF16F32MathTemplate : Template<["float", "__fp16"],
+                                        ["f",    "f16"]>;
+
 class IntMathTemplate : Template<["int", "long int", "long long int"],
                                  ["",     "l",       "ll"], /*AsPrefix=*/1>;
 
@@ -4896,6 +4899,13 @@ def HLSLFrac : LangBuiltin<"HLSL_LANG"> {
   let Attributes = [NoThrow, Const];
   let Prototype = "void(...)";
 }
+
+def  HLSLFracScalar : LangBuiltin<"HLSL_LANG">, HLSLF16F32MathTemplate {
+  let Spellings = ["__builtin_hlsl_frac"];
+  let Attributes = [NoThrow, Const];
+  let Prototype = "T(T)";
+}
+
 
 def HLSLIsinf : LangBuiltin<"HLSL_LANG"> {
   let Spellings = ["__builtin_hlsl_elementwise_isinf"];

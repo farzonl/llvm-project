@@ -19643,6 +19643,8 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
         /*ReturnType=*/X->getType(), CGM.getHLSLRuntime().getDegreesIntrinsic(),
         ArrayRef<Value *>{X}, nullptr, "hlsl.degrees");
   }
+  case Builtin::BI__builtin_hlsl_fracf:
+  case Builtin::BI__builtin_hlsl_fracf16:
   case Builtin::BI__builtin_hlsl_elementwise_frac: {
     Value *Op0 = EmitScalarExpr(E->getArg(0));
     if (!E->getArg(0)->getType()->hasFloatingRepresentation())
