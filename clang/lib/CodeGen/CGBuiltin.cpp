@@ -68,6 +68,7 @@
 #include "llvm/TargetParser/AArch64TargetParser.h"
 #include "llvm/TargetParser/RISCVISAInfo.h"
 #include "llvm/TargetParser/RISCVTargetParser.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/TargetParser/X86TargetParser.h"
 #include <numeric>
 #include <optional>
@@ -6812,6 +6813,8 @@ static Value *EmitTargetArchBuiltinExpr(CodeGenFunction *CGF,
   case llvm::Triple::bpfeb:
   case llvm::Triple::bpfel:
     return CGF->EmitBPFBuiltinExpr(BuiltinID, E);
+  case llvm::Triple::dxil:
+    return CGF->EmitDirectXBuiltinExpr(BuiltinID, E);
   case llvm::Triple::x86:
   case llvm::Triple::x86_64:
     return CGF->EmitX86BuiltinExpr(BuiltinID, E);
@@ -20914,6 +20917,11 @@ Value *CodeGenFunction::EmitAMDGPUBuiltinExpr(unsigned BuiltinID,
   default:
     return nullptr;
   }
+}
+
+Value *CodeGenFunction::EmitDirectXBuiltinExpr(unsigned BuiltinID,
+                                               const CallExpr *E) {
+  return nullptr;
 }
 
 Value *CodeGenFunction::EmitSPIRVBuiltinExpr(unsigned BuiltinID,

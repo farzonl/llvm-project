@@ -46,6 +46,7 @@ add_clang_library(clangSema
   SemaConsumer.cpp
   SemaCoroutine.cpp
   SemaCUDA.cpp
+  SemaDirectX.cpp
   SemaDecl.cpp
   SemaDeclAttr.cpp
   SemaDeclCXX.cpp
