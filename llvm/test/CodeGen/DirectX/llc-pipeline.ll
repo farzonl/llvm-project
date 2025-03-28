@@ -21,7 +21,9 @@
 ; CHECK-NEXT:     DXIL Resource Access
 ; CHECK-NEXT:     Dominator Tree Construction
 ; CHECK-NEXT:     Scalarize vector operations
-; CHECK-NEXT:   DXIL Legalizer
+; CHECK-NEXT:   Dead Global Elimination
+; CHECK-NEXT:   FunctionPass Manager
+; CHECK-NEXT:     DXIL Legalizer
 ; CHECK-NEXT:   DXIL Resource Binding Analysis
 ; CHECK-NEXT:   DXIL Module Metadata analysis
 ; CHECK-NEXT:   DXIL Shader Flag Analysis

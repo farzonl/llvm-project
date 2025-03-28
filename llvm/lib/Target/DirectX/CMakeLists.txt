@@ -45,6 +45,7 @@ add_llvm_target(DirectXCodeGen
   DirectXInfo
   DirectXPointerTypeAnalysis
   FrontendHLSL
+  IPO
   MC
   ScalarOpts
   SelectionDAG

@@ -31,6 +31,7 @@ class GlobalVariable;
 class Metadata;
 class Module;
 class Value;
+class ModulePass;
 
 /// Pass to remove unused function declarations.
 class GlobalDCEPass : public PassInfoMixin<GlobalDCEPass> {
@@ -78,6 +79,7 @@ private:
   void ComputeDependencies(Value *V, SmallPtrSetImpl<GlobalValue *> &U);
 };
 
+ModulePass *createGlobalDCEPass();
 }
 
 #endif // LLVM_TRANSFORMS_IPO_GLOBALDCE_H
