@@ -13,7 +13,6 @@
 ; CHECK-OBJ-NEXT: Create Garbage Collector Module Metadata
 
 ; CHECK-NEXT: ModulePass Manager
-; CHECK-NEXT:   DXIL Finalize Linkage
 ; CHECK-NEXT:   DXIL Intrinsic Expansion
 ; CHECK-NEXT:   DXIL CBuffer Access
 ; CHECK-NEXT:   DXIL Data Scalarization
@@ -23,6 +22,7 @@
 ; CHECK-NEXT:     Dominator Tree Construction
 ; CHECK-NEXT:     Scalarize vector operations
 ; CHECK-NEXT:   DXIL Legalizer
+; CHECK-NEXT:   DXIL Finalize Linkage
 ; CHECK-NEXT:   DXIL Resource Binding Analysis
 ; CHECK-NEXT:   DXIL Module Metadata analysis
 ; CHECK-NEXT:   DXIL Shader Flag Analysis
