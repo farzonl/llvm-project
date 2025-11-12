@@ -4573,6 +4573,18 @@ bool CompilerInvocation::ParseLangArgs(LangOptions &Opts, ArgList &Args,
 
   // Validate options for HLSL
   if (Opts.HLSL) {
+    const Arg *RowMajor = Args.getLastArg(OPT_dxc_row_major);
+    const Arg *ColMajor = Args.getLastArg(OPT_dxc_col_major);
+    if (RowMajor && ColMajor)
+      Diags.Report(diag::warn_drv_overriding_option)
+      << ColMajor->getAsString(Args) << RowMajor->getAsString(Args);
+    if(RowMajor) {
+      Opts.MatrixRowMajor = 1;
+      Opts.MatrixColMajor = 0;
+    } else { // Zpc
+      Opts.MatrixColMajor = 1;
+      Opts.MatrixRowMajor = 0;
+    }
     // TODO: Revisit restricting SPIR-V to logical once we've figured out how to
     // handle PhysicalStorageBuffer64 memory model
     if (T.isDXIL() || T.isSPIRVLogical()) {

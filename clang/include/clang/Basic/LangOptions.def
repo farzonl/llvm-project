@@ -435,6 +435,8 @@ LANGOPT(RegCall4, 1, 0, NotCompatible, "Set __regcall4 as a default calling conv
 
 LANGOPT(MatrixTypes, 1, 0, NotCompatible, "Enable or disable the builtin matrix type")
 VALUE_LANGOPT(MaxMatrixDimension, 32, (1 << 20) - 1, NotCompatible, "maximum allowed matrix dimension")
+LANGOPT(MatrixRowMajor, 1, 0, NotCompatible, "Use row-major layout for matrices")
+LANGOPT(MatrixColMajor, 1, 1, NotCompatible, "Use column-major layout for matrices")
 
 LANGOPT(CXXAssumptions, 1, 1, NotCompatible, "Enable or disable codegen and compile-time checks for C++23's [[assume]] attribute")
 

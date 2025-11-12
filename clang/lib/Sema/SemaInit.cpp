@@ -1913,10 +1913,20 @@ void InitListChecker::CheckMatrixType(const InitializedEntity &Entity,
 
   while (Index < IList->getNumInits()) {
     // Not a sublist: just consume directly.
-    unsigned ColMajorIndex = (Index % MT->getNumRows()) * MT->getNumColumns() +
-                             (Index / MT->getNumRows());
-    ElemEnt.setElementIndex(ColMajorIndex);
-    CheckSubElementType(ElemEnt, IList, ElemTy, ColMajorIndex, StructuredList,
+    unsigned ElementIndex;
+    
+    if (SemaRef.getLangOpts().MatrixRowMajor) {
+      // Row-major layout: use the index directly
+      ElementIndex = Index;
+    } else {
+      // Column-major layout: calculate the index
+      assert(SemaRef.getLangOpts().MatrixColMajor && "If Row Major is off Column Major must be on");
+      ElementIndex = (Index % MT->getNumRows()) * MT->getNumColumns() +
+                     (Index / MT->getNumRows());
+    }
+    
+    ElemEnt.setElementIndex(ElementIndex);
+    CheckSubElementType(ElemEnt, IList, ElemTy, ElementIndex, StructuredList,
                         StructuredIndex);
     ++Index;
   }
