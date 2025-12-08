@@ -8995,8 +8995,6 @@ public:
            DerivedSuccess(Result, E);
   }
 
-  bool VisitMatrixElementExpr(const MatrixElementExpr *E) { return false; }
-
   bool VisitExtVectorElementExpr(const ExtVectorElementExpr *E) {
     APValue Val;
     if (!Evaluate(Val, Info, E->getBase()))
@@ -9339,7 +9337,6 @@ public:
   bool VisitCXXUuidofExpr(const CXXUuidofExpr *E);
   bool VisitArraySubscriptExpr(const ArraySubscriptExpr *E);
   bool VisitExtVectorElementExpr(const ExtVectorElementExpr *E);
-  bool VisitMatrixElementExpr(const MatrixElementExpr *E);
   bool VisitUnaryDeref(const UnaryOperator *E);
   bool VisitUnaryReal(const UnaryOperator *E);
   bool VisitUnaryImag(const UnaryOperator *E);
@@ -9699,10 +9696,6 @@ bool LValueExprEvaluator::VisitMemberExpr(const MemberExpr *E) {
 
   // Handle non-static data members.
   return LValueExprEvaluatorBaseTy::VisitMemberExpr(E);
-}
-
-bool LValueExprEvaluator::VisitMatrixElementExpr(const MatrixElementExpr *E) {
-  return false;
 }
 
 bool LValueExprEvaluator::VisitExtVectorElementExpr(
