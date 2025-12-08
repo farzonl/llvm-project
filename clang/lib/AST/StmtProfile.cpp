@@ -1667,6 +1667,11 @@ void StmtProfiler::VisitExtVectorElementExpr(const ExtVectorElementExpr *S) {
   VisitName(&S->getAccessor());
 }
 
+void StmtProfiler::VisitMatrixElementExpr(const MatrixElementExpr *S) {
+  VisitExpr(S);
+  VisitName(&S->getAccessor());
+}
+
 void StmtProfiler::VisitBlockExpr(const BlockExpr *S) {
   VisitExpr(S);
   VisitDecl(S->getBlockDecl());
