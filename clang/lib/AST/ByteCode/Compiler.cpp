@@ -4093,12 +4093,6 @@ bool Compiler<Emitter>::VisitShuffleVectorExpr(const ShuffleVectorExpr *E) {
 }
 
 template <class Emitter>
-bool Compiler<Emitter>::VisitMatrixElementExpr(const MatrixElementExpr *Node) {
-  // TODO
-  return false;
-}
-
-template <class Emitter>
 bool Compiler<Emitter>::VisitExtVectorElementExpr(
     const ExtVectorElementExpr *E) {
   const Expr *Base = E->getBase();

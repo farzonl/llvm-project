@@ -1333,8 +1333,6 @@ public:
 
   LValue emitExtVectorElementExpr(const ExtVectorElementExpr *e);
 
-  LValue emitMatrixElementExpr(cost MatrixElementExpr *e);
-
   Address emitArrayToPointerDecay(const Expr *e,
                                   LValueBaseInfo *baseInfo = nullptr);
 
