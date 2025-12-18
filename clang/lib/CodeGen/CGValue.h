@@ -182,13 +182,13 @@ public:
 /// bitrange.
 class LValue {
   enum {
-    Simple,       // This is a normal l-value, use getAddress().
-    VectorElt,    // This is a vector element l-value (V[i]), use getVector*
-    BitField,     // This is a bitfield l-value, use getBitfield*.
-    ExtVectorElt, // This is an extended vector subset, use getExtVectorComp
-    GlobalReg,    // This is a register l-value, use getGlobalReg()
-    MatrixElt,    // This is a matrix element, use getVector*
-    MatrixRow     // This is a matrix vector subset, use getVector*
+    Simple,         // This is a normal l-value, use getAddress().
+    VectorElt,      // This is a vector element l-value (V[i]), use getVector*
+    BitField,       // This is a bitfield l-value, use getBitfield*.
+    ExtVectorElt,   // This is an extended vector subset, use getExtVectorComp
+    GlobalReg,      // This is a register l-value, use getGlobalReg()
+    MatrixElt,      // This is a matrix element, use getVector*
+    MatrixSubVector // This is a matrix vector subset, use getVector*
   } LVType;
 
   union {
@@ -201,7 +201,7 @@ class LValue {
     llvm::Value *VectorIdx;
 
     // Index into a matrix row subscript: M[i]
-    llvm::Value *MatrixRowIdx;
+    llvm::Value *MatrixSubVectorIdx;
 
     // ExtVector element subset: V.xyx
     llvm::Constant *VectorElts;
@@ -209,6 +209,9 @@ class LValue {
     // BitField start bit and size
     const CGBitFieldInfo *BitFieldInfo;
   };
+
+  // Note: Only meaningful when isMatrixSubVector() and the row is swizzled.
+  unsigned NumCols, NumRows;
 
   QualType Type;
 
@@ -286,7 +289,7 @@ public:
   bool isExtVectorElt() const { return LVType == ExtVectorElt; }
   bool isGlobalReg() const { return LVType == GlobalReg; }
   bool isMatrixElt() const { return LVType == MatrixElt; }
-  bool isMatrixRow() const { return LVType == MatrixRow; }
+  bool isMatrixSubVector() const { return LVType == MatrixSubVector; }
 
   bool isVolatileQualified() const { return Quals.hasVolatile(); }
   bool isRestrictQualified() const { return Quals.hasRestrict(); }
@@ -391,7 +394,7 @@ public:
   }
 
   Address getMatrixAddress() const {
-    assert(isMatrixElt());
+    assert(isMatrixElt() || isMatrixSubVector());
     return Addr;
   }
   llvm::Value *getMatrixPointer() const {
@@ -403,9 +406,19 @@ public:
     return VectorIdx;
   }
 
-  llvm::Value *getMatrixRowIdx() const {
-    assert(isMatrixRow());
-    return MatrixRowIdx;
+  llvm::Value *getMatrixSubVectorIdx() const {
+    assert(isMatrixSubVector());
+    return MatrixSubVectorIdx;
+  }
+
+  unsigned getMatrixNumRows() const {
+    assert(isMatrixSubVector());
+    return NumRows;
+  }
+
+  unsigned getMatrixNumCols() const {
+    assert(isMatrixSubVector());
+    return NumCols;
   }
 
   // extended vector elements.
@@ -496,15 +509,19 @@ public:
     return R;
   }
 
-  static LValue MakeMatrixRow(Address Addr, llvm::Value *RowIdx,
+  static LValue MakeMatrixSubVector(Address Addr, llvm::Value *RowIdx,
+                              unsigned NumCols, unsigned NumRows,
                               QualType MatrixTy, LValueBaseInfo BaseInfo,
                               TBAAAccessInfo TBAAInfo) {
     LValue LV;
-    LV.LVType = MatrixRow;
-    LV.MatrixRowIdx = RowIdx; // store the row index here
+    LV.LVType = MatrixSubVector;
+    LV.MatrixSubVectorIdx = RowIdx; // store the row index here
+    LV.NumCols = NumCols;
+    LV.NumRows = NumRows;
     LV.Initialize(MatrixTy, MatrixTy.getQualifiers(), Addr, BaseInfo, TBAAInfo);
     return LV;
   }
+
 
   static LValue MakeMatrixElt(Address matAddress, llvm::Value *Idx,
                               QualType type, LValueBaseInfo BaseInfo,
