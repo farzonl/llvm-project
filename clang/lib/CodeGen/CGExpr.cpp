@@ -2465,6 +2465,46 @@ RValue CodeGenFunction::EmitLoadOfLValue(LValue LV, SourceLocation Loc) {
         Builder.CreateLoad(LV.getMatrixAddress(), LV.isVolatileQualified());
     return RValue::get(Builder.CreateExtractElement(Load, Idx, "matrixext"));
   }
+  
+  if (LV.isMatrixRowSwizzle()) {
+    QualType RowVecTy = LV.getType();
+    unsigned NumRows = LV.getMatrixNumRows();
+    unsigned NumCols = LV.getMatrixNumCols();
+    const auto *RowVec = RowVecTy->getAs<VectorType>();
+
+    // Load flattened matrix vector.
+    llvm::Value *MatrixExtVector = EmitLoadOfScalar(LV, Loc);
+    llvm::Value *RowIndex = LV.getMatrixRowIdx();
+
+    // Column lanes are a constant <N x i32> vector.
+    llvm::Constant *ColsC = LV.getMatrixRowElts();
+    auto *ColsVTy = llvm::cast<llvm::FixedVectorType>(ColsC->getType());
+    unsigned NumLanes = ColsVTy->getNumElements();
+
+    llvm::Type *ElemTy = ConvertType(RowVec->getElementType());
+    llvm::Type *ResTy = llvm::FixedVectorType::get(ElemTy, NumLanes);
+    llvm::Value *Result = llvm::PoisonValue::get(ResTy);
+
+    llvm::MatrixBuilder MB(Builder);
+    for (unsigned Lane = 0; Lane < NumLanes; ++Lane) {
+      // Extract constant column index for this swizzle lane.
+      llvm::Constant *ColLaneC = ColsC->getAggregateElement(Lane);
+      auto *ColCI = llvm::cast<llvm::ConstantInt>(ColLaneC);
+      unsigned Col = ColCI->getZExtValue();
+
+      // (Optional safety) assert valid column.
+      assert(Col < NumCols && "matrix row swizzle column out of range");
+
+      llvm::Value *ColIdx = llvm::ConstantInt::get(RowIndex->getType(), Col);
+      llvm::Value *EltIndex = MB.CreateIndex(ColIdx, RowIndex, NumRows);
+      llvm::Value *Elt = Builder.CreateExtractElement(MatrixExtVector, EltIndex);
+      llvm::Value *LaneIdx = llvm::ConstantInt::get(Builder.getInt32Ty(), Lane);
+      Result = Builder.CreateInsertElement(Result, Elt, LaneIdx);
+    }
+
+    return RValue::get(Result);
+  }
+
   if (LV.isMatrixRow()) {
     QualType MatTy = LV.getType();
     const ConstantMatrixType *MT = MatTy->castAs<ConstantMatrixType>();
@@ -2715,6 +2755,38 @@ void CodeGenFunction::EmitStoreThroughLValue(RValue Src, LValue Dst,
       auto *I = Builder.CreateStore(Vec, Dst.getMatrixAddress(),
                                     Dst.isVolatileQualified());
       addInstToCurrentSourceAtom(I, Vec);
+      return;
+    }
+    if (Dst.isMatrixRowSwizzle()) {
+       unsigned NumRows = Dst.getMatrixNumRows();
+       [[maybe_unused]] unsigned NumCols = Dst.getMatrixNumCols();
+
+      // Load current flattened matrix vector.
+      llvm::Value *MatrixVec = Builder.CreateLoad(Dst.getAddress(), "matrix.load");
+      llvm::Value *Row = Dst.getMatrixRowIdx();
+
+      // Swizzle columns constant <N x i32>.
+      llvm::Constant *ColsC = Dst.getMatrixRowElts();
+      auto *ColsVTy = llvm::cast<llvm::FixedVectorType>(ColsC->getType());
+      unsigned NumLanes = ColsVTy->getNumElements();
+
+      // Value being stored is the swizzle vector <N x T>.
+      llvm::Value *RowVal = Src.getScalarVal();
+      llvm::MatrixBuilder MB(Builder);
+
+      for (unsigned Lane = 0; Lane < NumLanes; ++Lane) {
+        llvm::Constant *ColLaneC = ColsC->getAggregateElement(Lane);
+        auto *ColCI = llvm::cast<llvm::ConstantInt>(ColLaneC);
+        unsigned Col = ColCI->getZExtValue();
+        assert(Col < NumCols && "matrix row swizzle column out of range");
+        llvm::Value *ColIdx = llvm::ConstantInt::get(Row->getType(), Col);
+        llvm::Value *EltIndex = MB.CreateIndex(ColIdx, Row, NumRows);
+        llvm::Value *LaneIdx = llvm::ConstantInt::get(Builder.getInt32Ty(), Lane);
+        llvm::Value *NewElt = Builder.CreateExtractElement(RowVal, LaneIdx);
+        MatrixVec = Builder.CreateInsertElement(MatrixVec, NewElt, EltIndex);
+      }
+
+      Builder.CreateStore(MatrixVec, Dst.getAddress());
       return;
     }
     if (Dst.isMatrixRow()) {
@@ -4961,27 +5033,12 @@ LValue CodeGenFunction::EmitMatrixSingleSubscriptExpr(
     const MatrixSingleSubscriptExpr *E) {
   LValue Base = EmitLValue(E->getBase());
   llvm::Value *RowIdx = EmitMatrixIndexExpr(E->getRowIdx());
-
-  if (auto *RowConst = llvm::dyn_cast<llvm::ConstantInt>(RowIdx)) {
-    // Extract matrix shape from the AST type
-    const auto *MatTy = E->getBase()->getType()->castAs<ConstantMatrixType>();
-    unsigned NumCols = MatTy->getNumColumns();
-    llvm::SmallVector<llvm::Constant *, 8> Indices;
-    Indices.reserve(NumCols);
-
-    unsigned Row = RowConst->getZExtValue();
-    unsigned Start = Row * NumCols;
-    for (unsigned C = 0; C < NumCols; ++C)
-      Indices.push_back(llvm::ConstantInt::get(Int32Ty, Start + C));
-
-    llvm::Constant *Elts = llvm::ConstantVector::get(Indices);
-    return LValue::MakeExtVectorElt(
-        MaybeConvertMatrixAddress(Base.getAddress(), *this), Elts,
-        E->getBase()->getType(), Base.getBaseInfo(), TBAAAccessInfo());
-  }
+  const auto *MatTy = E->getBase()->getType()->castAs<ConstantMatrixType>();
+  unsigned NumCols = MatTy->getNumColumns();
 
   return LValue::MakeMatrixRow(
       MaybeConvertMatrixAddress(Base.getAddress(), *this), RowIdx,
+      NumCols, MatTy->getNumRows(),
       E->getBase()->getType(), Base.getBaseInfo(), TBAAAccessInfo());
 }
 
@@ -5257,8 +5314,47 @@ EmitExtVectorElementExpr(const ExtVectorElementExpr *E) {
     return LValue::MakeExtVectorElt(Base.getAddress(), CV, type,
                                     Base.getBaseInfo(), TBAAAccessInfo());
   }
-  if (Base.isMatrixRow())
-    return EmitUnsupportedLValue(E, "Matrix single index swizzle");
+  if (Base.isMatrixRow()) {
+    SmallVector<uint32_t, 4> Elts;
+    E->getEncodedElementAccess(Elts);
+    SmallVector<llvm::Constant *, 4> ColConsts;
+    ColConsts.reserve(Elts.size());
+    for (uint32_t Col : Elts)
+      ColConsts.push_back(Builder.getInt32(Col));
+
+    llvm::Constant *Cols =
+        llvm::ConstantVector::get(ColConsts);
+    
+    if (auto *IndexConst = llvm::dyn_cast<llvm::ConstantInt>(Base.getMatrixRowIdx())) {
+      // Extract matrix shape from the AST type
+      llvm::SmallVector<llvm::Constant *, 8> Indices;
+      unsigned NumRows = Base.getMatrixNumRows();
+      Indices.reserve(NumRows);
+
+      unsigned Col = IndexConst->getZExtValue();
+      for (unsigned R = 0; R < NumRows; ++R) {
+        llvm::Constant *RowLaneR = Cols->getAggregateElement(R);
+        auto *RowCI = llvm::cast<llvm::ConstantInt>(RowLaneR);
+        unsigned Row = RowCI->getZExtValue();
+        unsigned Linear = Row * NumRows + Col; 
+        Indices.push_back(llvm::ConstantInt::get(Int32Ty, Linear));
+      }
+
+      llvm::Constant *Elts = llvm::ConstantVector::get(Indices);
+      return LValue::MakeExtVectorElt(
+          MaybeConvertMatrixAddress(Base.getAddress(), *this), Elts,
+          E->getBase()->getType(), Base.getBaseInfo(), TBAAAccessInfo());
+    }
+    
+     return LValue::MakeMatrixRowSwizzle(Base.getMatrixAddress(),
+                                        Base.getMatrixRowIdx(),
+                                        Base.getMatrixNumRows(),
+                                        Base.getMatrixNumCols(),
+                                        Cols,
+                                        E->getType(),
+                                        Base.getBaseInfo(),
+                                        TBAAAccessInfo());
+  }
 
   assert(Base.isExtVectorElt() && "Can only subscript lvalue vec elts here!");
 

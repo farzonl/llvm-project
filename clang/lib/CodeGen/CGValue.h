@@ -210,6 +210,10 @@ class LValue {
     const CGBitFieldInfo *BitFieldInfo;
   };
 
+  // Note: Only meaningful when isMatrixRow() and the row is swizzled.
+  llvm::Constant *MatrixRowElts = nullptr;
+  unsigned NumCols, NumRows;
+
   QualType Type;
 
   // 'const' is unused here
@@ -287,6 +291,7 @@ public:
   bool isGlobalReg() const { return LVType == GlobalReg; }
   bool isMatrixElt() const { return LVType == MatrixElt; }
   bool isMatrixRow() const { return LVType == MatrixRow; }
+  bool isMatrixRowSwizzle() const { return isMatrixRow() && MatrixRowElts != nullptr; }
 
   bool isVolatileQualified() const { return Quals.hasVolatile(); }
   bool isRestrictQualified() const { return Quals.hasRestrict(); }
@@ -391,7 +396,7 @@ public:
   }
 
   Address getMatrixAddress() const {
-    assert(isMatrixElt());
+    assert(isMatrixElt() || isMatrixRow());
     return Addr;
   }
   llvm::Value *getMatrixPointer() const {
@@ -406,6 +411,21 @@ public:
   llvm::Value *getMatrixRowIdx() const {
     assert(isMatrixRow());
     return MatrixRowIdx;
+  }
+
+  unsigned getMatrixNumRows() const {
+    assert(isMatrixRow());
+    return NumRows;
+  }
+
+  unsigned getMatrixNumCols() const {
+    assert(isMatrixRow());
+    return NumCols;
+  }
+
+   llvm::Constant *getMatrixRowElts() const {
+    assert(isMatrixRowSwizzle() && "not a matrix row swizzle lvalue");
+    return MatrixRowElts;
   }
 
   // extended vector elements.
@@ -497,14 +517,32 @@ public:
   }
 
   static LValue MakeMatrixRow(Address Addr, llvm::Value *RowIdx,
+                              unsigned NumCols, unsigned NumRows,
                               QualType MatrixTy, LValueBaseInfo BaseInfo,
                               TBAAAccessInfo TBAAInfo) {
     LValue LV;
     LV.LVType = MatrixRow;
     LV.MatrixRowIdx = RowIdx; // store the row index here
+    LV.NumCols = NumCols;
+    LV.NumRows = NumRows;
+    LV.MatrixRowElts = nullptr;
     LV.Initialize(MatrixTy, MatrixTy.getQualifiers(), Addr, BaseInfo, TBAAInfo);
     return LV;
   }
+
+  static LValue MakeMatrixRowSwizzle(Address MatAddr, llvm::Value *RowIdx,
+                                   unsigned NumCols, unsigned NumRows,
+                                   llvm::Constant *Cols, QualType MatrixTy,
+                                   LValueBaseInfo BaseInfo,
+                                   TBAAAccessInfo TBAAInfo) {
+  LValue LV;
+  LV.LVType = MatrixRow;
+  LV.Addr = MatAddr;
+  LV.MatrixRowIdx = RowIdx;
+  LV.MatrixRowElts = Cols;    // swizzle columns
+  LV.Initialize(MatrixTy, MatrixTy.getQualifiers(), MatAddr, BaseInfo, TBAAInfo);
+  return LV;
+}
 
   static LValue MakeMatrixElt(Address matAddress, llvm::Value *Idx,
                               QualType type, LValueBaseInfo BaseInfo,
