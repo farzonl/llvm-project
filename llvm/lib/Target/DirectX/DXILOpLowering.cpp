@@ -1119,6 +1119,52 @@ public:
     });
   }
 
+  /// Lower `[us]mul.with.overflow` to the DXIL IMul/UMul ops. These ops return
+  /// the full 64-bit product split into its low and high 32-bit halves
+  /// (`dx.types.twoi32` = { i32 low, i32 high }), so the `{ iN, i1 }` result
+  /// the intrinsic expects has to be synthesized: the product is the low half
+  /// and the overflow bit is derived from the high half.
+  [[nodiscard]] bool lowerMulWithOverflow(Function &F, bool IsSigned) {
+    IRBuilder<> &IRB = OpBuilder.getIRB();
+    Type *Int32Ty = IRB.getInt32Ty();
+
+    return replaceFunction(F, [&](CallInst *CI) -> Error {
+      IRB.SetInsertPoint(CI);
+
+      SmallVector<Value *> Args(CI->arg_begin(), CI->arg_end());
+      dxil::OpCode OpCode = IsSigned ? dxil::OpCode::IMul : dxil::OpCode::UMul;
+      Expected<CallInst *> OpCall =
+          OpBuilder.tryCreateOp(OpCode, Args, CI->getName(), Int32Ty);
+      if (Error E = OpCall.takeError())
+        return E;
+
+      // IMul/UMul return { i32 low, i32 high } of the full 64-bit product.
+      Value *Low = IRB.CreateExtractValue(*OpCall, 0);
+      Value *High = IRB.CreateExtractValue(*OpCall, 1);
+
+      // The 32-bit multiply overflows when the high half is not the
+      // sign-/zero-extension of the low half:
+      //   unsigned: high != 0
+      //   signed:   high != (low >> 31)  (arithmetic shift replicates the sign)
+      Value *Overflow;
+      if (IsSigned) {
+        Value *SignBits = IRB.CreateAShr(Low, ConstantInt::get(Int32Ty, 31));
+        Overflow = IRB.CreateICmpNE(High, SignBits);
+      } else {
+        Overflow = IRB.CreateICmpNE(High, ConstantInt::get(Int32Ty, 0));
+      }
+
+      // Rebuild the { i32, i1 } aggregate the intrinsic is expected to produce.
+      Value *Result = PoisonValue::get(CI->getType());
+      Result = IRB.CreateInsertValue(Result, Low, 0);
+      Result = IRB.CreateInsertValue(Result, Overflow, 1);
+
+      CI->replaceAllUsesWith(Result);
+      CI->eraseFromParent();
+      return Error::success();
+    });
+  }
+
   bool lowerIntrinsics() {
     bool Updated = false;
     bool HasErrors = false;
@@ -1156,6 +1202,12 @@ public:
 #include "DXILOperation.inc"
       case Intrinsic::dx_resource_handlefrombinding:
         HasErrors |= lowerHandleFromBinding(F);
+        break;
+      case Intrinsic::smul_with_overflow:
+        HasErrors |= lowerMulWithOverflow(F, /*IsSigned=*/true);
+        break;
+      case Intrinsic::umul_with_overflow:
+        HasErrors |= lowerMulWithOverflow(F, /*IsSigned=*/false);
         break;
       case Intrinsic::dx_resource_getbasepointer:
       case Intrinsic::dx_resource_getpointer:

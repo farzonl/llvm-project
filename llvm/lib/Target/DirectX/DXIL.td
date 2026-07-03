@@ -57,6 +57,7 @@ def ResBindTy : DXILOpParamType;
 def ResPropsTy : DXILOpParamType;
 def SplitDoubleTy : DXILOpParamType;
 def BinaryWithCarryTy : DXILOpParamType;
+def BinaryWithTwoOutsTy : DXILOpParamType;
 def DimensionsTy : DXILOpParamType;
 def Fouri32s : DXILOpParamType;
 
@@ -769,9 +770,39 @@ def UMin : DXILOp<40, binary> {
   let attributes = [Attributes<DXIL1_0, [ReadNone]>];
 }
 
+def IMul : DXILOp<41, binaryWithTwoOuts> {
+  let Doc = "Signed multiply of 32-bit operands, returning the low and high "
+            "32-bit halves of the full 64-bit product";
+  let arguments = [OverloadTy, OverloadTy];
+  let result = BinaryWithTwoOutsTy;
+  let overloads = [Overloads<DXIL1_0, [Int32Ty]>];
+  let stages = [Stages<DXIL1_0, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, [ReadNone]>];
+}
+
+def UMul : DXILOp<42, binaryWithTwoOuts> {
+  let Doc = "Unsigned multiply of 32-bit operands, returning the low and high "
+            "32-bit halves of the full 64-bit product";
+  let arguments = [OverloadTy, OverloadTy];
+  let result = BinaryWithTwoOutsTy;
+  let overloads = [Overloads<DXIL1_0, [Int32Ty]>];
+  let stages = [Stages<DXIL1_0, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, [ReadNone]>];
+}
+
 def UAddc : DXILOp<44, binaryWithCarryOrBorrow > {
   let Doc = "unsigned add of 32-bit operand with the carry";
   let intrinsics = [IntrinSelect<int_uadd_with_overflow>];
+  let arguments = [OverloadTy, OverloadTy];
+  let result = BinaryWithCarryTy;
+  let overloads = [Overloads<DXIL1_0, [Int32Ty]>];
+  let stages = [Stages<DXIL1_0, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, [ReadNone]>];
+}
+
+def USubb : DXILOp<45, binaryWithCarryOrBorrow > {
+  let Doc = "unsigned subtract of 32-bit operands with the borrow";
+  let intrinsics = [IntrinSelect<int_usub_with_overflow>];
   let arguments = [OverloadTy, OverloadTy];
   let result = BinaryWithCarryTy;
   let overloads = [Overloads<DXIL1_0, [Int32Ty]>];

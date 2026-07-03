@@ -261,6 +261,13 @@ static StructType *getBinaryWithCarryType(LLVMContext &Context) {
   return StructType::create({Int32Ty, Int1Ty}, "dx.types.i32c");
 }
 
+static StructType *getBinaryWithTwoOutsType(LLVMContext &Context) {
+  if (auto *ST = StructType::getTypeByName(Context, "dx.types.twoi32"))
+    return ST;
+  Type *Int32Ty = Type::getInt32Ty(Context);
+  return StructType::create({Int32Ty, Int32Ty}, "dx.types.twoi32");
+}
+
 static StructType *getDimensionsType(LLVMContext &Context) {
   Type *Int32Ty = Type::getInt32Ty(Context);
   return getOrCreateStructType("dx.types.Dimensions",
@@ -332,6 +339,8 @@ static Type *getTypeFromOpParamType(OpParamType Kind, LLVMContext &Ctx,
     return getSplitDoubleType(Ctx);
   case OpParamType::BinaryWithCarryTy:
     return getBinaryWithCarryType(Ctx);
+  case OpParamType::BinaryWithTwoOutsTy:
+    return getBinaryWithTwoOutsType(Ctx);
   case OpParamType::DimensionsTy:
     return getDimensionsType(Ctx);
   case OpParamType::Fouri32s:
