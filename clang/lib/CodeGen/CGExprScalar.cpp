@@ -2230,8 +2230,7 @@ Value *ScalarExprEmitter::VisitMatrixSingleSubscriptExpr(
 
   for (unsigned Col = 0; Col != NumColumns; ++Col) {
     Value *ColVal = llvm::ConstantInt::get(RowIdx->getType(), Col);
-    Value *EltIdx = MB.CreateIndex(RowIdx, ColVal, NumRows, NumColumns,
-                                   /*IsRowMajor=*/false, "matrix_row_idx");
+    Value *EltIdx = MB.CreateIndex(RowIdx, ColVal, NumRows, NumColumns);
     Value *Elt =
         Builder.CreateExtractElement(FlatMatrix, EltIdx, "matrix_elem");
     Value *Lane = llvm::ConstantInt::get(Builder.getInt32Ty(), Col);
@@ -2255,8 +2254,7 @@ Value *ScalarExprEmitter::VisitMatrixSubscriptExpr(MatrixSubscriptExpr *E) {
   Value *Idx;
   unsigned NumCols = MatrixTy->getNumColumns();
   unsigned NumRows = MatrixTy->getNumRows();
-  Idx = MB.CreateIndex(RowIdx, ColumnIdx, NumRows, NumCols,
-                       /*IsRowMajor=*/false);
+  Idx = MB.CreateIndex(RowIdx, ColumnIdx, NumRows, NumCols);
 
   if (CGF.CGM.getCodeGenOpts().OptimizationLevel > 0)
     MB.CreateIndexAssumption(Idx, MatrixTy->getNumElementsFlattened());
@@ -2605,6 +2603,62 @@ static Value *EmitHLSLElementwiseCast(CodeGenFunction &CGF, LValue SrcVal,
   RValue RVal = CGF.EmitLoadOfLValue(LoadList[0], Loc);
   assert(RVal.isScalar() && "All flattened source values should be scalars.");
   return CGF.EmitScalarConversion(RVal.getScalarVal(), LoadList[0].getType(),
+                                  DestTy, Loc);
+}
+
+static Value *EmitHLSLElementwiseCastFromMatrix(CodeGenFunction &CGF,
+                                                Value *SrcVal,
+                                                const ConstantMatrixType *SrcTy,
+                                                QualType DestTy,
+                                                SourceLocation Loc) {
+  auto GetElement = [&](unsigned RowMajorIdx) {
+    unsigned Row = RowMajorIdx / SrcTy->getNumColumns();
+    unsigned Col = RowMajorIdx % SrcTy->getNumColumns();
+    unsigned Idx = SrcTy->getColumnMajorFlattenedIndex(Row, Col);
+    Value *Element = CGF.Builder.CreateExtractElement(SrcVal, Idx, "matrixext");
+    return CGF.EmitFromMemory(Element, SrcTy->getElementType());
+  };
+
+  if (const auto *VecTy = DestTy->getAs<VectorType>()) {
+    assert(SrcTy->getNumElementsFlattened() >= VecTy->getNumElements() &&
+           "Source matrix must have enough elements for destination vector");
+    Value *Result = nullptr;
+    for (unsigned I = 0; I != VecTy->getNumElements(); ++I) {
+      Value *Element = GetElement(I);
+      Element = CGF.EmitScalarConversion(Element, SrcTy->getElementType(),
+                                         VecTy->getElementType(), Loc);
+      if (!Result)
+        Result = llvm::PoisonValue::get(llvm::FixedVectorType::get(
+            Element->getType(), VecTy->getNumElements()));
+      Result = CGF.Builder.CreateInsertElement(Result, Element, I);
+    }
+    return Result;
+  }
+
+  if (const auto *DestMatTy = DestTy->getAs<ConstantMatrixType>()) {
+    assert(SrcTy->getNumElementsFlattened() >=
+               DestMatTy->getNumElementsFlattened() &&
+           "Source matrix must have enough elements for destination matrix");
+    Value *Result = nullptr;
+    for (unsigned Row = 0; Row != DestMatTy->getNumRows(); ++Row) {
+      for (unsigned Col = 0; Col != DestMatTy->getNumColumns(); ++Col) {
+        unsigned SrcIdx = DestMatTy->getRowMajorFlattenedIndex(Row, Col);
+        Value *Element = GetElement(SrcIdx);
+        Element = CGF.EmitScalarConversion(Element, SrcTy->getElementType(),
+                                           DestMatTy->getElementType(), Loc);
+        if (!Result)
+          Result = llvm::PoisonValue::get(llvm::FixedVectorType::get(
+              Element->getType(), DestMatTy->getNumElementsFlattened()));
+        unsigned DestIdx = DestMatTy->getColumnMajorFlattenedIndex(Row, Col);
+        Result = CGF.Builder.CreateInsertElement(Result, Element, DestIdx);
+      }
+    }
+    return Result;
+  }
+
+  assert(DestTy->isBuiltinType() &&
+         "Destination type must be a vector, matrix, or builtin type");
+  return CGF.EmitScalarConversion(GetElement(0), SrcTy->getElementType(),
                                   DestTy, Loc);
 }
 
@@ -3206,6 +3260,12 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   case CK_HLSLElementwiseCast: {
     RValue RV = CGF.EmitAnyExpr(E);
     SourceLocation Loc = CE->getExprLoc();
+
+    if (const auto *SrcMatTy = E->getType()->getAs<ConstantMatrixType>()) {
+      assert(RV.isScalar() && "Matrix rvalue must have scalar representation");
+      return EmitHLSLElementwiseCastFromMatrix(CGF, RV.getScalarVal(), SrcMatTy,
+                                               DestTy, Loc);
+    }
 
     Address SrcAddr = Address::invalid();
 
