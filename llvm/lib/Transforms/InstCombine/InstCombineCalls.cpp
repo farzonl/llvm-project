@@ -4260,7 +4260,8 @@ Instruction *InstCombinerImpl::visitCallInst(CallInst &CI) {
 
     if (match(Arg, m_ZExtOrSExtOrSelf(m_Value(Vect)))) {
       if (auto *FTy = dyn_cast<FixedVectorType>(Vect->getType()))
-        if (FTy->getElementType() == Builder.getInt1Ty()) {
+        if (FTy->getElementType() == Builder.getInt1Ty() &&
+            isDesirableIntType(FTy->getNumElements())) {
           Value *Res = Builder.CreateBitCast(
               Vect, Builder.getIntNTy(FTy->getNumElements()));
           if (IID == Intrinsic::vector_reduce_and) {
