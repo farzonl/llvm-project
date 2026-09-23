@@ -3189,18 +3189,22 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   case CK_HLSLElementwiseCast: {
     RValue RV = CGF.EmitAnyExpr(E);
     SourceLocation Loc = CE->getExprLoc();
+    QualType SrcTy = E->getType();
 
     Address SrcAddr = Address::invalid();
 
     if (RV.isAggregate()) {
       SrcAddr = RV.getAggregateAddress();
     } else {
-      SrcAddr = CGF.CreateMemTemp(E->getType(), "hlsl.ewcast.src");
-      LValue TmpLV = CGF.MakeAddrLValue(SrcAddr, E->getType());
+      if (SrcTy->isConstantMatrixType())
+        SrcTy = CGF.getContext().getMatrixTypeWithLayout(
+            SrcTy, MatrixType::LayoutKind::ColumnMajor);
+      SrcAddr = CGF.CreateMemTemp(SrcTy, "hlsl.ewcast.src");
+      LValue TmpLV = CGF.MakeAddrLValue(SrcAddr, SrcTy);
       CGF.EmitStoreThroughLValue(RV, TmpLV);
     }
 
-    LValue SrcVal = CGF.MakeAddrLValue(SrcAddr, E->getType());
+    LValue SrcVal = CGF.MakeAddrLValue(SrcAddr, SrcTy);
     return EmitHLSLElementwiseCast(CGF, SrcVal, DestTy, Loc);
   }
 

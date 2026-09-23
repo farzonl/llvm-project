@@ -7575,6 +7575,7 @@ void CodeGenFunction::FlattenAccessAndTypeLValue(
 
   while (!WorkList.empty()) {
     auto [LVal, T, IdxList] = WorkList.pop_back_val();
+    QualType LayoutTy = T;
     T = T.getCanonicalType().getUnqualifiedType();
     if (const auto *CAT = dyn_cast<ConstantArrayType>(T)) {
       uint64_t Size = CAT->getZExtSize();
@@ -7663,7 +7664,7 @@ void CodeGenFunction::FlattenAccessAndTypeLValue(
       Address MatAddr = MaybeConvertMatrixAddress(Base.getAddress(), *this);
       unsigned NumRows = MT->getNumRows();
       unsigned NumCols = MT->getNumColumns();
-      bool IsMatrixRowMajor = isMatrixRowMajor(getLangOpts(), T);
+      bool IsMatrixRowMajor = isMatrixRowMajor(getLangOpts(), LayoutTy);
       llvm::MatrixBuilder MB(Builder);
       for (unsigned Row = 0; Row < MT->getNumRows(); Row++) {
         for (unsigned Col = 0; Col < MT->getNumColumns(); Col++) {
