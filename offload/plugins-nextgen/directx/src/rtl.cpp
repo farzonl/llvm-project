@@ -443,6 +443,14 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     return Info;
   }
   Error getDeviceMemorySize(uint64_t &Size) override {
+    bool Integrated = false;
+    if (!Adapter->IsPropertySupported(DXCoreAdapterProperty::IsIntegrated))
+      return unsupported("adapter memory model queries");
+    if (auto Err =
+            check(Adapter->GetProperty(DXCoreAdapterProperty::IsIntegrated,
+                                       sizeof(Integrated), &Integrated),
+                  "IDXCoreAdapter::GetProperty(IsIntegrated)"))
+      return Err;
     uint64_t Dedicated = 0, System = 0, Shared = 0;
     for (auto [Property, Destination] :
          {std::pair{DXCoreAdapterProperty::DedicatedAdapterMemory, &Dedicated},
@@ -459,7 +467,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     if (!Total || (!*Total && !Shared))
       return Plugin::error(ErrorCode::BACKEND_FAILURE,
                            "DirectX adapter returned invalid memory capacity");
-    Size = *Total ? *Total : Shared;
+    Size = (Integrated && Shared) || !*Total ? Shared : *Total;
     return Error::success();
   }
   uint64_t getClockFrequency() const override {

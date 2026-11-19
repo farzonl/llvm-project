@@ -493,6 +493,48 @@ TEST_F(DirectXDeviceTest, DoesNotInventUnknownClockRates) {
   EXPECT_EQ(Clock, 0x12345678u);
 }
 
+#ifdef _WIN32
+TEST_F(DirectXDeviceTest, ReportsMemoryCapacityForTheNativeMemoryModel) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native Windows DXCore";
+  std::string Message;
+  auto Library =
+      llvm::sys::DynamicLibrary::getPermanentLibrary("dxcore.dll", &Message);
+  ASSERT_TRUE(Library.isValid()) << Message;
+  using CreateFactoryTy = HRESULT(STDAPICALLTYPE *)(REFIID, void **);
+  auto CreateFactory = reinterpret_cast<CreateFactoryTy>(
+      Library.getAddressOfSymbol("DXCoreCreateAdapterFactory"));
+  ASSERT_NE(CreateFactory, nullptr);
+  Microsoft::WRL::ComPtr<IDXCoreAdapterFactory> Factory;
+  ASSERT_TRUE(SUCCEEDED(CreateFactory(IID_PPV_ARGS(&Factory))));
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto &Native = *static_cast<ID3D12Device *>(Handle);
+  Microsoft::WRL::ComPtr<IDXCoreAdapter> Adapter;
+  ASSERT_TRUE(SUCCEEDED(Factory->GetAdapterByLuid(Native.GetAdapterLuid(),
+                                                  IID_PPV_ARGS(&Adapter))));
+  D3D12_FEATURE_DATA_ARCHITECTURE Architecture{};
+  ASSERT_TRUE(SUCCEEDED(Native.CheckFeatureSupport(
+      D3D12_FEATURE_ARCHITECTURE, &Architecture, sizeof(Architecture))));
+  DXCoreAdapterProperty Properties[] = {
+      DXCoreAdapterProperty::DedicatedAdapterMemory,
+      DXCoreAdapterProperty::DedicatedSystemMemory,
+      DXCoreAdapterProperty::SharedSystemMemory};
+  uint64_t Memory[3]{};
+  for (size_t I = 0; I < 3; ++I)
+    ASSERT_TRUE(SUCCEEDED(
+        Adapter->GetProperty(Properties[I], sizeof(Memory[I]), &Memory[I])));
+  uint64_t Reported = 0;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_GLOBAL_MEM_SIZE,
+                                        sizeof(Reported), &Reported)));
+  EXPECT_EQ(Reported, Architecture.UMA || !(Memory[0] + Memory[1])
+                          ? Memory[2]
+                          : Memory[0] + Memory[1]);
+  EXPECT_GT(Reported, 0u);
+}
+#endif
+
 TEST_F(DirectXDeviceTest, QueueLifecycle) {
   ol_context_handle_t Context = nullptr;
   ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));

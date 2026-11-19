@@ -19,12 +19,12 @@ The opt-in `directx` plugin supports liboffload device discovery and single-devi
 context creation, queries, and destruction, explicit device-buffer allocation,
 allocation queries and freeing, compute queues with fence-based synchronization,
 explicit buffer copies, validated single-entry DXIL program loading/unloading,
-and synchronous compute dispatch.
+asynchronous compute dispatch on explicit queues, ordered host callbacks,
+pattern fills, and synchronization/profiling events.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
-and native `ID3D12Device` handles are available. Compute-only adapters, events,
-host callbacks, host/managed allocations, and asynchronous shader
-execution are not supported yet.
+and native `ID3D12Device` handles are available. Compute-only adapters and
+host/managed allocations are not supported yet.
 This is not an OpenMP target.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
@@ -44,7 +44,9 @@ shader-visible descriptor heap. They enforce 16-byte raw-view alignment and
 exclude allocation padding and pool capacity. Launches resolve pointers only in
 the program's context, require exact compiled thread-group dimensions, transition
 resources to their SRV/UAV states and back to `COMMON`, and retain all native
-objects through fence completion. Both null and explicit queues block. Mixed
+objects through fence completion. Null queues block; explicit queues submit
+asynchronously and require queue/event synchronization before observing
+readbacks or freeing allocations. Mixed
 SRV/UAV views of one resource, cooperative dispatch, and dynamic shared memory
 remain unsupported.
 Programs currently require exactly one entry in an uncompressed, version-3
@@ -122,21 +124,26 @@ Their checked-in DXIL fixtures are generated from the accompanying HLSL with
 the documented Clang or DXC commands; running the tests does not require either
 compiler.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy
-tests can also run. Tests requiring profiling events, host callbacks, host/managed
-allocations, or general-purpose device binaries are not supported yet.
+tests can also run, including profiling-event creation, ordered host callbacks,
+and device-buffer pattern fills. Tests requiring host/managed allocations or
+general-purpose device binaries are not supported yet.
 The DirectX-specific tests exercise packaged compute shaders.
 Device information reports DXCore vendor/driver identity and memory capacity,
 D3D12 group and per-axis dispatch limits, and native floating-point support.
-Memory capacity describes dedicated memory when present, otherwise shared system
-memory; it is not a guarantee that an allocation of that size will succeed.
+Memory capacity describes shared system memory for integrated adapters and
+dedicated memory for discrete adapters, falling back to shared memory when no
+dedicated memory exists. It is not a guarantee that an allocation of that size
+will succeed.
 Shared-memory limits describe hardware, not support for `groupshared` in the
 experimental launch ABI. Unknown compute-unit counts, hardware clock rates,
 floating-point mode flags, variable wave widths, and the unrepresentable
 32-bit aggregate work-item limit remain explicitly unsupported rather than
 being guessed. The full generic device-information suite is therefore not yet
 supported.
-Some generic queue and copy tests also require host callbacks even when their
-names do not mention callbacks; those are outside this synchronous prototype.
+Native tests cover event-driven retirement, dependency failure propagation,
+callback ordering, profiling, and asynchronous lifetime/concurrency behavior.
+Portable emulators do not validate native asynchronous execution or Windows
+cross-queue clock calibration.
 
 When checking a statically linked Nacelle build with LeakSanitizer, preload its
 shared library with `LD_PRELOAD` as well as setting the two runtime path
