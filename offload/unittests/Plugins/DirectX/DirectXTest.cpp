@@ -7,10 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+// Parse LLVM's COFF enums before the Windows SDK defines conflicting macros.
+#include "llvm/Bitcode/BitcodeWriter.h"
+
 #include "DirectXArguments.h"
 #include "DirectXQueue.h"
 #include "DirectXRootSignature.h"
-#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Object/OffloadBinary.h"
@@ -21,6 +23,10 @@
 #include "llvm/Support/raw_ostream.h"
 #include <OffloadAPI.h>
 #include <gtest/gtest.h>
+
+#ifdef _WIN32
+#include <d3d12sdklayers.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -57,7 +63,7 @@ testing::AssertionResult failedWith(ol_result_t Result, ol_errc_t Code) {
   return testing::AssertionSuccess();
 }
 
-llvm::Expected<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE> rootSerializer() {
+llvm::Expected<llvm::sys::DynamicLibrary> d3d12Runtime() {
   const char *Name = std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY");
   if (!Name)
     Name = "d3d12.dll";
@@ -66,8 +72,15 @@ llvm::Expected<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE> rootSerializer() {
   if (!Library.isValid())
     return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
                                      Message.c_str());
+  return Library;
+}
+
+llvm::Expected<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE> rootSerializer() {
+  auto Library = d3d12Runtime();
+  if (!Library)
+    return Library.takeError();
   auto Serialize = reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(
-      Library.getAddressOfSymbol("D3D12SerializeRootSignature"));
+      Library->getAddressOfSymbol("D3D12SerializeRootSignature"));
   if (!Serialize)
     return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
                                      "missing root serializer");
@@ -98,6 +111,21 @@ public:
 class DirectXTest : public testing::Test {
 protected:
   void SetUp() override {
+#ifdef _WIN32
+    if (std::getenv("OFFLOAD_DIRECTX_TEST_GPU_VALIDATION")) {
+      auto Library = d3d12Runtime();
+      ASSERT_TRUE(static_cast<bool>(Library))
+          << llvm::toString(Library.takeError());
+      auto GetDebugInterface = reinterpret_cast<PFN_D3D12_GET_DEBUG_INTERFACE>(
+          Library->getAddressOfSymbol("D3D12GetDebugInterface"));
+      ASSERT_NE(GetDebugInterface, nullptr);
+      Microsoft::WRL::ComPtr<ID3D12Debug1> Debug;
+      ASSERT_TRUE(SUCCEEDED(GetDebugInterface(IID_PPV_ARGS(&Debug))));
+      Debug->EnableDebugLayer();
+      Debug->SetEnableGPUBasedValidation(TRUE);
+      Debug->SetEnableSynchronizedCommandQueueValidation(TRUE);
+    }
+#endif
     ol_platform_backend_t Backend = OL_PLATFORM_BACKEND_DIRECTX;
     ol_init_args_t Args = OL_INIT_ARGS_INIT;
     Args.NumPlatforms = 1;
@@ -111,6 +139,9 @@ protected:
 class DirectXDeviceTest : public DirectXTest {
 protected:
   ol_device_handle_t Device = nullptr;
+#ifdef _WIN32
+  Microsoft::WRL::ComPtr<ID3D12InfoQueue> InfoQueue;
+#endif
 
   void SetUp() override {
     DirectXTest::SetUp();
@@ -129,6 +160,11 @@ protected:
           return true;
         },
         &Devices)));
+    unsigned DeviceIndex = 0;
+    if (const char *Index = std::getenv("OFFLOAD_DIRECTX_TEST_DEVICE"))
+      ASSERT_FALSE(llvm::StringRef(Index).getAsInteger(10, DeviceIndex))
+          << "OFFLOAD_DIRECTX_TEST_DEVICE must be a nonnegative device index";
+    unsigned Index = 0;
     for (auto Candidate : Devices) {
       ol_platform_handle_t Platform;
       ASSERT_TRUE(succeeded(olGetDeviceInfo(Candidate, OL_DEVICE_INFO_PLATFORM,
@@ -136,12 +172,46 @@ protected:
       ol_platform_backend_t Backend;
       ASSERT_TRUE(succeeded(olGetPlatformInfo(
           Platform, OL_PLATFORM_INFO_BACKEND, sizeof(Backend), &Backend)));
-      if (Backend == OL_PLATFORM_BACKEND_DIRECTX) {
+      if (Backend == OL_PLATFORM_BACKEND_DIRECTX && Index++ == DeviceIndex) {
         Device = Candidate;
         break;
       }
     }
     ASSERT_NE(Device, nullptr);
+    size_t NameSize = 0;
+    ASSERT_TRUE(succeeded(
+        olGetDeviceInfoSize(Device, OL_DEVICE_INFO_PRODUCT_NAME, &NameSize)));
+    std::string Name(NameSize, '\0');
+    ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_PRODUCT_NAME,
+                                          NameSize, Name.data())));
+    RecordProperty("DirectXDevice", Name.c_str());
+#ifdef _WIN32
+    if (std::getenv("OFFLOAD_DIRECTX_TEST_GPU_VALIDATION")) {
+      void *Handle = nullptr;
+      ASSERT_TRUE(succeeded(olGetDeviceInfo(
+          Device, OL_DEVICE_INFO_NATIVE_HANDLE, sizeof(Handle), &Handle)));
+      ASSERT_TRUE(SUCCEEDED(static_cast<ID3D12Device *>(Handle)->QueryInterface(
+          IID_PPV_ARGS(&InfoQueue))));
+    }
+#endif
+  }
+
+  void TearDown() override {
+    DirectXTest::TearDown();
+#ifdef _WIN32
+    if (!InfoQueue)
+      return;
+    for (UINT64 I = 0;
+         I < InfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter(); ++I) {
+      SIZE_T Size = 0;
+      ASSERT_TRUE(SUCCEEDED(InfoQueue->GetMessage(I, nullptr, &Size)));
+      std::vector<uint8_t> Storage(Size);
+      auto *Message = reinterpret_cast<D3D12_MESSAGE *>(Storage.data());
+      ASSERT_TRUE(SUCCEEDED(InfoQueue->GetMessage(I, Message, &Size)));
+      EXPECT_GT(Message->Severity, D3D12_MESSAGE_SEVERITY_WARNING)
+          << Message->pDescription;
+    }
+#endif
   }
 };
 
@@ -1341,6 +1411,9 @@ TEST_F(DirectXDispatchTest, ZeroGroupsDoNoWorkAndInactiveDimensionsAreOne) {
   ASSERT_TRUE(succeeded(olMemcpy(Queue, Output, Device, Initial.data(), nullptr,
                                  Initial.size())));
   Launch.NumGroups = {0, 65535, 65535};
+  EXPECT_TRUE(
+      failedWith(launch(Queue, nullptr, Output), OL_ERRC_INVALID_ARGUMENT));
+  EXPECT_TRUE(failedWith(launch(Queue, Input, Input), OL_ERRC_UNSUPPORTED));
   ASSERT_TRUE(succeeded(launch(Queue, Input, Output)));
   ASSERT_TRUE(succeeded(
       olMemcpy(Queue, Actual.data(), nullptr, Output, Device, Actual.size())));

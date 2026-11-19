@@ -674,6 +674,8 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
     if (!Inserted && It->second != State)
       return unsupported("simultaneous SRV/UAV views of one buffer resource");
   }
+  if (!NumBlocks[0] || !NumBlocks[1] || !NumBlocks[2])
+    return (*Queue)->synchronize();
   if (auto Err = Bindings->createDescriptorHeap(*Program->NativeDevice.Get()))
     return Err;
   DirectXQueueTy::SubmissionTy Submission{};

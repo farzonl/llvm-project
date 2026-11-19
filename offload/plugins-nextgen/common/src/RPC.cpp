@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RPC.h"
+#include "OffloadRPC.h"
 
 #include "Shared/Debug.h"
 #include "Shared/RPCOpcodes.h"

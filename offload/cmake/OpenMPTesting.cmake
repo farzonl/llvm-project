@@ -87,11 +87,15 @@ function(add_offload_testsuite target comment)
     list(APPEND extra_args EXCLUDE_FROM_CHECK_ALL)
   endif()
 
+  if(TARGET clang)
+    list(APPEND ARG_DEPENDS clang)
+  endif()
+
   add_lit_testsuite(${target}
     ${comment}
     ${ARG_UNPARSED_ARGUMENTS}
     ${extra_args}
-    DEPENDS clang FileCheck not ${ARG_DEPENDS}
+    DEPENDS FileCheck not ${ARG_DEPENDS}
     ARGS ${ARG_ARGS}
   )
 endfunction()

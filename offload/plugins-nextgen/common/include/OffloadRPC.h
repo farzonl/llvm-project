@@ -1,4 +1,4 @@
-//===- RPC.h - Interface for remote procedure calls from the GPU ----------===//
+//===- OffloadRPC.h - Remote procedure calls from the GPU ------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -13,8 +13,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef OPENMP_LIBOMPTARGET_PLUGINS_NEXTGEN_COMMON_RPC_H
-#define OPENMP_LIBOMPTARGET_PLUGINS_NEXTGEN_COMMON_RPC_H
+#ifndef OPENMP_LIBOMPTARGET_PLUGINS_NEXTGEN_COMMON_OFFLOADRPC_H
+#define OPENMP_LIBOMPTARGET_PLUGINS_NEXTGEN_COMMON_OFFLOADRPC_H
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"

@@ -32,7 +32,7 @@
 #include "JIT.h"
 #include "MemoryManager.h"
 #include "OffloadError.h"
-#include "RPC.h"
+#include "OffloadRPC.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Frontend/OpenMP/OMPConstants.h"

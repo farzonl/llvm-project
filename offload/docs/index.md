@@ -119,10 +119,81 @@ The missing-runtime test does not require a DirectX runtime or GPU.
 Manifest, shader validation, and feature-query unit tests also run without a
 DirectX runtime or GPU.
 Their checked-in DXIL fixtures are generated from the accompanying HLSL with
-the documented DXC command; running the tests does not require DXC.
+the documented Clang or DXC commands; running the tests does not require either
+compiler.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy
 tests can also run. Tests requiring events, host callbacks, host/managed
-allocations, or shader execution are not supported yet.
+allocations, or general-purpose device binaries are not supported yet.
+The DirectX-specific tests exercise packaged compute shaders.
+The full generic device-information suite is not yet supported: queries such as
+vendor, driver version, and per-dimension work limits remain unimplemented.
+Some generic queue and copy tests also require host callbacks even when their
+names do not mention callbacks; those are outside this synchronous prototype.
+
+When checking a statically linked Nacelle build with LeakSanitizer, preload its
+shared library with `LD_PRELOAD` as well as setting the two runtime path
+variables. This keeps its LLVM registration storage visible to the leak checker
+through process teardown, rather than reporting allocations from an already
+unloaded library. Keep `ASAN_OPTIONS=detect_leaks=1`; no leak suppressions are
+needed.
+
+## Native Windows build and validation
+
+Use an x64 Visual Studio developer command prompt with a recent Windows SDK,
+Clang, CMake, Ninja, and Python on `PATH`. Enable the Windows **Graphics Tools**
+optional feature to install the D3D12 debug layers. From the repository root:
+
+```bat
+cmake -S llvm -B build-directx -G Ninja ^
+  -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
+  -DLLVM_TARGETS_TO_BUILD=Native -DLLVM_ENABLE_ASSERTIONS=ON ^
+  -DLLVM_ENABLE_RUNTIMES=offload ^
+  "-DRUNTIMES_CMAKE_ARGS=-DCMAKE_C_COMPILER=clang-cl;-DCMAKE_CXX_COMPILER=clang-cl" ^
+  -DLIBOMPTARGET_PLUGINS_TO_BUILD=directx -DOFFLOAD_INCLUDE_TESTS=ON
+cmake --build build-directx --target runtimes
+cmake --build build-directx\runtimes\runtimes-bins --target LLVMOffload directx.unittests
+```
+
+Set both the LLVM and runtime compilers explicitly: a runtime sub-build can
+otherwise select MSVC independently of the compiler used for LLVM.
+No shader compiler or DXC library is needed to run the checked-in fixtures.
+The plugin's shared RPC header is named `OffloadRPC.h` to avoid shadowing the
+Windows SDK's `rpc.h` on case-insensitive filesystems. SDK GUID definitions
+remain in `DirectXGuids.cpp`.
+
+Run the test executable from PowerShell, adding its runtime DLL directory to
+`PATH`:
+
+```powershell
+$runtime = (Resolve-Path .\build-directx\runtimes\runtimes-bins).Path
+$env:PATH = "$runtime\lib;$env:PATH"
+$env:OFFLOAD_DIRECTX_TEST_GPU_VALIDATION = "1"
+$env:OFFLOAD_DIRECTX_TEST_DEVICE = "0"
+& "$runtime\offload\unittests\Plugins\DirectX\directx.unittests.exe" `
+  --gtest_output=xml:directx-device0.xml
+```
+
+`OFFLOAD_DIRECTX_TEST_GPU_VALIDATION` enables the debug layer, GPU-based
+validation, and synchronized command-queue validation **before** device creation.
+Device tests fail on stored D3D12 warnings, errors, or corruption messages,
+including messages generated during teardown. Missing debug interfaces fail
+the tests rather than silently disabling validation. These are test-harness
+settings, not plugin runtime options.
+
+`OFFLOAD_DIRECTX_TEST_DEVICE` selects a zero-based DirectX device index (default
+`0`). Repeat the run for each hardware adapter, using separate XML output files;
+each device test records its selected product name in the XML. An invalid or
+unavailable index fails instead of falling back to another device.
+
+The suite covers guarded buffer and scalar dispatches, explicit and null queues,
+copy ranges and GPU virtual-address offsets, logical descriptor bounds, context
+isolation, concurrent copies and launches, and repeated initialization/shutdown.
+Zero-group launches still validate arguments and synchronize preceding queue
+work, but do not issue a native empty `Dispatch`.
+Native validation is necessary: Nacelle's resource barriers are currently no-ops
+and its execution is synchronous, so Linux success alone cannot establish
+Windows resource-state or submission-lifetime correctness.
 
 # Indices and tables
 
