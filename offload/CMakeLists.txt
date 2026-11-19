@@ -149,21 +149,22 @@ if(WIN32)
   set(LIBOMPTARGET_ALL_PLUGIN_TARGETS level_zero)
 
   set(LIBOMPTARGET_PLUGINS_TO_BUILD "" CACHE STRING
-      "Semicolon-separated list of plugins to use: level_zero or \"all\".")
+      "Semicolon-separated list of plugins to use: level_zero, directx (experimental), or \"all\".")
   if(LIBOMPTARGET_PLUGINS_TO_BUILD STREQUAL "all")
     set(LIBOMPTARGET_PLUGINS_TO_BUILD ${LIBOMPTARGET_ALL_PLUGIN_TARGETS})
   endif()
 
   # Validate that only supported plugins are requested on Windows.
   foreach(plugin IN LISTS LIBOMPTARGET_PLUGINS_TO_BUILD)
-    if(NOT (plugin STREQUAL "level_zero" OR plugin STREQUAL "host"))
+    if(NOT (plugin STREQUAL "level_zero" OR plugin STREQUAL "host" OR
+            plugin STREQUAL "directx"))
       message(FATAL_ERROR "Plugin '${plugin}' is not supported on Windows.")
     endif()
   endforeach()
 else()
   set(LIBOMPTARGET_ALL_PLUGIN_TARGETS amdgpu cuda level_zero)
   set(LIBOMPTARGET_PLUGINS_TO_BUILD "all" CACHE STRING
-      "Semicolon-separated list of plugins to use: cuda, amdgpu, level_zero or \"all\".")
+      "Semicolon-separated list of plugins to use: cuda, amdgpu, level_zero, directx (experimental), or \"all\".")
 
   if(LIBOMPTARGET_PLUGINS_TO_BUILD STREQUAL "all")
     set(LIBOMPTARGET_PLUGINS_TO_BUILD ${LIBOMPTARGET_ALL_PLUGIN_TARGETS})

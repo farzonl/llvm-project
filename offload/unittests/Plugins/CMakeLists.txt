@@ -6,3 +6,7 @@ target_include_directories(plugin-common.unittests PRIVATE
 target_compile_definitions(plugin-common.unittests PRIVATE
   TARGET_NAME=PluginCommon
   DEBUG_PREFIX="PluginCommon")
+
+if(TARGET omptarget.rtl.directx)
+  add_subdirectory(DirectX)
+endif()

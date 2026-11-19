@@ -46,6 +46,11 @@ if "OFFLOAD_FORCE_SYNC_OPS" in os.environ:
 if "OFFLOAD_FORCE_BLOCKING" in os.environ:
     config.environment["OFFLOAD_FORCE_BLOCKING"] = os.environ["OFFLOAD_FORCE_BLOCKING"]
 
+# Forward explicit runtime paths for DirectX discovery tests.
+for name in ("OFFLOAD_DIRECTX_DXCORE_LIBRARY", "OFFLOAD_DIRECTX_D3D12_LIBRARY"):
+    if name in os.environ:
+        config.environment[name] = os.environ[name]
+
 # test_source_root: The root path where tests are located.
 # test_exec_root: The root path where tests should be run.
 config.test_exec_root = config.unittest_dir
