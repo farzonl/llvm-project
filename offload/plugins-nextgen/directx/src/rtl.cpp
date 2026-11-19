@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectXFeatures.h"
+#include "DirectXRootSignature.h"
 #include "GlobalHandler.h"
 #include "PluginInterface.h"
 
@@ -111,11 +112,14 @@ Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
 struct DirectXImageTy final : DeviceImageTy {
   DirectXManifestTy Manifest;
   ComPtr<ID3D12Device> NativeDevice;
+  ComPtr<ID3D12RootSignature> RootSignature;
 
   DirectXImageTy(int32_t Id, GenericDeviceTy &Device, DirectXProgramDataTy Data,
-                 ID3D12Device *NativeDevice)
+                 ID3D12Device *NativeDevice,
+                 ComPtr<ID3D12RootSignature> RootSignature)
       : DeviceImageTy(Id, Device, std::move(Data.Shader)),
-        Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice) {}
+        Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice),
+        RootSignature(std::move(RootSignature)) {}
 };
 
 Expected<DirectXBufferTy> createBuffer(ID3D12Device *Device, uint64_t Size,
@@ -170,6 +174,7 @@ Expected<DynamicLibrary> loadRuntime(const char *Envar,
 struct DirectXAdapterTy {
   ComPtr<IDXCoreAdapter> Adapter;
   ComPtr<ID3D12Device> Device;
+  PFN_D3D12_SERIALIZE_ROOT_SIGNATURE SerializeRootSignature = nullptr;
   std::string Name;
   LUID Luid;
 };
@@ -184,6 +189,7 @@ struct DirectXPluginContextTy;
 
 struct DirectXDeviceTy final : GenericDeviceTy {
   ComPtr<ID3D12Device> Device;
+  PFN_D3D12_SERIALIZE_ROOT_SIGNATURE SerializeRootSignature;
   std::string Name;
   std::mutex ContextsMutex;
   SmallVector<DirectXPluginContextTy *> Contexts;
@@ -220,7 +226,9 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   DirectXDeviceTy(GenericPluginTy &Plugin, int32_t DeviceId, int32_t NumDevices,
                   const DirectXAdapterTy &Adapter)
       : GenericDeviceTy(Plugin, DeviceId, NumDevices, DirectXGridValues),
-        Device(Adapter.Device), Name(Adapter.Name) {
+        Device(Adapter.Device),
+        SerializeRootSignature(Adapter.SerializeRootSignature),
+        Name(Adapter.Name) {
     setDeviceUidFromVendorUid(
         formatv("{0:x8}:{1:x8}", static_cast<uint32_t>(Adapter.Luid.HighPart),
                 Adapter.Luid.LowPart)
@@ -268,7 +276,12 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     if (auto Err =
             directx::checkDeviceCapabilities(Data->Manifest, *Device.Get()))
       return std::move(Err);
-    return new DirectXImageTy(Id, *this, std::move(*Data), Device.Get());
+    ComPtr<ID3D12RootSignature> Root;
+    if (auto Err = directx::createRootSignature(Data->Manifest, *Device.Get(),
+                                                SerializeRootSignature, Root))
+      return std::move(Err);
+    return new DirectXImageTy(Id, *this, std::move(*Data), Device.Get(),
+                              std::move(Root));
   }
   Error unloadBinaryImpl(DeviceImageTy *Image) override {
     delete static_cast<DirectXImageTy *>(Image);
@@ -655,6 +668,9 @@ struct DirectXPluginTy final : GenericPluginTy {
         DXCore->getAddressOfSymbol("DXCoreCreateAdapterFactory"));
     auto CreateDevice = reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(
         D3D12->getAddressOfSymbol("D3D12CreateDevice"));
+    auto SerializeRootSignature =
+        reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(
+            D3D12->getAddressOfSymbol("D3D12SerializeRootSignature"));
     if (!CreateFactory)
       return Plugin::error(
           ErrorCode::BACKEND_FAILURE,
@@ -663,6 +679,10 @@ struct DirectXPluginTy final : GenericPluginTy {
       return Plugin::error(
           ErrorCode::BACKEND_FAILURE,
           "DirectX D3D12 runtime is missing D3D12CreateDevice");
+    if (!SerializeRootSignature)
+      return Plugin::error(
+          ErrorCode::BACKEND_FAILURE,
+          "DirectX D3D12 runtime is missing D3D12SerializeRootSignature");
 
     ComPtr<IDXCoreAdapterFactory> Factory;
     if (auto Err = check(CreateFactory(IID_PPV_ARGS(&Factory)),
@@ -682,6 +702,7 @@ struct DirectXPluginTy final : GenericPluginTy {
     SmallVector<DirectXAdapterTy> Found;
     for (uint32_t I = 0; I < Count; ++I) {
       DirectXAdapterTy Entry;
+      Entry.SerializeRootSignature = SerializeRootSignature;
       if (auto Err = check(List->GetAdapter(I, IID_PPV_ARGS(&Entry.Adapter)),
                            "IDXCoreAdapterList::GetAdapter"))
         return std::move(Err);

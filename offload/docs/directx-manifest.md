@@ -8,8 +8,9 @@ The image kind is `IMG_DXIL`, the producer kind is `OFK_None`, and entry flags
 are zero. The DXIL payload must be nonempty.
 
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
-loading with device-capability checks are implemented. Root-signature creation,
-kernel objects, and execution remain unsupported. The prototype ABI is experimental.
+loading with device-capability checks and canonical native root-signature creation
+are implemented. Kernel objects and execution remain unsupported. The prototype
+ABI is experimental.
 
 ## Program loading
 
@@ -34,9 +35,17 @@ Overdeclared features must also pass these checks.
 false for invalid or unsupported input. A true result establishes compatibility
 with this loading slice, not availability of kernel creation or dispatch.
 
+After validation, loading serializes the canonical root layout using
+`D3D12SerializeRootSignature` from the already-loaded D3D12 runtime, then creates
+an `ID3D12RootSignature` on the selected device. No DXC library is required.
+Serialization and native creation failures are backend errors; no program is
+published on failure. `olIsValidBinary` does not create native root objects and
+does not guarantee that subsequent native resource creation will succeed.
+
 Each successful program owns a copy of the executable DXIL bytes, its decoded
-manifest, and a native device reference until unload. Program image-base and
-image-size queries describe those DXIL bytes, not the surrounding package.
+manifest, a native device reference, and its root signature until unload.
+Program image-base and image-size queries describe those DXIL bytes, not the
+surrounding package.
 The caller may release the input package after successful creation. Programs are
 independent even when created from identical packages.
 `olDestroyProgram` releases the image and removes it from device shutdown cleanup.
@@ -189,8 +198,12 @@ no root-signature flags, and `ALL` visibility:
 One table DWORD plus up to 63 constant DWORDs fits the 64-DWORD D3D12 root budget.
 Version 1 retains the 252-byte limit even for scalar-only kernels. If both kinds
 of argument are absent, there are no root parameters.
-Incompatible embedded root signatures must be rejected when loading is enabled.
-The current validator conservatively rejects all embedded root signatures.
+The loader creates this layout even for shaders without arguments. Native
+root-creation failures, including device-specific layout limits, are surfaced as
+backend errors. Descriptor heaps and views are not allocated yet, and argument
+binding remains unsupported.
+The validator conservatively rejects all embedded root signatures, including
+otherwise compatible layouts; compatibility checking is deferred.
 
 ## Packaging
 

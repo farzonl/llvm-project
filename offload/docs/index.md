@@ -30,8 +30,10 @@ The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
 validation helper are implemented, including explicit scalar field layouts and
 feature-declaration checks. Loading checks the device shader model and supported
-optional features before retaining owned bytecode and a manifest. Kernel
-lookup/enumeration, root-signature construction, and dispatch remain unsupported.
+optional features before retaining owned bytecode and a manifest. It serializes
+the canonical root-signature 1.0 layout through the D3D12 runtime and retains a
+native root signature per program. Embedded root signatures are still rejected.
+Descriptor heaps/views, kernel lookup/enumeration, and dispatch remain unsupported.
 Programs currently require exactly one entry in an uncompressed, version-3
 OffloadBinary package; raw DXIL/bitcode and multi-entry packages are not accepted.
 

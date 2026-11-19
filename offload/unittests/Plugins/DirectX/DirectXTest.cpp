@@ -8,10 +8,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectXQueue.h"
+#include "DirectXRootSignature.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Object/OffloadBinary.h"
+#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -600,6 +602,84 @@ TEST_F(DirectXDeviceTest, CopiesUseNativeGPUAddressOffsets) {
   std::vector<uint8_t> Expected(64, 0);
   std::fill_n(Expected.begin() + 7, 9, uint8_t{123});
   EXPECT_EQ(Output, Expected);
+}
+
+TEST_F(DirectXDeviceTest, CreatesCanonicalRootSignatures) {
+  using namespace llvm;
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto *NativeDevice = static_cast<ID3D12Device *>(Handle);
+  const char *LibraryName = std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY");
+  if (!LibraryName)
+    LibraryName = "d3d12.dll";
+  std::string Message;
+  auto Library =
+      sys::DynamicLibrary::getPermanentLibrary(LibraryName, &Message);
+  ASSERT_TRUE(Library.isValid()) << Message;
+  auto Serialize = reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(
+      Library.getAddressOfSymbol("D3D12SerializeRootSignature"));
+  ASSERT_NE(Serialize, nullptr);
+
+  DirectXManifestTy Manifest;
+  for (unsigned Layout = 0; Layout != 4; ++Layout) {
+    SCOPED_TRACE(Layout);
+    Manifest.Arguments.clear();
+    Manifest.Constants.reset();
+    if (Layout & 1)
+      Manifest.Arguments.push_back(
+          {0,
+           DirectXBufferBindingTy{DirectXBufferBindingTy::Kind::SRV, 2, 1, 4}});
+    if (Layout & 2) {
+      Manifest.Constants = DirectXConstantBindingTy{4, 2, 252};
+      Manifest.Arguments.push_back(
+          {static_cast<uint32_t>(Manifest.Arguments.size()),
+           DirectXScalarBindingTy{4, 0}});
+    }
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> Root;
+    ASSERT_TRUE(succeeded(
+        createRootSignature(Manifest, *NativeDevice, Serialize, Root)));
+    ASSERT_NE(Root.Get(), nullptr);
+    Microsoft::WRL::ComPtr<ID3D12Device> Owner;
+    ASSERT_TRUE(SUCCEEDED(Root->GetDevice(IID_PPV_ARGS(&Owner))));
+    EXPECT_EQ(Owner.Get(), NativeDevice);
+  }
+}
+
+HRESULT WINAPI failRootSerialization(const D3D12_ROOT_SIGNATURE_DESC *,
+                                     D3D_ROOT_SIGNATURE_VERSION Version,
+                                     ID3DBlob **, ID3DBlob **) {
+  EXPECT_EQ(Version, D3D_ROOT_SIGNATURE_VERSION_1);
+  return E_FAIL;
+}
+
+HRESULT WINAPI omitSerializedRoot(const D3D12_ROOT_SIGNATURE_DESC *,
+                                  D3D_ROOT_SIGNATURE_VERSION, ID3DBlob **,
+                                  ID3DBlob **) {
+  return S_OK;
+}
+
+TEST_F(DirectXDeviceTest, ReportsRootSerializationFailures) {
+  using namespace llvm;
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto &NativeDevice = *static_cast<ID3D12Device *>(Handle);
+  for (auto Serialize :
+       {static_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(nullptr),
+        failRootSerialization, omitSerializedRoot}) {
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> Root;
+    auto Err = createRootSignature({}, NativeDevice, Serialize, Root);
+    ASSERT_TRUE(static_cast<bool>(Err));
+    EXPECT_EQ(Root.Get(), nullptr);
+    handleAllErrors(std::move(Err), [](const error::OffloadError &Err) {
+      EXPECT_EQ(Err.convertToErrorCode(),
+                error::make_error_code(error::ErrorCode::BACKEND_FAILURE));
+      EXPECT_TRUE(StringRef(Err.getMessage()).contains_insensitive("root"));
+    });
+  }
 }
 
 class DirectXProgramTest : public DirectXDeviceTest {

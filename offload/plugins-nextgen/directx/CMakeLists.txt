@@ -7,6 +7,7 @@ target_sources(omptarget.rtl.directx PRIVATE
   src/DirectXFeatures.cpp
   src/DirectXGuids.cpp
   src/DirectXManifest.cpp
+  src/DirectXRootSignature.cpp
   src/DirectXShader.cpp
   src/rtl.cpp)
 target_include_directories(omptarget.rtl.directx PUBLIC
