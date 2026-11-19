@@ -1051,6 +1051,10 @@ Error olWaitEvents_impl(ol_queue_handle_t Queue, ol_event_handle_t *Events,
       return Plugin::error(ErrorCode::INVALID_NULL_HANDLE,
                            "olWaitEvents asked to wait on a NULL event");
 
+    if (&Event->Device->Platform != &Queue->Device->Platform)
+      return Plugin::error(ErrorCode::INVALID_DEVICE,
+                           "event and queue belong to different platforms");
+
     // Do nothing if the event is for this queue or the backend does not
     // materialize event state for it.
     if (Event->QueueId == Queue->Id || !Event->EventInfo)
@@ -1162,8 +1166,8 @@ Error olGetEventInfoImplDetail(ol_event_handle_t Event,
     if (!Event->EventInfo)
       return Info.write<bool>(true);
 
-    auto Res = Queue->Device->Device->isEventComplete(Event->EventInfo,
-                                                      Queue->AsyncInfo);
+    auto Res =
+        Event->Device->Device->isEventComplete(Event->EventInfo, nullptr);
     if (auto Err = Res.takeError())
       return Err;
     return Info.write<bool>(*Res);

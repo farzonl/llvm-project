@@ -98,13 +98,27 @@ transition. Simultaneous SRV and UAV bindings of the same physical resource are
 Submission records retain the pipeline, root signature, descriptor heap, bound
 resources, command allocator, and command list until fence completion. Submitted
 objects remain retained if signaling or waiting fails. Native failures are
-reported as backend errors. Events and asynchronous launches remain deferred.
+reported as backend errors. Asynchronous launches remain deferred.
 
 Each queue has a retirement worker and separate execution and completion fences.
 The completion timeline advances only after execution and any host readback
 action finish, so observing completion also makes readback bytes visible.
 Completion failures poison the queue and are reported by subsequent operations
 and synchronization rather than publishing successful completion.
+
+## Events
+
+`olCreateEvent` records a snapshot of an explicit queue's completion timeline.
+`olSyncEvent` waits for that snapshot, while `OL_EVENT_INFO_IS_COMPLETE` queries
+it without waiting. Work submitted after the snapshot does not delay the event.
+Events keep their native queue state alive and remain usable after
+`olDestroyQueue`.
+
+`olWaitEvents` enqueues native GPU waits for events from other queues on the same
+device and in the same context. It does not block the calling thread.
+Queued waits retain their fence dependencies even if the event or originating
+queue handle is destroyed. Cross-device and cross-context waits are explicitly
+rejected. Profiling-enabled events and event timing remain `UNSUPPORTED`.
 
 ## Argument binding preparation
 

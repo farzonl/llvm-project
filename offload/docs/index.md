@@ -122,7 +122,7 @@ Their checked-in DXIL fixtures are generated from the accompanying HLSL with
 the documented Clang or DXC commands; running the tests does not require either
 compiler.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy
-tests can also run. Tests requiring events, host callbacks, host/managed
+tests can also run. Tests requiring profiling events, host callbacks, host/managed
 allocations, or general-purpose device binaries are not supported yet.
 The DirectX-specific tests exercise packaged compute shaders.
 The full generic device-information suite is not yet supported: queries such as

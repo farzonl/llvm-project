@@ -75,6 +75,24 @@ getBufferFromAddress(Microsoft::WRL::ComPtr<ID3D12Resource> Resource,
 }
 
 struct DirectXQueueTy {
+  struct FailureTy {
+    std::mutex Mutex;
+    std::string Message;
+
+    Error get() {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      if (Message.empty())
+        return Error::success();
+      return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
+                                       Message.c_str());
+    }
+
+    void set(std::string Text) {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      Message = std::move(Text);
+    }
+  };
+
   struct SubmissionTy {
     uint64_t Value;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> Allocator;
@@ -85,6 +103,9 @@ struct DirectXQueueTy {
     Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
     std::shared_ptr<DirectXArgumentBindingsTy> Arguments;
     std::function<Error()> Complete;
+    Microsoft::WRL::ComPtr<ID3D12Fence> Dependency;
+    std::shared_ptr<FailureTy> DependencyFailure;
+    uint64_t DependencyValue = 0;
   };
 
   Microsoft::WRL::ComPtr<ID3D12Device> Device;
@@ -101,17 +122,14 @@ private:
   std::condition_variable Changed;
   std::thread Worker;
   bool Stopping = false;
-  std::string Failure;
+  std::shared_ptr<FailureTy> Failure = std::make_shared<FailureTy>();
+  bool Failed = false;
 
-  Error checkFailure() {
-    if (Failure.empty())
-      return Error::success();
-    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
-                                     Failure.c_str());
-  }
+  Error checkFailure() { return Failure->get(); }
 
   void fail(Error Err) {
-    Failure = toString(std::move(Err));
+    Failure->set(toString(std::move(Err)));
+    Failed = true;
     Changed.notify_all();
   }
 
@@ -119,8 +137,16 @@ private:
     std::unique_lock<std::mutex> Lock(Mutex);
     for (;;) {
       Changed.wait(Lock, [&] { return Stopping || !Submissions.empty(); });
-      if (!Failure.empty() || (Stopping && Submissions.empty()))
+      if (Failed || (Stopping && Submissions.empty()))
         return;
+      auto &Front = Submissions.front();
+      if (Front.Dependency &&
+          Front.Dependency->GetCompletedValue() < Front.DependencyValue) {
+        if (auto Err = Front.DependencyFailure->get()) {
+          fail(std::move(Err));
+          return;
+        }
+      }
       auto Completed = getCompletedValue(ExecutionFence.Get());
       if (!Completed) {
         fail(Completed.takeError());
@@ -154,10 +180,17 @@ private:
     if (!Value)
       return Value.takeError();
     Submission.Value = *Value;
-    if (Submission.Complete)
+    if (Submission.Complete || Submission.Dependency)
       LastHostValue = *Value;
     Submissions.push_back(std::move(Submission));
     auto &Stored = Submissions.back();
+    if (Stored.Dependency)
+      if (auto Err = check(
+              Queue->Wait(Stored.Dependency.Get(), Stored.DependencyValue),
+              "ID3D12CommandQueue::Wait")) {
+        fail(std::move(Err));
+        return checkFailure();
+      }
     if (Stored.List) {
       ID3D12CommandList *Lists[] = {Stored.List.Get()};
       Queue->ExecuteCommandLists(1, Lists);
@@ -225,6 +258,33 @@ public:
     if (!Completed)
       return Completed.takeError();
     return !Submissions.empty() || *Completed < LastSignaledValue;
+  }
+
+  Expected<bool> isComplete(uint64_t Value) {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    auto Completed = getCompletedValue();
+    if (!Completed)
+      return Completed.takeError();
+    if (*Completed >= Value)
+      return true;
+    if (auto Err = checkFailure())
+      return std::move(Err);
+    return false;
+  }
+
+  Error enqueueWait(std::shared_ptr<DirectXQueueTy> Dependency,
+                    uint64_t Value) {
+    if (Dependency.get() == this)
+      return Error::success();
+    SubmissionTy Submission{};
+    Submission.Dependency = Dependency->Fence;
+    Submission.DependencyFailure = Dependency->Failure;
+    Submission.DependencyValue = Value;
+    std::lock_guard<std::mutex> Lock(Mutex);
+    auto Result = enqueue(std::move(Submission));
+    if (!Result)
+      return Result.takeError();
+    return Error::success();
   }
 
   Expected<uint64_t> nextValue() {

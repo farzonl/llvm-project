@@ -2079,6 +2079,15 @@ struct AMDGPUEventTy {
     return RecordedStream->synchronizeOn(*this);
   }
 
+  Expected<bool> isComplete() {
+    std::lock_guard<std::mutex> Lock(Mutex);
+    if (!RecordedStream)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "event does not have any recorded stream");
+    return RecordedSlot < 0 ? Expected<bool>(true)
+                            : RecordedStream->isEventComplete(*this);
+  }
+
   /// Return the elapsed time in milliseconds between this event and EndEvent.
   Expected<float> getElapsedTime(AMDGPUEventTy &EndEvent);
 
@@ -3465,10 +3474,9 @@ struct AMDGPUDeviceTy : public GenericDeviceTy, AMDGenericDeviceTy {
   }
 
   Expected<bool> isEventCompleteImpl(void *EventPtr,
-                                     AsyncInfoWrapperTy &AsyncInfo) override {
+                                     AsyncInfoWrapperTy &) override {
     AMDGPUEventTy *Event = reinterpret_cast<AMDGPUEventTy *>(EventPtr);
-    auto *Stream = AsyncInfo.getQueueAs<AMDGPUStreamTy *>();
-    return Stream && Stream->isEventComplete(*Event);
+    return Event->isComplete();
   }
 
   /// Synchronize the current thread with the event.

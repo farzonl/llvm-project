@@ -29,6 +29,16 @@ TEST_P(olGetEventInfoTest, SuccessIsComplete) {
   ASSERT_EQ(Complete, true);
 }
 
+TEST_P(olGetEventInfoTest, CompleteAfterDestroyingQueue) {
+  ASSERT_SUCCESS(olDestroyQueue(Queue));
+  Queue = nullptr;
+  bool Complete = false;
+  ASSERT_SUCCESS(olGetEventInfo(Event, OL_EVENT_INFO_IS_COMPLETE,
+                                sizeof(Complete), &Complete));
+  EXPECT_TRUE(Complete);
+  ASSERT_SUCCESS(olSyncEvent(Event));
+}
+
 TEST_P(olGetEventInfoTest, InvalidNullHandle) {
   ol_queue_handle_t RetrievedQueue;
   ASSERT_ERROR(OL_ERRC_INVALID_NULL_HANDLE,

@@ -41,6 +41,13 @@ using error::ErrorCode;
 using Microsoft::WRL::ComPtr;
 using sys::DynamicLibrary;
 
+using DirectXQueueHandleTy = std::shared_ptr<DirectXQueueTy>;
+
+struct DirectXEventTy {
+  DirectXQueueHandleTy Queue;
+  uint64_t Value = 0;
+};
+
 Error unsupported(const char *Operation) {
   return Plugin::error(ErrorCode::UNSUPPORTED,
                        "DirectX prototype does not support %s", Operation);
@@ -254,7 +261,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   enum class CopyKind { Upload, Readback, Device };
   Expected<DirectXQueueTy *> getQueue(AsyncInfoWrapperTy &AsyncInfo) {
     if (AsyncInfo.hasQueue()) {
-      auto *Queue = AsyncInfo.getQueueAs<DirectXQueueTy *>();
+      auto *Queue = AsyncInfo.getQueueAs<DirectXQueueHandleTy *>()->get();
       if (Queue->Device.Get() != Device.Get())
         return Plugin::error(ErrorCode::INVALID_DEVICE,
                              "DirectX queue belongs to another device");
@@ -409,23 +416,23 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
   Error synchronizeImpl(__tgt_async_info &AsyncInfo,
                         bool ReleaseQueue) override {
-    auto *Queue = static_cast<DirectXQueueTy *>(AsyncInfo.Queue);
-    if (!Queue)
+    auto *Handle = static_cast<DirectXQueueHandleTy *>(AsyncInfo.Queue);
+    if (!Handle)
       return Error::success();
-    if (auto Err = Queue->synchronize())
+    if (auto Err = (*Handle)->synchronize())
       return Err;
     if (ReleaseQueue) {
-      delete Queue;
+      delete Handle;
       AsyncInfo.Queue = nullptr;
     }
     return Error::success();
   }
   Error queryAsyncImpl(__tgt_async_info &AsyncInfo, bool ReleaseQueue,
                        bool *IsQueueWorkCompleted) override {
-    auto *Queue = static_cast<DirectXQueueTy *>(AsyncInfo.Queue);
+    auto *Handle = static_cast<DirectXQueueHandleTy *>(AsyncInfo.Queue);
     bool Completed = true;
-    if (Queue) {
-      auto Pending = Queue->hasPendingWork();
+    if (Handle) {
+      auto Pending = (*Handle)->hasPendingWork();
       if (!Pending)
         return Pending.takeError();
       Completed = !*Pending;
@@ -433,41 +440,84 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     if (IsQueueWorkCompleted)
       *IsQueueWorkCompleted = Completed;
     if (Completed && ReleaseQueue) {
-      delete Queue;
+      delete Handle;
       AsyncInfo.Queue = nullptr;
     }
     return Error::success();
   }
   Expected<bool> hasPendingWorkImpl(AsyncInfoWrapperTy &AsyncInfo) override {
-    auto *Queue = AsyncInfo.getQueueAs<DirectXQueueTy *>();
-    if (!Queue)
+    auto *Handle = AsyncInfo.getQueueAs<DirectXQueueHandleTy *>();
+    if (!Handle)
       return false;
-    return Queue->hasPendingWork();
+    return (*Handle)->hasPendingWork();
   }
   Expected<void *> getNativeQueueHandle(__tgt_async_info *AsyncInfo) override {
     if (!AsyncInfo || !AsyncInfo->Queue)
       return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                            "no DirectX queue associated with the async info");
-    return static_cast<void *>(
-        static_cast<DirectXQueueTy *>(AsyncInfo->Queue)->Queue.Get());
+    auto *Handle = static_cast<DirectXQueueHandleTy *>(AsyncInfo->Queue);
+    return static_cast<void *>((*Handle)->Queue.Get());
   }
-  Error createEventImpl(void **, bool) override {
-    return unsupported("event creation");
+  Error createEventImpl(void **Storage, bool EnableProfiling) override {
+    if (EnableProfiling)
+      return unsupported("event timing");
+    *Storage = new DirectXEventTy;
+    return Error::success();
   }
-  Error destroyEventImpl(void *, bool) override {
-    return unsupported("event destruction");
+  Error destroyEventImpl(void *Event, bool) override {
+    delete static_cast<DirectXEventTy *>(Event);
+    return Error::success();
   }
-  Error recordEventImpl(void *, AsyncInfoWrapperTy &, bool) override {
-    return unsupported("event recording");
+  Error recordEventImpl(void *Event, AsyncInfoWrapperTy &AsyncInfo,
+                        bool EnableProfiling) override {
+    if (EnableProfiling)
+      return unsupported("event timing");
+    if (!AsyncInfo.hasQueue())
+      return unsupported("event recording without an explicit queue");
+    auto Queue = getQueue(AsyncInfo);
+    if (!Queue)
+      return Queue.takeError();
+    auto Value = (*Queue)->signal();
+    if (!Value)
+      return Value.takeError();
+    auto &DXEvent = *static_cast<DirectXEventTy *>(Event);
+    DXEvent.Queue = *AsyncInfo.getQueueAs<DirectXQueueHandleTy *>();
+    DXEvent.Value = *Value;
+    return Error::success();
   }
-  Error waitEventImpl(void *, AsyncInfoWrapperTy &) override {
-    return unsupported("event waits");
+  Error waitEventImpl(void *Event, AsyncInfoWrapperTy &AsyncInfo) override {
+    auto &DXEvent = *static_cast<DirectXEventTy *>(Event);
+    if (!DXEvent.Queue)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX event has not been recorded");
+    auto Queue = getQueue(AsyncInfo);
+    if (!Queue)
+      return Queue.takeError();
+    if ((*Queue)->Device.Get() != DXEvent.Queue->Device.Get())
+      return Plugin::error(ErrorCode::INVALID_DEVICE,
+                           "DirectX event belongs to another device");
+    if ((*Queue)->Context != DXEvent.Queue->Context)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX event and queue contexts differ");
+    if (auto Err = (*Queue)->enqueueWait(DXEvent.Queue, DXEvent.Value))
+      return Err;
+    return AsyncInfo.isSynchronous() ? (*Queue)->synchronize()
+                                     : Error::success();
   }
-  Expected<bool> isEventCompleteImpl(void *, AsyncInfoWrapperTy &) override {
-    return unsupported("event queries");
+  Expected<bool> isEventCompleteImpl(void *Event,
+                                     AsyncInfoWrapperTy &) override {
+    auto &DXEvent = *static_cast<DirectXEventTy *>(Event);
+    if (!DXEvent.Queue)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX event has not been recorded");
+    return DXEvent.Queue->isComplete(DXEvent.Value);
   }
-  Error syncEventImpl(void *) override {
-    return unsupported("event synchronization");
+  Error syncEventImpl(void *Event) override {
+    auto &DXEvent = *static_cast<DirectXEventTy *>(Event);
+    if (!DXEvent.Queue)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX event has not been recorded");
+    return DXEvent.Queue->wait(DXEvent.Value);
   }
   Expected<float> getEventElapsedTimeImpl(void *, void *) override {
     return unsupported("event timing");
@@ -509,11 +559,11 @@ struct DirectXPluginContextTy final : PluginContextTy {
   }
   Error initAsyncInfoImpl(GenericDeviceTy &,
                           AsyncInfoWrapperTy &AsyncInfo) override {
-    auto Queue = std::make_unique<DirectXQueueTy>(Device.Get(), this);
+    auto Queue = std::make_shared<DirectXQueueTy>(Device.Get(), this);
     if (auto Err = Queue->init())
       return Err;
     __tgt_async_info *Info = AsyncInfo;
-    Info->Queue = Queue.release();
+    Info->Queue = new DirectXQueueHandleTy(std::move(Queue));
     return Error::success();
   }
   Expected<void *> allocateImpl(GenericDeviceTy &, int64_t Size,

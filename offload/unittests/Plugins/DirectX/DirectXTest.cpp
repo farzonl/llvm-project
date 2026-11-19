@@ -469,10 +469,15 @@ TEST_F(DirectXDeviceTest, QueueLifecycle) {
                                          sizeof(Second), &Second)));
     EXPECT_EQ(First, Second);
     ol_event_handle_t Event = nullptr;
-    EXPECT_TRUE(failedWith(olCreateEvent(Queue, OL_EVENT_FLAGS_NONE, &Event),
-                           OL_ERRC_UNSUPPORTED));
-    EXPECT_EQ(Event, nullptr);
+    ASSERT_TRUE(succeeded(olCreateEvent(Queue, OL_EVENT_FLAGS_NONE, &Event)));
+    ASSERT_TRUE(succeeded(olSyncEvent(Event)));
     ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
+    bool EventComplete = false;
+    ASSERT_TRUE(
+        succeeded(olGetEventInfo(Event, OL_EVENT_INFO_IS_COMPLETE,
+                                 sizeof(EventComplete), &EventComplete)));
+    EXPECT_TRUE(EventComplete);
+    ASSERT_TRUE(succeeded(olDestroyEvent(Event)));
   }
   ASSERT_TRUE(succeeded(olDestroyContext(Context)));
 }
@@ -580,6 +585,133 @@ TEST_F(DirectXDeviceTest, HostCompletionFailuresPoisonTheQueue) {
   EXPECT_NE(
       llvm::toString(Pending.takeError()).find("injected readback failure"),
       std::string::npos);
+}
+
+class DirectXEventTest : public DirectXDeviceTest {
+protected:
+  ol_context_handle_t Context = nullptr;
+  ol_queue_handle_t Producer = nullptr, Consumer = nullptr;
+  ol_event_handle_t Event = nullptr;
+
+  void SetUp() override {
+    DirectXDeviceTest::SetUp();
+    if (HasFatalFailure() || IsSkipped())
+      return;
+    ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+    ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Producer)));
+    ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Consumer)));
+  }
+
+  void TearDown() override {
+    if (Event)
+      EXPECT_TRUE(succeeded(olDestroyEvent(Event)));
+    if (Producer)
+      EXPECT_TRUE(succeeded(olDestroyQueue(Producer)));
+    if (Consumer)
+      EXPECT_TRUE(succeeded(olDestroyQueue(Consumer)));
+    if (Context)
+      EXPECT_TRUE(succeeded(olDestroyContext(Context)));
+    DirectXDeviceTest::TearDown();
+  }
+
+  void block(NativeQueueGate &Gate, ol_queue_handle_t Queue) {
+    void *NativeDevice = nullptr, *NativeQueue = nullptr;
+    ASSERT_TRUE(
+        succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                  sizeof(NativeDevice), &NativeDevice)));
+    ASSERT_TRUE(succeeded(olGetQueueInfo(Queue, OL_QUEUE_INFO_NATIVE_HANDLE,
+                                         sizeof(NativeQueue), &NativeQueue)));
+    ASSERT_TRUE(
+        succeeded(Gate.block(*static_cast<ID3D12Device *>(NativeDevice),
+                             *static_cast<ID3D12CommandQueue *>(NativeQueue))));
+  }
+};
+
+TEST_F(DirectXEventTest, EventsOutliveTheirOriginatingQueue) {
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  ol_event_handle_t Profile = nullptr;
+  EXPECT_TRUE(failedWith(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Profile),
+      OL_ERRC_UNSUPPORTED));
+  EXPECT_EQ(Profile, nullptr);
+  ASSERT_TRUE(succeeded(olDestroyQueue(Producer)));
+  Producer = nullptr;
+  ASSERT_TRUE(succeeded(olSyncEvent(Event)));
+  bool Complete = false;
+  ASSERT_TRUE(succeeded(olGetEventInfo(Event, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_TRUE(Complete);
+  ASSERT_TRUE(succeeded(olWaitEvents(Consumer, &Event, 1)));
+  ASSERT_TRUE(succeeded(olDestroyEvent(Event)));
+  Event = nullptr;
+  ASSERT_TRUE(succeeded(olSyncQueue(Consumer)));
+}
+
+TEST_F(DirectXEventTest, RejectsCrossContextWaits) {
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  ol_context_handle_t OtherContext = nullptr;
+  ol_queue_handle_t OtherQueue = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &OtherContext)));
+  ASSERT_TRUE(succeeded(olCreateQueue(OtherContext, Device, &OtherQueue)));
+  EXPECT_TRUE(failedWith(olWaitEvents(OtherQueue, &Event, 1),
+                         OL_ERRC_INVALID_ARGUMENT));
+  ASSERT_TRUE(succeeded(olDestroyQueue(OtherQueue)));
+  ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
+}
+
+TEST_F(DirectXEventTest, NativeWaitsRetainDestroyedEventsAndQueues) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  NativeQueueGate Gate;
+  block(Gate, Producer);
+  if (HasFatalFailure())
+    return;
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  bool Complete = true;
+  ASSERT_TRUE(succeeded(olGetEventInfo(Event, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_FALSE(Complete);
+  auto Wait = std::async(std::launch::async,
+                         [&] { return olWaitEvents(Consumer, &Event, 1); });
+  auto Status = Wait.wait_for(std::chrono::seconds(2));
+  EXPECT_EQ(Status, std::future_status::ready);
+  // Release even a broken blocking implementation before collecting the task.
+  if (Status != std::future_status::ready)
+    EXPECT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(Wait.get()));
+  ASSERT_TRUE(succeeded(olDestroyEvent(Event)));
+  Event = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyQueue(Producer)));
+  Producer = nullptr;
+  ASSERT_TRUE(succeeded(olQueryQueue(Consumer, &Complete)));
+  EXPECT_FALSE(Complete);
+  ASSERT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(olSyncQueue(Consumer)));
+}
+
+TEST_F(DirectXEventTest, NativeEventsCaptureOnlyPrecedingWork) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  ASSERT_TRUE(succeeded(olSyncEvent(Event)));
+  NativeQueueGate Gate;
+  block(Gate, Producer);
+  if (HasFatalFailure())
+    return;
+  ol_event_handle_t Later = nullptr;
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Later)));
+  bool Complete = false;
+  ASSERT_TRUE(succeeded(olGetEventInfo(Event, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_TRUE(Complete);
+  ASSERT_TRUE(succeeded(olWaitEvents(Consumer, &Event, 1)));
+  ASSERT_TRUE(succeeded(olSyncQueue(Consumer)));
+  ASSERT_TRUE(succeeded(olGetEventInfo(Later, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_FALSE(Complete);
+  ASSERT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(olSyncEvent(Later)));
+  ASSERT_TRUE(succeeded(olDestroyEvent(Later)));
 }
 
 TEST_F(DirectXDeviceTest, StagedBufferCopies) {
