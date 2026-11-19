@@ -10,9 +10,12 @@
 #include <OffloadAPI.h>
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -21,6 +24,14 @@ testing::AssertionResult succeeded(ol_result_t Result) {
   if (!Result)
     return testing::AssertionSuccess();
   return testing::AssertionFailure() << Result->Details;
+}
+
+testing::AssertionResult failedWith(ol_result_t Result, ol_errc_t Code) {
+  if (!Result)
+    return testing::AssertionFailure() << "expected an error";
+  if (Result->Code != Code)
+    return testing::AssertionFailure() << Result->Details;
+  return testing::AssertionSuccess();
 }
 
 class ScopedEnvironment {
@@ -55,6 +66,43 @@ protected:
   }
 
   void TearDown() override { EXPECT_TRUE(succeeded(olShutDown())); }
+};
+
+class DirectXDeviceTest : public DirectXTest {
+protected:
+  ol_device_handle_t Device = nullptr;
+
+  void SetUp() override {
+    DirectXTest::SetUp();
+    if (HasFatalFailure())
+      return;
+#ifndef _WIN32
+    if (!std::getenv("OFFLOAD_DIRECTX_DXCORE_LIBRARY") ||
+        !std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY"))
+      GTEST_SKIP() << "Set DirectX runtime paths to run Linux buffer tests";
+#endif
+    std::vector<ol_device_handle_t> Devices;
+    ASSERT_TRUE(succeeded(olIterateDevices(
+        [](ol_device_handle_t Device, void *Data) {
+          static_cast<std::vector<ol_device_handle_t> *>(Data)->push_back(
+              Device);
+          return true;
+        },
+        &Devices)));
+    for (auto Candidate : Devices) {
+      ol_platform_handle_t Platform;
+      ASSERT_TRUE(succeeded(olGetDeviceInfo(Candidate, OL_DEVICE_INFO_PLATFORM,
+                                            sizeof(Platform), &Platform)));
+      ol_platform_backend_t Backend;
+      ASSERT_TRUE(succeeded(olGetPlatformInfo(
+          Platform, OL_PLATFORM_INFO_BACKEND, sizeof(Backend), &Backend)));
+      if (Backend == OL_PLATFORM_BACKEND_DIRECTX) {
+        Device = Candidate;
+        break;
+      }
+    }
+    ASSERT_NE(Device, nullptr);
+  }
 };
 
 TEST_F(DirectXTest, MissingRuntimeIsAnError) {
@@ -134,7 +182,7 @@ TEST_F(DirectXTest, DiscoversDevicesAndRestarts) {
       EXPECT_EQ(RejectedContext, nullptr);
 
       void *Allocation = nullptr;
-      Result = olMemAlloc(Contexts[1], Device, OL_ALLOC_TYPE_DEVICE, 16,
+      Result = olMemAlloc(Contexts[1], Device, OL_ALLOC_TYPE_MANAGED, 16,
                           &Allocation);
       ASSERT_NE(Result, nullptr);
       EXPECT_EQ(Result->Code, OL_ERRC_UNSUPPORTED);
@@ -158,6 +206,102 @@ TEST_F(DirectXTest, DiscoversDevicesAndRestarts) {
       SetUp();
     }
   }
+}
+
+TEST_F(DirectXDeviceTest, DeviceBufferLifecycle) {
+  ol_context_handle_t Context = nullptr;
+  ol_context_handle_t OtherContext = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &OtherContext)));
+
+  for (size_t Size : {31u, 100000u}) {
+    for (size_t Alignment : {16u, 256u, 65536u, 131072u}) {
+      SCOPED_TRACE(std::to_string(Size) + "/" + std::to_string(Alignment));
+      void *Buffer = nullptr;
+      ASSERT_TRUE(succeeded(olMemAllocAligned(
+          Context, Device, OL_ALLOC_TYPE_DEVICE, Size, Alignment, &Buffer)));
+      ASSERT_NE(Buffer, nullptr);
+      uintptr_t Address = reinterpret_cast<uintptr_t>(Buffer);
+      EXPECT_EQ(Address % Alignment, 0u);
+
+      for (size_t Offset : {size_t(0), Size - 1}) {
+        void *Interior = reinterpret_cast<void *>(Address + Offset);
+        void *Base = nullptr;
+        size_t Bytes = 0;
+        ol_device_handle_t Owner = nullptr;
+        ol_alloc_type_t Kind;
+        ASSERT_TRUE(succeeded(olGetMemInfo(Context, Interior, OL_MEM_INFO_BASE,
+                                           sizeof(Base), &Base)));
+        EXPECT_EQ(Base, Buffer);
+        ASSERT_TRUE(succeeded(olGetMemInfo(Context, Interior, OL_MEM_INFO_SIZE,
+                                           sizeof(Bytes), &Bytes)));
+        EXPECT_EQ(Bytes, Size);
+        ASSERT_TRUE(succeeded(olGetMemInfo(
+            Context, Interior, OL_MEM_INFO_DEVICE, sizeof(Owner), &Owner)));
+        EXPECT_EQ(Owner, Device);
+        ASSERT_TRUE(succeeded(olGetMemInfo(Context, Interior, OL_MEM_INFO_TYPE,
+                                           sizeof(Kind), &Kind)));
+        EXPECT_EQ(Kind, OL_ALLOC_TYPE_DEVICE);
+      }
+
+      size_t Bytes;
+      EXPECT_TRUE(failedWith(
+          olGetMemInfo(Context, reinterpret_cast<void *>(Address + Size),
+                       OL_MEM_INFO_SIZE, sizeof(Bytes), &Bytes),
+          OL_ERRC_NOT_FOUND));
+      EXPECT_TRUE(
+          failedWith(olGetMemInfo(OtherContext, Buffer, OL_MEM_INFO_SIZE,
+                                  sizeof(Bytes), &Bytes),
+                     OL_ERRC_NOT_FOUND));
+      EXPECT_TRUE(
+          failedWith(olMemFree(OtherContext, Buffer), OL_ERRC_NOT_FOUND));
+      EXPECT_TRUE(
+          failedWith(olMemFree(Context, reinterpret_cast<void *>(Address + 1)),
+                     OL_ERRC_NOT_FOUND));
+      ASSERT_TRUE(succeeded(olMemFree(Context, Buffer)));
+      EXPECT_TRUE(failedWith(olMemFree(Context, Buffer), OL_ERRC_NOT_FOUND));
+      EXPECT_TRUE(failedWith(olGetMemInfo(Context, Buffer, OL_MEM_INFO_SIZE,
+                                          sizeof(Bytes), &Bytes),
+                             OL_ERRC_NOT_FOUND));
+    }
+  }
+
+  // These requests have the same padded size in the common memory pool.
+  for (auto [Size, Alignment] : {std::pair<size_t, size_t>{16, 32}, {32, 16}}) {
+    void *Buffer = nullptr;
+    ASSERT_TRUE(succeeded(olMemAllocAligned(
+        Context, Device, OL_ALLOC_TYPE_DEVICE, Size, Alignment, &Buffer)));
+    size_t Bytes;
+    ASSERT_TRUE(succeeded(olGetMemInfo(Context, Buffer, OL_MEM_INFO_SIZE,
+                                       sizeof(Bytes), &Bytes)));
+    EXPECT_EQ(Bytes, Size);
+    ASSERT_TRUE(succeeded(olMemFree(Context, Buffer)));
+  }
+
+  void *Buffer = nullptr;
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(OtherContext, Device, OL_ALLOC_TYPE_DEVICE, 128, &Buffer)));
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(Buffer) % alignof(std::max_align_t),
+            0u);
+  ASSERT_TRUE(succeeded(olDestroyContext(Context)));
+  ASSERT_TRUE(succeeded(olMemFree(OtherContext, Buffer)));
+  // Context teardown must also release resources the caller has not freed.
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(OtherContext, Device, OL_ALLOC_TYPE_DEVICE, 128, &Buffer)));
+  ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
+}
+
+TEST_F(DirectXDeviceTest, RejectsUnsupportedMemoryRequests) {
+  ol_context_handle_t Context = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+  void *Buffer = nullptr;
+  EXPECT_TRUE(failedWith(
+      olMemAlloc(Context, Device, OL_ALLOC_TYPE_MANAGED, 128, &Buffer),
+      OL_ERRC_UNSUPPORTED));
+  EXPECT_TRUE(failedWith(olMemAllocHost(Context, Device, 128, &Buffer),
+                         OL_ERRC_UNSUPPORTED));
+  EXPECT_EQ(Buffer, nullptr);
+  ASSERT_TRUE(succeeded(olDestroyContext(Context)));
 }
 
 } // namespace

@@ -15,11 +15,13 @@ offload-api
 # Experimental DirectX plugin
 
 The opt-in `directx` plugin supports liboffload device discovery and single-device
-context creation, queries, and destruction.
+context creation, queries, and destruction, plus explicit device-buffer
+allocation, allocation queries, and freeing.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
 and native `ID3D12Device` handles are available. Compute-only adapters, queues,
-memory operations, image loading, and shader execution are not supported yet.
+host/managed allocations, copies, image loading, and shader execution are not
+supported yet.
 This is not an OpenMP target.
 
 Each context accepts exactly one device entry and retains a COM reference to its
@@ -27,6 +29,16 @@ Each context accepts exactly one device entry and retains a COM reference to its
 share the native device; `OL_CONTEXT_INFO_NATIVE_HANDLE` returns that borrowed
 `ID3D12Device` pointer. Destroying a context releases its reference without
 invalidating other contexts or the device.
+
+Device allocations use committed, default-heap D3D12 buffers suitable for raw
+SRV/UAV views. Returned pointers encode GPU virtual addresses; they must not be
+dereferenced on the host or treated as arbitrary HLSL pointers. Interior pointers
+are accepted by allocation queries, but freeing requires the allocation base.
+Each context tracks its own live allocations separately from cached backing
+resources in the common memory pool. Queries report the requested size, not
+alignment padding or pooled capacity. Allocations honor the requested power-of-two
+alignment.
+Context teardown releases any remaining buffers.
 
 Select it with `-DLIBOMPTARGET_PLUGINS_TO_BUILD=directx`; it is not included in
 `all`. Windows builds use the Windows SDK headers and load `dxcore.dll` and
@@ -43,11 +55,12 @@ remain loaded until process exit.
 Build `directx.unittests` and run
 `llvm-lit --filter='directx[.]unittests' <runtime-build>/offload/test/unit`.
 On Linux, set both runtime path variables to the Nacelle shared library to
-enable the real-device discovery, context lifecycle, and repeated
-initialization/shutdown test.
+enable real-device discovery, context and buffer lifecycle, allocation isolation,
+alignment, and repeated initialization/shutdown tests.
 The missing-runtime test does not require a DirectX runtime or GPU.
 The OffloadAPI initialization, platform, and context tests can also run. Tests
-requiring queues, memory operations, or shader execution are not supported yet.
+requiring queues, host/managed allocations, copies, or shader execution are not
+supported yet.
 
 # Indices and tables
 

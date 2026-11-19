@@ -11,8 +11,10 @@
 #include "PluginInterface.h"
 
 #include "llvm/Frontend/OpenMP/OMPGridValues.h"
+#include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/MathExtras.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -32,8 +34,13 @@
 #include <wsl/wrladapter.h>
 #endif
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <map>
+#include <mutex>
 
 namespace llvm::omp::target::plugin {
 namespace {
@@ -215,6 +222,10 @@ struct DirectXDeviceTy final : GenericDeviceTy {
 
 struct DirectXPluginContextTy final : PluginContextTy {
   ComPtr<ID3D12Device> Device;
+  std::mutex AllocationsMutex;
+  // Pool backing resources and live user allocations have different lifetimes.
+  std::map<uintptr_t, ComPtr<ID3D12Resource>> Resources;
+  std::map<uintptr_t, PluginAllocInfoTy> Allocations;
 
   DirectXPluginContextTy(GenericPluginTy &Plugin,
                          ArrayRef<GenericDeviceTy *> Devices,
@@ -222,6 +233,9 @@ struct DirectXPluginContextTy final : PluginContextTy {
       : PluginContextTy(Plugin, Devices), Device(Device) {}
 
   Error deinit() override {
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    Allocations.clear();
+    Resources.clear();
     Device.Reset();
     return Error::success();
   }
@@ -231,7 +245,89 @@ struct DirectXPluginContextTy final : PluginContextTy {
   Error initAsyncInfoImpl(GenericDeviceTy &, AsyncInfoWrapperTy &) override {
     return unsupported("queue creation");
   }
-  Expected<PluginAllocInfoTy> getAllocInfo(const void *) override {
+  Expected<void *> allocateImpl(GenericDeviceTy &, int64_t Size,
+                                ol_alloc_type_t Kind, size_t Alignment,
+                                GenericProfilerTy *) override {
+    if (Kind != OL_ALLOC_TYPE_DEVICE)
+      return unsupported("host or managed memory allocation");
+    if (Size <= 0)
+      return Plugin::error(ErrorCode::INVALID_SIZE,
+                           "DirectX buffer size must be positive");
+    Alignment = std::max(Alignment, alignof(std::max_align_t));
+    auto Width = checkedAddUnsigned<uint64_t>(static_cast<uint64_t>(Size),
+                                              Alignment - 1);
+    if (!Width)
+      return Plugin::error(ErrorCode::INVALID_SIZE,
+                           "DirectX buffer size and alignment overflow");
+
+    D3D12_HEAP_PROPERTIES Heap{};
+    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    Heap.CreationNodeMask = 1;
+    Heap.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC Desc{};
+    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    Desc.Width = *Width;
+    Desc.Height = 1;
+    Desc.DepthOrArraySize = 1;
+    Desc.MipLevels = 1;
+    Desc.SampleDesc.Count = 1;
+    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    ComPtr<ID3D12Resource> Resource;
+    if (auto Err = check(
+            Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
+                                            D3D12_RESOURCE_STATE_COMMON,
+                                            nullptr, IID_PPV_ARGS(&Resource)),
+            "ID3D12Device::CreateCommittedResource"))
+      return std::move(Err);
+
+    uint64_t Address = Resource->GetGPUVirtualAddress();
+    if (!Address || Desc.Width > std::numeric_limits<uintptr_t>::max() ||
+        Address > std::numeric_limits<uintptr_t>::max() - (Desc.Width - 1))
+      return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                           "DirectX buffer address is not representable");
+    uintptr_t AlignedAddress = alignTo(Address, Alignment);
+    {
+      std::lock_guard<std::mutex> Lock(AllocationsMutex);
+      if (!Resources.emplace(AlignedAddress, std::move(Resource)).second)
+        return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                             "DirectX runtime returned a duplicate address");
+    }
+    return reinterpret_cast<void *>(AlignedAddress);
+  }
+
+  Error deallocateImpl(GenericDeviceTy &, void *Ptr, ol_alloc_type_t,
+                       GenericProfilerTy *) override {
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    auto It = Resources.find(reinterpret_cast<uintptr_t>(Ptr));
+    if (It == Resources.end())
+      return Plugin::error(ErrorCode::NOT_FOUND,
+                           "pointer is not a DirectX buffer allocation base");
+    Resources.erase(It);
+    return Error::success();
+  }
+
+  void trackAllocation(GenericDeviceTy &AllocDevice, void *Ptr, int64_t Size,
+                       ol_alloc_type_t Kind) override {
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    Allocations[reinterpret_cast<uintptr_t>(Ptr)] =
+        PluginAllocInfoTy{&AllocDevice, Kind, Ptr, static_cast<size_t>(Size)};
+  }
+
+  void untrackAllocation(void *Ptr) override {
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    Allocations.erase(reinterpret_cast<uintptr_t>(Ptr));
+  }
+
+  Expected<PluginAllocInfoTy> getAllocInfo(const void *Ptr) override {
+    uintptr_t Address = reinterpret_cast<uintptr_t>(Ptr);
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    auto It = Allocations.upper_bound(Address);
+    if (It != Allocations.begin()) {
+      --It;
+      if (Address - It->first < It->second.Size)
+        return It->second;
+    }
     return Plugin::error(
         ErrorCode::NOT_FOUND,
         "pointer is not a known DirectX allocation in this context");
