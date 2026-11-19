@@ -157,7 +157,7 @@ def olGetDeviceInfo : Function {
                     "PropValue is not used.", PARAM_OUT, TypeInfo<"PropName" , "PropSize">>
   ];
   let returns = [
-    Return<"OL_ERRC_UNSUPPORTED_ENUMERATION", [
+    Return<"OL_ERRC_UNSUPPORTED", [
       "If `PropName` is not supported by the device."
     ]>,
     Return<"OL_ERRC_INVALID_SIZE", [
@@ -177,7 +177,7 @@ def olGetDeviceInfoSize : Function {
     Param<"size_t*", "PropSizeRet", "pointer to the number of bytes required to store the query", PARAM_OUT>
   ];
   let returns = [
-    Return<"OL_ERRC_UNSUPPORTED_ENUMERATION", [
+    Return<"OL_ERRC_UNSUPPORTED", [
       "If `PropName` is not supported by the device."
     ]>,
     Return<"OL_ERRC_INVALID_DEVICE">

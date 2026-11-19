@@ -634,6 +634,79 @@ TEST_F(DirectXDeviceTest, HostCompletionFailuresPoisonTheQueue) {
       std::string::npos);
 }
 
+TEST_F(DirectXDeviceTest, FailedDependenciesPreserveEarlierCompletedSnapshots) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto Producer =
+      std::make_shared<DirectXQueueTy>(static_cast<ID3D12Device *>(Handle));
+  DirectXQueueTy Consumer(static_cast<ID3D12Device *>(Handle));
+  ASSERT_TRUE(succeeded(Producer->init()));
+  ASSERT_TRUE(succeeded(Consumer.init()));
+  auto Earlier = Producer->signal();
+  ASSERT_TRUE(bool(Earlier)) << llvm::toString(Earlier.takeError());
+  ASSERT_TRUE(succeeded(Producer->wait(*Earlier)));
+  NativeQueueGate Gate;
+  ASSERT_TRUE(
+      succeeded(Gate.block(*Producer->Device.Get(), *Producer->Queue.Get())));
+  DirectXQueueTy::SubmissionTy Submission{};
+  Submission.Complete = [] {
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                     "injected producer failure");
+  };
+  ASSERT_TRUE(succeeded(Producer->createCommandList(Submission)));
+  auto Failed = Producer->submitWithValue(std::move(Submission));
+  ASSERT_TRUE(bool(Failed)) << llvm::toString(Failed.takeError());
+  ASSERT_TRUE(succeeded(Consumer.enqueueWait(Producer, *Failed)));
+  auto Tail = Consumer.signal();
+  ASSERT_TRUE(bool(Tail)) << llvm::toString(Tail.takeError());
+  ASSERT_TRUE(succeeded(Gate.open()));
+  auto Err = Consumer.wait(*Tail);
+  ASSERT_TRUE(bool(Err));
+  EXPECT_NE(llvm::toString(std::move(Err)).find("injected producer failure"),
+            std::string::npos);
+  ASSERT_TRUE(succeeded(Producer->wait(*Earlier)));
+  auto Complete = Consumer.isComplete(*Tail);
+  ASSERT_FALSE(bool(Complete));
+  llvm::consumeError(Complete.takeError());
+}
+
+#ifdef _WIN32
+TEST_F(DirectXDeviceTest, FenceRegistrationFailureRetainsInflightSubmissions) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto Queue =
+      std::make_unique<DirectXQueueTy>(static_cast<ID3D12Device *>(Handle));
+  Queue->RegisterFenceEvent = [](ID3D12Fence *, uint64_t, HANDLE) {
+    return E_OUTOFMEMORY;
+  };
+  ASSERT_TRUE(succeeded(Queue->init()));
+  NativeQueueGate Gate;
+  ASSERT_TRUE(succeeded(Gate.block(*Queue->Device.Get(), *Queue->Queue.Get())));
+  DirectXQueueTy::SubmissionTy Submission{};
+  Submission.Arguments = std::make_shared<DirectXArgumentBindingsTy>();
+  std::weak_ptr<DirectXArgumentBindingsTy> Arguments = Submission.Arguments;
+  ASSERT_TRUE(succeeded(Queue->createCommandList(Submission)));
+  auto Value = Queue->submitWithValue(std::move(Submission));
+  ASSERT_TRUE(bool(Value)) << llvm::toString(Value.takeError());
+  auto Err = Queue->wait(*Value);
+  ASSERT_TRUE(bool(Err));
+  EXPECT_NE(llvm::toString(std::move(Err)).find("SetEventOnCompletion"),
+            std::string::npos);
+  EXPECT_FALSE(Arguments.expired());
+  ASSERT_TRUE(succeeded(Gate.open()));
+  Queue.reset();
+  EXPECT_TRUE(Arguments.expired());
+}
+#endif
+
 class DirectXEventTest : public DirectXDeviceTest {
 protected:
   ol_context_handle_t Context = nullptr;

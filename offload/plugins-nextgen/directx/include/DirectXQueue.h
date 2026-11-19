@@ -78,18 +78,25 @@ struct DirectXQueueTy {
   struct FailureTy {
     std::mutex Mutex;
     std::string Message;
+    uint64_t LastCompleted = 0;
 
-    Error get() {
+    Error get(uint64_t Value = std::numeric_limits<uint64_t>::max()) {
       std::lock_guard<std::mutex> Lock(Mutex);
-      if (Message.empty())
+      if (Message.empty() || Value <= LastCompleted)
         return Error::success();
       return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
                                        Message.c_str());
     }
 
-    void set(std::string Text) {
+    void set(std::string Text, uint64_t Completed) {
       std::lock_guard<std::mutex> Lock(Mutex);
       Message = std::move(Text);
+      LastCompleted = Completed;
+    }
+
+    void append(Error Err) {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      Message += "; " + toString(std::move(Err));
     }
   };
 
@@ -117,6 +124,12 @@ struct DirectXQueueTy {
   uint64_t LastHostValue = 0;
   PluginContextTy *Context;
   std::deque<SubmissionTy> Submissions;
+#ifdef _WIN32
+  std::function<HRESULT(ID3D12Fence *, uint64_t, HANDLE)> RegisterFenceEvent =
+      [](ID3D12Fence *Fence, uint64_t Value, HANDLE Event) {
+        return Fence->SetEventOnCompletion(Value, Event);
+      };
+#endif
 
 private:
   std::mutex SubmissionMutex;
@@ -125,25 +138,89 @@ private:
   bool Stopping = false;
   std::shared_ptr<FailureTy> Failure = std::make_shared<FailureTy>();
   bool Failed = false;
+  uint64_t LastCompletedValue = 0;
+#ifdef _WIN32
+  HANDLE ExecutionEvent = nullptr;
+  uint64_t RegisteredValue = 0;
+#endif
 
   Error checkFailure() { return Failure->get(); }
 
   void fail(Error Err) {
-    Failure->set(toString(std::move(Err)));
+    if (Failed) {
+      Failure->append(std::move(Err));
+      return;
+    }
+    Failure->set(toString(std::move(Err)), LastCompletedValue);
     Failed = true;
+    // Release GPU waits without publishing success: every completion observer
+    // checks the failure boundary before trusting this fence.
+    if (auto SignalError = check(Fence->Signal(LastSignaledValue),
+                                 "ID3D12Fence::Signal(failure)"))
+      Failure->append(std::move(SignalError));
     Changed.notify_all();
+  }
+
+  Error waitForExecution(uint64_t Value, std::unique_lock<std::mutex> &Lock) {
+#ifdef _WIN32
+    if (RegisteredValue != Value) {
+      if (!ResetEvent(ExecutionEvent))
+        return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                         "ResetEvent failed (Win32 error %lu)",
+                                         GetLastError());
+      if (auto Err = check(
+              RegisterFenceEvent(ExecutionFence.Get(), Value, ExecutionEvent),
+              "ID3D12Fence::SetEventOnCompletion"))
+        return Err;
+      RegisteredValue = Value;
+    }
+    Lock.unlock();
+    DWORD Result = WaitForSingleObject(ExecutionEvent, 100);
+    DWORD LastError = GetLastError();
+    Lock.lock();
+    if (Result != WAIT_OBJECT_0 && Result != WAIT_TIMEOUT)
+      return error::createOffloadError(
+          error::ErrorCode::BACKEND_FAILURE,
+          "WaitForSingleObject failed (result %lu, Win32 error %lu)", Result,
+          LastError);
+#else
+    Changed.wait_for(Lock, std::chrono::milliseconds(1));
+#endif
+    return Error::success();
+  }
+
+  void drainFailed() {
+    std::unique_lock<std::mutex> Lock(Mutex);
+    if (!Failed || Submissions.empty())
+      return;
+    uint64_t Value = Submissions.back().Value;
+    // Cover even a list whose original execution-fence signal failed.
+    if (auto Err = check(Queue->Signal(ExecutionFence.Get(), Value),
+                         "ID3D12CommandQueue::Signal(failure drain)"))
+      Failure->append(std::move(Err));
+    for (;;) {
+      auto Completed = getCompletedValue(ExecutionFence.Get());
+      if (!Completed) {
+        Failure->append(Completed.takeError());
+        break;
+      }
+      if (*Completed >= Value)
+        break;
+      Changed.wait_for(Lock, std::chrono::milliseconds(100));
+    }
+    Submissions.clear();
   }
 
   void retire() {
     std::unique_lock<std::mutex> Lock(Mutex);
     for (;;) {
-      Changed.wait(Lock, [&] { return Stopping || !Submissions.empty(); });
+      Changed.wait(Lock,
+                   [&] { return Failed || Stopping || !Submissions.empty(); });
       if (Failed || (Stopping && Submissions.empty()))
         return;
       auto &Front = Submissions.front();
-      if (Front.Dependency &&
-          Front.Dependency->GetCompletedValue() < Front.DependencyValue) {
-        if (auto Err = Front.DependencyFailure->get()) {
+      if (Front.Dependency) {
+        if (auto Err = Front.DependencyFailure->get(Front.DependencyValue)) {
           fail(std::move(Err));
           return;
         }
@@ -154,7 +231,10 @@ private:
         return;
       }
       if (*Completed < Submissions.front().Value) {
-        Changed.wait_for(Lock, std::chrono::milliseconds(1));
+        if (auto Err = waitForExecution(Front.Value, Lock)) {
+          fail(std::move(Err));
+          return;
+        }
         continue;
       }
       auto &Submission = Submissions.front();
@@ -176,6 +256,7 @@ private:
         fail(std::move(Err));
         return;
       }
+      LastCompletedValue = Submission.Value;
       Submissions.pop_front();
       Changed.notify_all();
     }
@@ -225,6 +306,10 @@ public:
     }
     if (Worker.joinable())
       Worker.join();
+#ifdef _WIN32
+    if (ExecutionEvent)
+      CloseHandle(ExecutionEvent);
+#endif
   }
 
   Error init() {
@@ -243,7 +328,17 @@ public:
             Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)),
             "ID3D12Device::CreateFence"))
       return Err;
-    Worker = std::thread([this] { retire(); });
+#ifdef _WIN32
+    ExecutionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!ExecutionEvent)
+      return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                       "CreateEvent failed (Win32 error %lu)",
+                                       GetLastError());
+#endif
+    Worker = std::thread([this] {
+      retire();
+      drainFailed();
+    });
     return Error::success();
   }
 
@@ -270,6 +365,8 @@ public:
 
   Expected<bool> isComplete(uint64_t Value) {
     std::lock_guard<std::mutex> Lock(Mutex);
+    if (auto Err = Failure->get(Value))
+      return std::move(Err);
     auto Completed = getCompletedValue();
     if (!Completed)
       return Completed.takeError();
@@ -345,6 +442,8 @@ public:
   Error wait(uint64_t Value) {
     std::unique_lock<std::mutex> Lock(Mutex);
     for (;;) {
+      if (auto Err = Failure->get(Value))
+        return Err;
       auto Completed = getCompletedValue();
       if (!Completed)
         return Completed.takeError();
@@ -352,7 +451,7 @@ public:
         return Error::success();
       if (auto Err = checkFailure())
         return Err;
-      Changed.wait_for(Lock, std::chrono::milliseconds(1));
+      Changed.wait_for(Lock, std::chrono::milliseconds(100));
     }
   }
 

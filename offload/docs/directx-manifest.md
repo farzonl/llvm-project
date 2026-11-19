@@ -131,6 +131,19 @@ The completion timeline advances only after execution and any host readback
 action finish, so observing completion also makes readback bytes visible.
 Completion failures poison the queue and are reported by subsequent operations
 and synchronization rather than publishing successful completion.
+Native Windows retirement uses fence completion events; host waiters are notified
+when retirement advances. A 100 ms watchdog checks failures and device removal,
+while portable emulators retain their short polling fallback. Each pending native
+fence value is registered only once, including across watchdog wakeups.
+
+Failure state records the last genuinely completed snapshot. Failed queues
+release their GPU completion-fence waits so dependent queues can drain, but those
+fence advances never count as successful API completion. Earlier completed events
+remain usable. Pending submission ownership is retained through a native GPU
+drain (or device removal), and host completion actions are not run for failed work.
+If the driver cannot accept even a drain fence signal, safe teardown must wait
+for device removal rather than release objects still potentially in use; the
+plugin does not forcibly remove a shared native device.
 
 ## Events
 
