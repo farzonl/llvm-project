@@ -12,14 +12,21 @@
 offload-api
 :::
 
-# Experimental DirectX discovery
+# Experimental DirectX plugin
 
-The opt-in `directx` plugin currently supports liboffload device discovery only.
+The opt-in `directx` plugin supports liboffload device discovery and single-device
+context creation, queries, and destruction.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
-and native `ID3D12Device` handles are available. Compute-only adapters, contexts,
+and native `ID3D12Device` handles are available. Compute-only adapters, queues,
 memory operations, image loading, and shader execution are not supported yet.
 This is not an OpenMP target.
+
+Each context accepts exactly one device entry and retains a COM reference to its
+`ID3D12Device`. Contexts for the same device are distinct liboffload objects but
+share the native device; `OL_CONTEXT_INFO_NATIVE_HANDLE` returns that borrowed
+`ID3D12Device` pointer. Destroying a context releases its reference without
+invalidating other contexts or the device.
 
 Select it with `-DLIBOMPTARGET_PLUGINS_TO_BUILD=directx`; it is not included in
 `all`. Windows builds use the Windows SDK headers and load `dxcore.dll` and
@@ -36,10 +43,11 @@ remain loaded until process exit.
 Build `directx.unittests` and run
 `llvm-lit --filter='directx[.]unittests' <runtime-build>/offload/test/unit`.
 On Linux, set both runtime path variables to the Nacelle shared library to
-enable the real-device discovery and repeated initialization/shutdown test.
+enable the real-device discovery, context lifecycle, and repeated
+initialization/shutdown test.
 The missing-runtime test does not require a DirectX runtime or GPU.
-The general OffloadAPI tests assume working contexts and execution and are not
-supported by this discovery-only prototype.
+The OffloadAPI initialization, platform, and context tests can also run. Tests
+requiring queues, memory operations, or shader execution are not supported yet.
 
 # Indices and tables
 

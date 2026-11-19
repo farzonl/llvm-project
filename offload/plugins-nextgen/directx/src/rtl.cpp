@@ -44,8 +44,7 @@ using sys::DynamicLibrary;
 
 Error unsupported(const char *Operation) {
   return Plugin::error(ErrorCode::UNSUPPORTED,
-                       "DirectX discovery prototype does not support %s",
-                       Operation);
+                       "DirectX prototype does not support %s", Operation);
 }
 
 Error check(HRESULT Result, const char *Operation) {
@@ -214,6 +213,31 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
 };
 
+struct DirectXPluginContextTy final : PluginContextTy {
+  ComPtr<ID3D12Device> Device;
+
+  DirectXPluginContextTy(GenericPluginTy &Plugin,
+                         ArrayRef<GenericDeviceTy *> Devices,
+                         const ComPtr<ID3D12Device> &Device)
+      : PluginContextTy(Plugin, Devices), Device(Device) {}
+
+  Error deinit() override {
+    Device.Reset();
+    return Error::success();
+  }
+  Expected<void *> getNativeHandle() override {
+    return static_cast<void *>(Device.Get());
+  }
+  Error initAsyncInfoImpl(GenericDeviceTy &, AsyncInfoWrapperTy &) override {
+    return unsupported("queue creation");
+  }
+  Expected<PluginAllocInfoTy> getAllocInfo(const void *) override {
+    return Plugin::error(
+        ErrorCode::NOT_FOUND,
+        "pointer is not a known DirectX allocation in this context");
+  }
+};
+
 struct DirectXGlobalHandlerTy final : GenericGlobalHandlerTy {
   Error getGlobalMetadataFromDevice(GenericDeviceTy &, DeviceImageTy &,
                                     GlobalTy &) override {
@@ -336,8 +360,16 @@ struct DirectXPluginTy final : GenericPluginTy {
   }
   bool isDataExchangable(int32_t, int32_t) override { return false; }
   Expected<std::unique_ptr<PluginContextTy>>
-  createPluginContext(ArrayRef<GenericDeviceTy *>) override {
-    return unsupported("contexts");
+  createPluginContext(ArrayRef<GenericDeviceTy *> Devices) override {
+    if (Devices.empty())
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "createPluginContext called with no devices");
+    if (Devices.size() != 1)
+      return unsupported("contexts with more than one device entry");
+
+    auto &Device = static_cast<DirectXDeviceTy &>(*Devices.front());
+    return std::make_unique<DirectXPluginContextTy>(*this, Devices,
+                                                    Device.Device);
   }
 };
 

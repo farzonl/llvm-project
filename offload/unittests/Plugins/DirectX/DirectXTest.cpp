@@ -114,11 +114,39 @@ TEST_F(DirectXTest, DiscoversDevicesAndRestarts) {
                                     sizeof(NativeDevice), &NativeDevice)));
       EXPECT_NE(NativeDevice, nullptr);
 
-      ol_context_handle_t Context = nullptr;
-      auto Result = olCreateContext(1, &Device, &Context);
+      ol_context_handle_t Contexts[2] = {};
+      for (auto &Context : Contexts)
+        ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+      EXPECT_NE(Contexts[0], Contexts[1]);
+      ASSERT_TRUE(succeeded(olDestroyContext(Contexts[0])));
+
+      void *ContextDevice = nullptr;
+      ASSERT_TRUE(
+          succeeded(olGetContextInfo(Contexts[1], OL_CONTEXT_INFO_NATIVE_HANDLE,
+                                     sizeof(ContextDevice), &ContextDevice)));
+      EXPECT_EQ(ContextDevice, NativeDevice);
+
+      ol_device_handle_t RepeatedDevices[] = {Device, Device};
+      ol_context_handle_t RejectedContext = nullptr;
+      auto Result = olCreateContext(2, RepeatedDevices, &RejectedContext);
       ASSERT_NE(Result, nullptr);
       EXPECT_EQ(Result->Code, OL_ERRC_UNSUPPORTED);
-      EXPECT_EQ(Context, nullptr);
+      EXPECT_EQ(RejectedContext, nullptr);
+
+      void *Allocation = nullptr;
+      Result = olMemAlloc(Contexts[1], Device, OL_ALLOC_TYPE_DEVICE, 16,
+                          &Allocation);
+      ASSERT_NE(Result, nullptr);
+      EXPECT_EQ(Result->Code, OL_ERRC_UNSUPPORTED);
+      EXPECT_EQ(Allocation, nullptr);
+
+      ol_queue_handle_t Queue = nullptr;
+      Result = olCreateQueue(Contexts[1], Device, &Queue);
+      ASSERT_NE(Result, nullptr);
+      EXPECT_EQ(Result->Code, OL_ERRC_UNSUPPORTED);
+      EXPECT_EQ(Queue, nullptr);
+
+      ASSERT_TRUE(succeeded(olDestroyContext(Contexts[1])));
     }
     ASSERT_FALSE(Identities.empty()) << "No DirectX adapters were discovered";
     if (Iteration == 0)

@@ -738,12 +738,15 @@ Error PluginContextTy::initAsyncInfo(GenericDeviceTy &Device,
                                      __tgt_async_info **AsyncInfoPtr) {
   assert(AsyncInfoPtr && "Invalid async info");
 
-  *AsyncInfoPtr = new __tgt_async_info();
+  *AsyncInfoPtr = nullptr;
+  auto AsyncInfo = std::make_unique<__tgt_async_info>();
 
-  AsyncInfoWrapperTy AsyncInfoWrapper(Device, *AsyncInfoPtr);
+  AsyncInfoWrapperTy AsyncInfoWrapper(Device, AsyncInfo.get());
 
   auto Err = initAsyncInfoImpl(Device, AsyncInfoWrapper);
   AsyncInfoWrapper.finalize(Err);
+  if (!Err)
+    *AsyncInfoPtr = AsyncInfo.release();
   return Err;
 }
 

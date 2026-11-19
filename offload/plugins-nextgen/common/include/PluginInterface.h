@@ -736,6 +736,8 @@ struct PluginContextTy {
   GenericPluginTy &getPlugin() const { return Plugin; }
 
   /// Initialize a __tgt_async_info structure on \p Device.
+  /// On success, the caller owns the structure. On failure, the output is
+  /// nullptr.
   Error initAsyncInfo(GenericDeviceTy &Device, __tgt_async_info **AsyncInfoPtr);
   virtual Error initAsyncInfoImpl(GenericDeviceTy &Device,
                                   AsyncInfoWrapperTy &AsyncInfoWrapper) = 0;

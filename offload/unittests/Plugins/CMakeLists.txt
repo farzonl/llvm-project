@@ -1,4 +1,6 @@
-add_unittest(OffloadUnitTests plugin-common.unittests GlobalHandlerTest.cpp)
+add_unittest(OffloadUnitTests plugin-common.unittests
+  GlobalHandlerTest.cpp
+  PluginContextTest.cpp)
 target_link_libraries(plugin-common.unittests PRIVATE omptarget.rtl.host)
 target_include_directories(plugin-common.unittests PRIVATE
   ${LIBOMPTARGET_INCLUDE_DIR}
