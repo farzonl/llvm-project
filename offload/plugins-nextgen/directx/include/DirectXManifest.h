@@ -20,6 +20,10 @@
 #include <string>
 #include <variant>
 
+namespace llvm {
+class MemoryBufferRef;
+}
+
 namespace llvm::object {
 class OffloadBinary;
 }
@@ -65,6 +69,8 @@ struct DirectXManifestTy {
 
   static Expected<DirectXManifestTy> parse(StringRef JSON);
   static Expected<DirectXManifestTy> parse(const object::OffloadBinary &Image);
+
+  Error validateShader(MemoryBufferRef Shader) const;
 };
 
 } // namespace llvm::omp::target::plugin::directx

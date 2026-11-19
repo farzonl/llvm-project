@@ -7,10 +7,41 @@ point. Multiple entries keep independent payload/manifest associations.
 The image kind is `IMG_DXIL`, the producer kind is `OFK_None`, and entry flags
 are zero. The DXIL payload must be nonempty.
 
-This slice implements manifest decoding and device-independent validation only.
-It does not enable program loading or execution. DXIL reflection, shader-model
-and feature-capability checks, root-signature creation, and launch-time argument
-validation are subsequent implementation steps. The prototype ABI is experimental.
+Manifest decoding and device-independent DXIL/manifest validation are implemented.
+This does not enable program loading or execution. Device-capability checks,
+root-signature creation, and launch-time argument validation are subsequent
+implementation steps. The prototype ABI is experimental.
+
+## Shader validation
+
+The internal `DirectXManifestTy::validateShader` helper validates a decoded
+manifest against a DXBC container using LLVM's container and bitcode readers.
+There is no DXC library dependency or runtime compilation. Validation checks:
+
+- Container, part, and embedded bitcode bounds; executable compute DXIL, rather
+  than a debug-only image or shader library.
+- Agreement between the manifest, program header, and DXIL metadata on shader
+  model, entry point, and thread dimensions.
+- Exact SRV/UAV/cbuffer binding coverage. Raw, single-descriptor buffers are
+  supported; resource arrays, typed/structured resources, textures, samplers,
+  UAV counters, and rasterizer-ordered views are rejected.
+- Constant block size and each scalar field's byte width and explicit HLSL
+  offset, including padding between fields.
+- SFI0 feature requirements covered by the manifest, and known DXIL module
+  feature requirements covered by SFI0. Overdeclaring manifest features is
+  permitted; omitting actual requirements is not.
+
+Scalar shaders currently require retained `STAT` reflection data and a named
+`cbuffer` declaration with a matching named struct annotation. Reflection-stripped
+scalar shaders, non-scalar constant fields, and other constant-buffer annotation
+forms are explicitly unsupported. Buffer-only shaders do not require `STAT`.
+Legacy DXIL's data layout is overridden only for LLVM bitcode decoding; HLSL
+offsets come from reflection, not LLVM's replacement layout.
+
+Embedded root signatures and additional entry/resource properties are
+conservatively rejected until their compatibility checks are implemented. The
+helper does not perform DXIL validator/signature verification, establish device
+support, create native objects, or make `olCreateProgram` available.
 
 ## Version 1 schema
 
@@ -126,6 +157,7 @@ One table DWORD plus up to 63 constant DWORDs fits the 64-DWORD D3D12 root budge
 Version 1 retains the 252-byte limit even for scalar-only kernels. If both kinds
 of argument are absent, there are no root parameters.
 Incompatible embedded root signatures must be rejected when loading is enabled.
+The current validator conservatively rejects all embedded root signatures.
 
 ## Packaging
 

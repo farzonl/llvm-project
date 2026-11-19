@@ -27,9 +27,10 @@ execution are not supported yet.
 This is not an OpenMP target.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
-metadata for packaged shaders. Its parser and ABI validation are implemented;
-program loading, reflection, root-signature construction, and dispatch remain
-unsupported.
+metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
+validation helper are implemented, including explicit scalar field layouts and
+feature-declaration checks. Program loading, device-capability checks,
+root-signature construction, and dispatch remain unsupported.
 
 Each context accepts exactly one device entry and retains a COM reference to its
 `ID3D12Device`. Contexts for the same device are distinct liboffload objects but
@@ -97,6 +98,9 @@ checks, and repeated initialization/shutdown tests. Nacelle currently submits
 queue work synchronously; its tests do not
 validate native Windows asynchronous submission.
 The missing-runtime test does not require a DirectX runtime or GPU.
+Manifest and shader validation tests also run without a DirectX runtime or GPU.
+Their checked-in DXIL fixtures are generated from the accompanying HLSL with
+the documented DXC command; running the tests does not require DXC.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy
 tests can also run. Tests requiring events, host callbacks, host/managed
 allocations, or shader execution are not supported yet.
