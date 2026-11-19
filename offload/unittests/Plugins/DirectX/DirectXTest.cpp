@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DirectXArguments.h"
 #include "DirectXQueue.h"
 #include "DirectXRootSignature.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -53,6 +54,23 @@ testing::AssertionResult failedWith(ol_result_t Result, ol_errc_t Code) {
   if (Result->Code != Code)
     return testing::AssertionFailure() << Result->Details;
   return testing::AssertionSuccess();
+}
+
+llvm::Expected<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE> rootSerializer() {
+  const char *Name = std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY");
+  if (!Name)
+    Name = "d3d12.dll";
+  std::string Message;
+  auto Library = llvm::sys::DynamicLibrary::getPermanentLibrary(Name, &Message);
+  if (!Library.isValid())
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
+                                     Message.c_str());
+  auto Serialize = reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(
+      Library.getAddressOfSymbol("D3D12SerializeRootSignature"));
+  if (!Serialize)
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                     "missing root serializer");
+  return Serialize;
 }
 
 class ScopedEnvironment {
@@ -611,16 +629,8 @@ TEST_F(DirectXDeviceTest, CreatesCanonicalRootSignatures) {
   ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
                                         sizeof(Handle), &Handle)));
   auto *NativeDevice = static_cast<ID3D12Device *>(Handle);
-  const char *LibraryName = std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY");
-  if (!LibraryName)
-    LibraryName = "d3d12.dll";
-  std::string Message;
-  auto Library =
-      sys::DynamicLibrary::getPermanentLibrary(LibraryName, &Message);
-  ASSERT_TRUE(Library.isValid()) << Message;
-  auto Serialize = reinterpret_cast<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>(
-      Library.getAddressOfSymbol("D3D12SerializeRootSignature"));
-  ASSERT_NE(Serialize, nullptr);
+  auto Serialize = rootSerializer();
+  ASSERT_TRUE(static_cast<bool>(Serialize)) << toString(Serialize.takeError());
 
   DirectXManifestTy Manifest;
   for (unsigned Layout = 0; Layout != 4; ++Layout) {
@@ -639,11 +649,168 @@ TEST_F(DirectXDeviceTest, CreatesCanonicalRootSignatures) {
     }
     Microsoft::WRL::ComPtr<ID3D12RootSignature> Root;
     ASSERT_TRUE(succeeded(
-        createRootSignature(Manifest, *NativeDevice, Serialize, Root)));
+        createRootSignature(Manifest, *NativeDevice, *Serialize, Root)));
     ASSERT_NE(Root.Get(), nullptr);
     Microsoft::WRL::ComPtr<ID3D12Device> Owner;
     ASSERT_TRUE(SUCCEEDED(Root->GetDevice(IID_PPV_ARGS(&Owner))));
     EXPECT_EQ(Owner.Get(), NativeDevice);
+  }
+}
+
+TEST_F(DirectXDeviceTest, RecordsBoundedArgumentBindingsWithoutDispatch) {
+  using namespace llvm;
+  using namespace llvm::omp::target::plugin::directx;
+  using Microsoft::WRL::ComPtr;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto &NativeDevice = *static_cast<ID3D12Device *>(Handle);
+  auto Serialize = rootSerializer();
+  ASSERT_TRUE(static_cast<bool>(Serialize)) << toString(Serialize.takeError());
+  D3D12_HEAP_PROPERTIES HeapProperties{};
+  HeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+  HeapProperties.CreationNodeMask = HeapProperties.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = 128;
+  Desc.Height = Desc.DepthOrArraySize = Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  ComPtr<ID3D12Resource> Resource;
+  ASSERT_TRUE(succeeded(
+      check(NativeDevice.CreateCommittedResource(
+                &HeapProperties, D3D12_HEAP_FLAG_NONE, &Desc,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&Resource)),
+            "create binding-test buffer")));
+  uint64_t Address = Resource->GetGPUVirtualAddress();
+  void *UAVPointer = reinterpret_cast<void *>(Address + 16);
+  void *SRVPointer = reinterpret_cast<void *>(Address + 64);
+  uint8_t Scalar4[] = {0x34, 0x12, 0xc0, 0x7f};
+  uint8_t Scalar8[] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+  for (unsigned Layout = 0; Layout != 4; ++Layout) {
+    SCOPED_TRACE(Layout);
+    DirectXManifestTy Manifest;
+    SmallVector<void *> Args;
+    SmallVector<int64_t> Sizes;
+    auto Scalar = [&](uint32_t Size, uint32_t Offset, void *Value) {
+      Manifest.Constants = DirectXConstantBindingTy{4, 2, 16};
+      Manifest.Arguments.push_back({static_cast<uint32_t>(Args.size()),
+                                    DirectXScalarBindingTy{Size, Offset}});
+      Args.push_back(Value);
+      Sizes.push_back(Size);
+    };
+    auto Buffer = [&](DirectXBufferBindingTy::Kind Kind, uint32_t Register,
+                      uint32_t MinSize, void **Value) {
+      Manifest.Arguments.push_back(
+          {static_cast<uint32_t>(Args.size()),
+           DirectXBufferBindingTy{Kind, Register, 1, MinSize}});
+      Args.push_back(Value);
+      Sizes.push_back(sizeof(void *));
+    };
+    if (Layout & 2)
+      Scalar(4, 0, Scalar4);
+    if (Layout & 1)
+      Buffer(DirectXBufferBindingTy::Kind::UAV, 3, 32, &UAVPointer);
+    if (Layout & 2)
+      Scalar(8, 8, Scalar8);
+    if (Layout & 1)
+      Buffer(DirectXBufferBindingTy::Kind::SRV, 2, 4, &SRVPointer);
+    auto Resolve =
+        [&](const void *Pointer) -> Expected<DirectXResolvedBufferTy> {
+      if (Pointer != UAVPointer && Pointer != SRVPointer)
+        return error::createOffloadError(error::ErrorCode::NOT_FOUND,
+                                         "unexpected binding-test address");
+      bool IsUAV = Pointer == UAVPointer;
+      return DirectXResolvedBufferTy{
+          {Resource, IsUAV ? uint64_t{16} : uint64_t{64}},
+          IsUAV ? uint64_t{35} : uint64_t{7}};
+    };
+    DirectXArgumentBindingsTy Bindings;
+    ASSERT_TRUE(succeeded(Bindings.prepare(Manifest, Args, Sizes, Resolve)));
+    if (Layout & 2)
+      EXPECT_EQ(ArrayRef(Bindings.Constants),
+                (ArrayRef<uint32_t>{0x7fc01234, 0, 0x04030201, 0x08070605}));
+    else
+      EXPECT_TRUE(Bindings.Constants.empty());
+    if (Layout & 1) {
+      ASSERT_EQ(Bindings.Buffers.size(), 2u);
+      const auto &UAV =
+          std::get<D3D12_UNORDERED_ACCESS_VIEW_DESC>(Bindings.Buffers[0].View);
+      EXPECT_EQ(UAV.Format, DXGI_FORMAT_R32_TYPELESS);
+      EXPECT_EQ(UAV.ViewDimension, D3D12_UAV_DIMENSION_BUFFER);
+      EXPECT_EQ(UAV.Buffer.FirstElement, 4u);
+      EXPECT_EQ(UAV.Buffer.NumElements, 8u);
+      EXPECT_EQ(UAV.Buffer.StructureByteStride, 0u);
+      EXPECT_EQ(UAV.Buffer.CounterOffsetInBytes, 0u);
+      EXPECT_EQ(UAV.Buffer.Flags, D3D12_BUFFER_UAV_FLAG_RAW);
+      const auto &SRV =
+          std::get<D3D12_SHADER_RESOURCE_VIEW_DESC>(Bindings.Buffers[1].View);
+      EXPECT_EQ(SRV.Format, DXGI_FORMAT_R32_TYPELESS);
+      EXPECT_EQ(SRV.ViewDimension, D3D12_SRV_DIMENSION_BUFFER);
+      EXPECT_EQ(SRV.Shader4ComponentMapping,
+                D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+      EXPECT_EQ(SRV.Buffer.FirstElement, 16u);
+      EXPECT_EQ(SRV.Buffer.NumElements, 1u);
+      EXPECT_EQ(SRV.Buffer.StructureByteStride, 0u);
+      EXPECT_EQ(SRV.Buffer.Flags, D3D12_BUFFER_SRV_FLAG_RAW);
+    } else
+      EXPECT_TRUE(Bindings.Buffers.empty());
+
+    ComPtr<ID3D12RootSignature> Root;
+    ASSERT_TRUE(succeeded(
+        createRootSignature(Manifest, NativeDevice, *Serialize, Root)));
+    ComPtr<ID3D12CommandAllocator> Allocator;
+    ComPtr<ID3D12GraphicsCommandList> List;
+    ASSERT_TRUE(succeeded(
+        check(NativeDevice.CreateCommandAllocator(
+                  D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&Allocator)),
+              "create binding-test allocator")));
+    ASSERT_TRUE(succeeded(
+        check(NativeDevice.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                             Allocator.Get(), nullptr,
+                                             IID_PPV_ARGS(&List)),
+              "create binding-test list")));
+    if (Layout & 1) {
+      auto Err = Bindings.record(*List.Get(), *Root.Get());
+      ASSERT_TRUE(static_cast<bool>(Err));
+      handleAllErrors(std::move(Err), [](const error::OffloadError &Detail) {
+        EXPECT_EQ(Detail.convertToErrorCode(),
+                  error::make_error_code(error::ErrorCode::INVALID_ARGUMENT));
+      });
+    }
+    ASSERT_TRUE(succeeded(Bindings.createDescriptorHeap(NativeDevice)));
+    if (Layout & 1) {
+      ASSERT_NE(Bindings.Heap.Get(), nullptr);
+      auto HeapDesc = Bindings.Heap->GetDesc();
+      EXPECT_EQ(HeapDesc.Type, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      EXPECT_EQ(HeapDesc.Flags, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+      EXPECT_EQ(HeapDesc.NumDescriptors, 2u);
+      DirectXArgumentBindingsTy Other;
+      ASSERT_TRUE(succeeded(Other.prepare(Manifest, Args, Sizes, Resolve)));
+      ASSERT_TRUE(succeeded(Other.createDescriptorHeap(NativeDevice)));
+      EXPECT_NE(Other.Heap.Get(), Bindings.Heap.Get());
+      auto Err = Bindings.prepare(
+          Manifest, Args, Sizes,
+          [&](const void *) -> Expected<DirectXResolvedBufferTy> {
+            return DirectXResolvedBufferTy{{Resource, 16}, 128};
+          });
+      ASSERT_TRUE(static_cast<bool>(Err));
+      handleAllErrors(std::move(Err), [](const error::OffloadError &Detail) {
+        EXPECT_EQ(Detail.convertToErrorCode(),
+                  error::make_error_code(error::ErrorCode::BACKEND_FAILURE));
+      });
+      EXPECT_EQ(Bindings.Heap->GetDesc().NumDescriptors, 2u);
+    } else
+      EXPECT_EQ(Bindings.Heap.Get(), nullptr);
+    ASSERT_TRUE(succeeded(Bindings.record(*List.Get(), *Root.Get())));
+    ASSERT_TRUE(
+        succeeded(check(List->Close(), "close binding-test command list")));
+    if (Layout == 3) {
+      Resource.Reset();
+      EXPECT_EQ(Bindings.Buffers[0].Resource->GetDesc().Width, 128u);
+    }
   }
 }
 

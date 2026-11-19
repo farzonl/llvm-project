@@ -37,7 +37,12 @@ Kernel lookup/enumeration expose the manifest's exact entry and lazily create a
 compute pipeline, owned by its program. Missing entries return `NOT_FOUND`.
 Static shared-memory reflection is deferred, so shaders using `groupshared`
 storage are currently rejected rather than reporting incorrect kernel metadata.
-Descriptor heaps/views, argument binding, and dispatch remain unsupported.
+Internal helpers prepare bounded raw-buffer descriptors, pack scalar constants,
+and record canonical root bindings, retaining the native resources and a
+shader-visible descriptor heap. They enforce 16-byte raw-view alignment and
+exclude allocation padding and pool capacity. Launch-context integration,
+resource transitions, and submission remain deferred; public dispatch is still
+unsupported.
 Programs currently require exactly one entry in an uncompressed, version-3
 OffloadBinary package; raw DXIL/bitcode and multi-entry packages are not accepted.
 

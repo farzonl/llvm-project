@@ -10,7 +10,8 @@ are zero. The DXIL payload must be nonempty.
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
 loading with device-capability checks, canonical native root-signature creation,
 and kernel objects with compute pipelines are implemented. Argument binding and
-execution remain unsupported. The prototype ABI is experimental.
+recording helpers are implemented internally; public launch and execution remain
+unsupported. The prototype ABI is experimental.
 
 ## Program loading
 
@@ -73,6 +74,48 @@ subset. Occupancy calculations, cooperative launch queries, argument binding,
 and dispatch remain `UNSUPPORTED`, including dispatch with an explicit queue.
 Kernel symbols are borrowed from their program and must not be used after its
 destruction.
+
+## Argument binding preparation
+
+The internal `DirectXArgumentBindingsTy` helper prepares arguments from a
+validated manifest, creates a shader-visible descriptor heap, and records the
+canonical root bindings on an open compute command list. It does not submit
+commands, dispatch a shader, or perform resource transitions. This helper is not
+connected to `olLaunchKernel` yet; that API still returns `UNSUPPORTED`.
+
+Preparation requires one non-null host argument-value slot and exact size per
+manifest argument. Buffer slots contain a host pointer-sized encoded device
+pointer; scalar slots contain exactly four or eight little-endian bytes. Slot
+addresses need not be naturally aligned. Scalar bits are copied without numeric
+conversion, and constant-block padding is zero-filled. Failed preparation
+preserves any previously prepared bindings.
+
+The caller supplies a resolver restricted to the launch context's live
+allocations; unknown, freed, and foreign-context pointers must fail rather than
+fall back to another context. The resolver returns an owned native resource,
+the byte offset from its physical base (including alignment displacement), and
+the remaining **logical allocation** bytes. Preparation verifies resource bounds
+and access flags before constructing raw views:
+
+- The resource-relative offset must be 16-byte aligned, as required for raw
+  SRV/UAV views. Misaligned offsets are rejected, not rounded.
+- The remaining logical size must cover `min_size`. Only complete DWORDs are
+  exposed; trailing partial DWORDs, pool capacity, and allocation padding are
+  never included.
+- The prototype limits each view to `2^27` DWORDs (512 MiB), using the SDK's
+  portable buffer-view texel limit. Larger views return `UNSUPPORTED`; their
+  bounds are not silently truncated.
+- Views use `R32_TYPELESS`, `RAW` flags, zero structure stride, and no UAV counter.
+  Descriptor order follows the manifest's canonical buffer-argument order.
+
+Buffer bindings own their resource references and a per-binding-set
+shader-visible CBV/SRV/UAV heap. Heap creation rejects resources from another
+device. Scalar-only and empty kernels allocate no descriptor heap. Recording
+uses table root 0 when buffers exist and constants root 1 (otherwise root 0).
+The root signature must match the manifest, and the binding set and root
+signature must remain alive and unchanged through eventual submission
+completion. Resource-state transitions, aliasing barriers, launch-context
+resolver wiring, and submission lifetime integration are deferred to dispatch.
 
 ## Shader validation
 
@@ -222,8 +265,8 @@ Version 1 retains the 252-byte limit even for scalar-only kernels. If both kinds
 of argument are absent, there are no root parameters.
 The loader creates this layout even for shaders without arguments. Native
 root-creation failures, including device-specific layout limits, are surfaced as
-backend errors. Descriptor heaps and views are not allocated yet, and argument
-binding remains unsupported.
+backend errors. Internal helpers can create descriptor heaps/views and record
+argument bindings, but public launch remains unsupported.
 The validator conservatively rejects all embedded root signatures, including
 otherwise compatible layouts; compatibility checking is deferred.
 
