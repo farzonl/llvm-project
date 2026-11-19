@@ -9,9 +9,9 @@ are zero. The DXIL payload must be nonempty.
 
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
 loading with device-capability checks, canonical native root-signature creation,
-and kernel objects with compute pipelines are implemented. Argument binding and
-recording helpers are implemented internally; public launch and execution remain
-unsupported. The prototype ABI is experimental.
+and kernel objects with compute pipelines are implemented. `olLaunchKernel`
+supports synchronous compute execution with bounded raw buffers and scalar root
+constants. The prototype ABI is experimental.
 
 ## Program loading
 
@@ -34,8 +34,7 @@ Overdeclared features must also pass these checks.
 
 `olIsValidBinary` uses the same package, reflection, and device checks, reporting
 false for invalid or unsupported input. A true result does not guarantee that
-subsequent native root-signature or pipeline creation will succeed, nor does it
-establish dispatch support.
+subsequent native root-signature or pipeline creation will succeed.
 
 After validation, loading serializes the canonical root layout using
 `D3D12SerializeRootSignature` from the already-loaded D3D12 runtime, then creates
@@ -51,8 +50,8 @@ surrounding package.
 The caller may release the input package after successful creation. Programs are
 independent even when created from identical packages.
 `olDestroyProgram` releases the image, its kernel/pipeline objects, and removes it
-from device shutdown cleanup. Device globals and execution remain explicitly
-unsupported. DXIL global constructors/destructors and `groupshared` storage are
+from device shutdown cleanup. Device globals remain explicitly unsupported.
+DXIL global constructors/destructors and `groupshared` storage are
 rejected during validation. Static shared-memory reflection is not implemented;
 rejecting such storage avoids reporting an incorrect zero shared-memory size.
 
@@ -70,18 +69,44 @@ through the same lookup path. Global lookup/enumeration remain `UNSUPPORTED`.
 Kernel names, kinds, and metadata queries are available. Maximum threads is the
 product of the compiled `numthreads` dimensions, not permission to reshape the
 fixed thread group; static shared memory is zero in the currently supported
-subset. Occupancy calculations, cooperative launch queries, argument binding,
-and dispatch remain `UNSUPPORTED`, including dispatch with an explicit queue.
+subset. Occupancy calculations and cooperative launch queries remain
+`UNSUPPORTED`.
 Kernel symbols are borrowed from their program and must not be used after its
 destruction.
+
+## Synchronous dispatch
+
+`olLaunchKernel` accepts null queues and explicit compute queues. Every launch
+blocks until its fence completes. A null queue uses the device-owned synchronous
+queue, but arguments are still resolved only in the program's originating
+context. Explicit queues must belong to that same context. Programs, queues, and
+allocations must be released before destroying their context.
+
+Launch dimensions must be 1 through 3; inactive dimensions are normalized to 1.
+The thread-group size must match the compiled `numthreads` in all three
+dimensions. Each dispatch group count must be at most 65535; zero counts are
+allowed and perform no work. Cooperative dispatch and nonzero dynamic shared
+memory are unsupported.
+
+Each launch prepares independent bindings and records the pipeline, root
+signature, arguments, and `Dispatch`. Each distinct buffer resource transitions
+from `COMMON` to `NON_PIXEL_SHADER_RESOURCE` for SRVs or `UNORDERED_ACCESS` for
+UAVs, then back to `COMMON`. Duplicate bindings of the same access kind share one
+transition. Simultaneous SRV and UAV bindings of the same physical resource are
+`UNSUPPORTED`, even for disjoint views.
+
+Submission records retain the pipeline, root signature, descriptor heap, bound
+resources, command allocator, and command list until fence completion. Submitted
+objects remain retained if signaling or waiting fails. Native failures are
+reported as backend errors. Events and asynchronous launches remain deferred.
 
 ## Argument binding preparation
 
 The internal `DirectXArgumentBindingsTy` helper prepares arguments from a
 validated manifest, creates a shader-visible descriptor heap, and records the
 canonical root bindings on an open compute command list. It does not submit
-commands, dispatch a shader, or perform resource transitions. This helper is not
-connected to `olLaunchKernel` yet; that API still returns `UNSUPPORTED`.
+commands, dispatch a shader, or perform resource transitions itself; the launch
+path handles those operations.
 
 Preparation requires one non-null host argument-value slot and exact size per
 manifest argument. Buffer slots contain a host pointer-sized encoded device
@@ -113,9 +138,7 @@ shader-visible CBV/SRV/UAV heap. Heap creation rejects resources from another
 device. Scalar-only and empty kernels allocate no descriptor heap. Recording
 uses table root 0 when buffers exist and constants root 1 (otherwise root 0).
 The root signature must match the manifest, and the binding set and root
-signature must remain alive and unchanged through eventual submission
-completion. Resource-state transitions, aliasing barriers, launch-context
-resolver wiring, and submission lifetime integration are deferred to dispatch.
+signature must remain alive and unchanged through submission completion.
 
 ## Shader validation
 
@@ -140,6 +163,11 @@ Scalar shaders currently require retained `STAT` reflection data and a named
 `cbuffer` declaration with a matching named struct annotation. Reflection-stripped
 scalar shaders, non-scalar constant fields, and other constant-buffer annotation
 forms are explicitly unsupported. Buffer-only shaders do not require `STAT`.
+The buffer-only test fixture is compiled with upstream Clang; the scalar
+reflection fixture currently uses DXC because upstream Clang does not emit the
+required `STAT`/`dx.typeAnnotations` reflection. This is a loader limitation, not
+an inability to compile scalar HLSL with Clang. Fixture-generation commands are
+documented in their HLSL source; no compiler or DXC library is needed at runtime.
 Legacy DXIL's data layout is overridden only for LLVM bitcode decoding; HLSL
 offsets come from reflection, not LLVM's replacement layout.
 
@@ -147,8 +175,8 @@ Embedded root signatures and additional entry/resource properties are
 conservatively rejected until their compatibility checks are implemented. The
 helper does not perform DXIL validator/signature verification, establish device
 support, or create native objects. Program loading separately checks device
-capabilities before publishing an image. Pipeline/root-signature and descriptor
-limits will be checked when those native objects are implemented.
+capabilities before publishing an image. Native root-signature, pipeline, and
+descriptor creation failures are surfaced separately.
 
 ## Version 1 schema
 
@@ -197,7 +225,7 @@ void main(uint3 ID : SV_DispatchThreadID) {
   every represented version. Actual image/device compatibility is checked on load.
 - `numthreads`: exactly three positive integers. X and Y are at most 1024, Z is
   at most 64, and their product is at most 1024. The launch group size must
-  eventually match these dimensions and the reflected shader dimensions exactly;
+  match these dimensions and the reflected shader dimensions exactly;
   dispatch group counts remain runtime values.
 - `features`: required shader features, using the non-reserved LLVM DXContainer
   `FeatureFlags` names, such as `Doubles`, `WaveOps`, `Int64Ops`, or
@@ -265,8 +293,8 @@ Version 1 retains the 252-byte limit even for scalar-only kernels. If both kinds
 of argument are absent, there are no root parameters.
 The loader creates this layout even for shaders without arguments. Native
 root-creation failures, including device-specific layout limits, are surfaced as
-backend errors. Internal helpers can create descriptor heaps/views and record
-argument bindings, but public launch remains unsupported.
+backend errors. Each launch creates its descriptor heap/views and records the
+canonical argument bindings.
 The validator conservatively rejects all embedded root signatures, including
 otherwise compatible layouts; compatibility checking is deferred.
 

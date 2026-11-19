@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DirectXArguments.h"
 #include "DirectXFeatures.h"
 #include "DirectXRootSignature.h"
 #include "GlobalHandler.h"
@@ -115,20 +116,23 @@ struct DirectXImageTy final : DeviceImageTy {
   DirectXManifestTy Manifest;
   ComPtr<ID3D12Device> NativeDevice;
   ComPtr<ID3D12RootSignature> RootSignature;
+  PluginContextTy *Context;
   SmallVector<DirectXKernelTy *> Kernels;
 
   DirectXImageTy(int32_t Id, GenericDeviceTy &Device, DirectXProgramDataTy Data,
                  ID3D12Device *NativeDevice,
-                 ComPtr<ID3D12RootSignature> RootSignature)
+                 ComPtr<ID3D12RootSignature> RootSignature,
+                 PluginContextTy *Context)
       : DeviceImageTy(Id, Device, std::move(Data.Shader)),
         Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice),
-        RootSignature(std::move(RootSignature)) {}
+        RootSignature(std::move(RootSignature)), Context(Context) {}
 
   ~DirectXImageTy() override;
 };
 
 struct DirectXKernelTy final : GenericKernelTy {
   ComPtr<ID3D12PipelineState> Pipeline;
+  DirectXImageTy *Program = nullptr;
   uint32_t NumThreads = 0;
 
   DirectXKernelTy(StringRef Name) : GenericKernelTy(Name) {}
@@ -151,15 +155,15 @@ struct DirectXKernelTy final : GenericKernelTy {
                            "DirectX device returned no compute pipeline");
     const auto &Threads = DXImage.Manifest.NumThreads;
     NumThreads = Threads[0] * Threads[1] * Threads[2];
+    Program = &DXImage;
     DXImage.Kernels.push_back(this);
     return Error::success();
   }
 
-  Error launchImpl(GenericDeviceTy &, uint32_t[3], uint32_t[3], uint32_t,
-                   KernelLaunchArgsTy &, AsyncInfoWrapperTy &,
-                   GenericProfilerTy *) const override {
-    return unsupported("kernel dispatch");
-  }
+  Error launchImpl(GenericDeviceTy &Device, uint32_t NumThreads[3],
+                   uint32_t NumBlocks[3], uint32_t DynBlockMemSize,
+                   KernelLaunchArgsTy &Args, AsyncInfoWrapperTy &AsyncInfo,
+                   GenericProfilerTy *) const override;
 
   Expected<uint64_t> maxGroupSize(GenericDeviceTy &, uint64_t) const override {
     return unsupported("occupancy calculations");
@@ -231,7 +235,6 @@ struct DirectXAdapterTy {
   LUID Luid;
 };
 
-// These internal launch defaults are unused while execution is unsupported.
 constexpr GV DirectXGridValues = {
     0, 1, D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION,
     1, 0, D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP,
@@ -254,12 +257,12 @@ struct DirectXDeviceTy final : GenericDeviceTy {
       auto *Queue = AsyncInfo.getQueueAs<DirectXQueueTy *>();
       if (Queue->Device.Get() != Device.Get())
         return Plugin::error(ErrorCode::INVALID_DEVICE,
-                             "DirectX copy queue belongs to another device");
+                             "DirectX queue belongs to another device");
       return Queue;
     }
     if (!AsyncInfo.isSynchronous())
       return Plugin::error(ErrorCode::INVALID_ARGUMENT,
-                           "DirectX copy has no native queue");
+                           "DirectX operation has no native queue");
     std::lock_guard<std::mutex> Lock(SynchronousQueueMutex);
     if (!SynchronousQueue) {
       auto Queue = std::make_unique<DirectXQueueTy>(Device.Get());
@@ -333,7 +336,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
                                                 SerializeRootSignature, Root))
       return std::move(Err);
     return new DirectXImageTy(Id, *this, std::move(*Data), Device.Get(),
-                              std::move(Root));
+                              std::move(Root), Context);
   }
   Error unloadBinaryImpl(DeviceImageTy *Image) override {
     delete static_cast<DirectXImageTy *>(Image);
@@ -607,6 +610,102 @@ struct DirectXPluginContextTy final : PluginContextTy {
     return directx::getBufferFromAddress(Resource->second, Address, Size);
   }
 };
+
+Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
+                                  uint32_t NumThreads[3], uint32_t NumBlocks[3],
+                                  uint32_t DynBlockMemSize,
+                                  KernelLaunchArgsTy &Args,
+                                  AsyncInfoWrapperTy &AsyncInfo,
+                                  GenericProfilerTy *) const {
+  if (&Device != &Program->getDevice())
+    return Plugin::error(ErrorCode::INVALID_DEVICE,
+                         "DirectX kernel belongs to another device");
+  if (Args.Flags.Cooperative)
+    return unsupported("cooperative kernel dispatch");
+  if (DynBlockMemSize)
+    return unsupported("dynamic shared memory");
+  for (unsigned I = 0; I < 3; ++I) {
+    if (NumThreads[I] != Program->Manifest.NumThreads[I])
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX group size must match compiled numthreads");
+    if (NumBlocks[I] > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX dispatch group count exceeds 65535");
+  }
+  if (Args.NumArgs != Program->Manifest.Arguments.size() ||
+      (Args.NumArgs && (!Args.Args || !Args.ArgSizes)))
+    return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                         "DirectX launch argument count or arrays mismatch");
+  auto &DXDevice = static_cast<DirectXDeviceTy &>(Device);
+  auto Queue = DXDevice.getQueue(AsyncInfo);
+  if (!Queue)
+    return Queue.takeError();
+  if ((*Queue)->Context && (*Queue)->Context != Program->Context)
+    return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                         "DirectX queue and program contexts differ");
+  auto &Context = *static_cast<DirectXPluginContextTy *>(Program->Context);
+  auto Bindings = std::make_shared<directx::DirectXArgumentBindingsTy>();
+  if (auto Err = Bindings->prepare(
+          Program->Manifest, ArrayRef(Args.Args, Args.NumArgs),
+          ArrayRef(Args.ArgSizes, Args.NumArgs),
+          [&](const void *Pointer)
+              -> Expected<directx::DirectXResolvedBufferTy> {
+            auto Allocation = Context.getAllocInfo(Pointer);
+            if (!Allocation)
+              return Allocation.takeError();
+            size_t Remaining = Allocation->Size -
+                               (reinterpret_cast<uintptr_t>(Pointer) -
+                                reinterpret_cast<uintptr_t>(Allocation->Base));
+            auto Buffer = Context.getBuffer(Pointer, Remaining);
+            if (!Buffer)
+              return Buffer.takeError();
+            return directx::DirectXResolvedBufferTy{std::move(*Buffer),
+                                                    Remaining};
+          }))
+    return Err;
+
+  std::map<ID3D12Resource *, D3D12_RESOURCE_STATES> States;
+  for (const auto &Buffer : Bindings->Buffers) {
+    auto State =
+        std::holds_alternative<D3D12_SHADER_RESOURCE_VIEW_DESC>(Buffer.View)
+            ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+            : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    auto [It, Inserted] = States.emplace(Buffer.Resource.Get(), State);
+    if (!Inserted && It->second != State)
+      return unsupported("simultaneous SRV/UAV views of one buffer resource");
+  }
+  if (auto Err = Bindings->createDescriptorHeap(*Program->NativeDevice.Get()))
+    return Err;
+  DirectXQueueTy::SubmissionTy Submission{};
+  Submission.Pipeline = Pipeline;
+  Submission.RootSignature = Program->RootSignature;
+  Submission.Arguments = std::move(Bindings);
+  if (auto Err = (*Queue)->createCommandList(Submission))
+    return Err;
+  SmallVector<D3D12_RESOURCE_BARRIER> Barriers;
+  for (auto [Resource, State] : States) {
+    D3D12_RESOURCE_BARRIER Barrier{};
+    Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    Barrier.Transition.pResource = Resource;
+    Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+    Barrier.Transition.StateAfter = State;
+    Barriers.push_back(Barrier);
+  }
+  if (!Barriers.empty())
+    Submission.List->ResourceBarrier(static_cast<UINT>(Barriers.size()),
+                                     Barriers.data());
+  if (auto Err = Submission.Arguments->record(*Submission.List.Get(),
+                                              *Submission.RootSignature.Get()))
+    return Err;
+  Submission.List->Dispatch(NumBlocks[0], NumBlocks[1], NumBlocks[2]);
+  for (auto &Barrier : Barriers)
+    std::swap(Barrier.Transition.StateBefore, Barrier.Transition.StateAfter);
+  if (!Barriers.empty())
+    Submission.List->ResourceBarrier(static_cast<UINT>(Barriers.size()),
+                                     Barriers.data());
+  return (*Queue)->submit(std::move(Submission));
+}
 
 Expected<DirectXBufferTy> DirectXDeviceTy::getBuffer(const void *Ptr,
                                                      size_t Size,

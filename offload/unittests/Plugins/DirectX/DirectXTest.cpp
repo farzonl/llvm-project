@@ -15,6 +15,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -902,6 +903,19 @@ protected:
                                                {"min_size", 4}}}}};
   }
 
+  static llvm::json::Object scalarManifest() {
+    auto Object = manifest();
+    Object["features"] = llvm::json::Array{"Int64Ops"};
+    Object["constants"] =
+        llvm::json::Object{{"register", 4}, {"space", 2}, {"size", 16}};
+    auto *Arguments = Object.getArray("arguments");
+    Arguments->push_back(llvm::json::Object{
+        {"index", 2}, {"kind", "scalar"}, {"size", 4}, {"offset", 0}});
+    Arguments->push_back(llvm::json::Object{
+        {"index", 3}, {"kind", "scalar"}, {"size", 8}, {"offset", 8}});
+    return Object;
+  }
+
   std::string package(llvm::json::Object Manifest = manifest(),
                       unsigned Count = 1) {
     using namespace llvm;
@@ -1046,7 +1060,8 @@ TEST_F(DirectXProgramTest, LooksUpAndEnumeratesOnlyTheManifestEntry) {
   ASSERT_TRUE(succeeded(olDestroyProgram(Programs[1])));
 }
 
-TEST_F(DirectXProgramTest, EnumeratesBeforeLookupAndStillRejectsDispatch) {
+TEST_F(DirectXProgramTest,
+       EnumeratesBeforeLookupAndRejectsNullBufferArguments) {
   auto Bytes = package();
   ol_program_handle_t Program = nullptr;
   ASSERT_TRUE(succeeded(
@@ -1083,10 +1098,287 @@ TEST_F(DirectXProgramTest, EnumeratesBeforeLookupAndStillRejectsDispatch) {
   for (auto Q : {static_cast<ol_queue_handle_t>(nullptr), Queue})
     EXPECT_TRUE(failedWith(olLaunchKernel(Q, Device, Kernel, &Launch, nullptr,
                                           std::size(Args), Args, Sizes),
-                           OL_ERRC_UNSUPPORTED));
+                           OL_ERRC_INVALID_ARGUMENT));
   ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
   ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
   ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+}
+
+class DirectXDispatchTest : public DirectXProgramTest {
+protected:
+  ol_program_handle_t Program = nullptr;
+  ol_symbol_handle_t Kernel = nullptr;
+  ol_queue_handle_t Queue = nullptr;
+  void *Input = nullptr, *Output = nullptr;
+  ol_kernel_launch_size_args_t Launch{};
+
+  void loadProgram(llvm::json::Object Object = manifest()) {
+    if (Program) {
+      ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+      Program = nullptr;
+    }
+    auto Bytes = package(std::move(Object));
+    ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
+                                          Bytes.size(), &Program)));
+    ASSERT_TRUE(succeeded(
+        olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel)));
+  }
+
+  void SetUp() override {
+    DirectXProgramTest::SetUp();
+    if (HasFatalFailure() || IsSkipped())
+      return;
+    loadProgram();
+    if (HasFatalFailure())
+      return;
+    ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Queue)));
+    ASSERT_TRUE(succeeded(olMemAllocAligned(
+        Context, Device, OL_ALLOC_TYPE_DEVICE, 83, 131072, &Input)));
+    ASSERT_TRUE(succeeded(olMemAllocAligned(
+        Context, Device, OL_ALLOC_TYPE_DEVICE, 83, 131072, &Output)));
+    Launch.Dimensions = 3;
+    Launch.NumGroups = {2, 1, 1};
+    Launch.GroupSize = {8, 2, 1};
+  }
+
+  void TearDown() override {
+    if (Queue)
+      EXPECT_TRUE(succeeded(olDestroyQueue(Queue)));
+    if (Program)
+      EXPECT_TRUE(succeeded(olDestroyProgram(Program)));
+    if (Input)
+      EXPECT_TRUE(succeeded(olMemFree(Context, Input)));
+    if (Output)
+      EXPECT_TRUE(succeeded(olMemFree(Context, Output)));
+    DirectXProgramTest::TearDown();
+  }
+
+  static void *offset(void *Pointer, size_t Bytes) {
+    return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(Pointer) +
+                                    Bytes);
+  }
+
+  ol_result_t launch(ol_queue_handle_t Q, void *Source, void *Destination) {
+    void *Args[] = {&Source, &Destination};
+    size_t Sizes[] = {sizeof(Source), sizeof(Destination)};
+    return olLaunchKernel(Q, Device, Kernel, &Launch, nullptr, std::size(Args),
+                          Args, Sizes);
+  }
+};
+
+TEST_F(DirectXDispatchTest, ExecutesCompiledGroupsAndPreservesGuards) {
+  std::vector<uint8_t> Source(83, 0xa7), Expected(83, 0x55), Actual(83);
+  for (unsigned I = 0; I < 16; ++I)
+    llvm::support::endian::write32le(Source.data() + 16 + I * 4, I * 37 + 11);
+  std::copy_n(Source.begin() + 16, 64, Expected.begin() + 16);
+  for (auto Q : {static_cast<ol_queue_handle_t>(nullptr), Queue}) {
+    SCOPED_TRACE(Q != nullptr);
+    std::vector<uint8_t> Initial(83, 0x55);
+    ASSERT_TRUE(succeeded(
+        olMemcpy(Q, Input, Device, Source.data(), nullptr, Source.size())));
+    ASSERT_TRUE(succeeded(
+        olMemcpy(Q, Output, Device, Initial.data(), nullptr, Initial.size())));
+    ASSERT_TRUE(succeeded(launch(Q, offset(Input, 16), offset(Output, 16))));
+    bool Completed = false;
+    ASSERT_TRUE(succeeded(olQueryQueue(Queue, &Completed)));
+    EXPECT_TRUE(Completed);
+    ASSERT_TRUE(succeeded(olMemcpy(nullptr, Actual.data(), nullptr, Output,
+                                   Device, Actual.size())));
+    EXPECT_EQ(Actual, Expected);
+  }
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+  Program = nullptr;
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Actual.data(), nullptr, Output, Device, Actual.size())));
+  EXPECT_EQ(Actual, Expected);
+}
+
+TEST_F(DirectXDispatchTest, ClipsRawViewsToLogicalAllocationAndWholeDwords) {
+  ASSERT_TRUE(succeeded(olMemFree(Context, Input)));
+  Input = nullptr;
+  ASSERT_TRUE(succeeded(olMemFree(Context, Output)));
+  Output = nullptr;
+  ASSERT_TRUE(succeeded(
+      olMemAllocAligned(Context, Device, OL_ALLOC_TYPE_DEVICE, 32, 4, &Input)));
+  std::vector<uint8_t> Prefill(32, 0x7b);
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Input, Device, Prefill.data(), nullptr, Prefill.size())));
+  void *Previous = Input;
+  ASSERT_TRUE(succeeded(olMemFree(Context, Input)));
+  Input = nullptr;
+  // Equal padded pool sizes reuse known nonzero bytes beyond the new request.
+  ASSERT_TRUE(succeeded(olMemAllocAligned(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                          20, 16, &Input)));
+  if (Input != Previous)
+    GTEST_SKIP() << "logical-capacity test requires memory-pool reuse";
+  ASSERT_TRUE(succeeded(olMemAllocAligned(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                          35, 16, &Output)));
+  std::vector<uint8_t> Expected(35, 0x55), Actual(35);
+  ASSERT_TRUE(succeeded(olMemcpy(Queue, Output, Device, Expected.data(),
+                                 nullptr, Expected.size())));
+  Launch.NumGroups = {1, 1, 1};
+  ASSERT_TRUE(succeeded(launch(Queue, offset(Input, 16), offset(Output, 16))));
+  llvm::support::endian::write32le(Expected.data() + 16, 0x7b7b7b7b);
+  std::fill(Expected.begin() + 20, Expected.begin() + 32, 0);
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Actual.data(), nullptr, Output, Device, Actual.size())));
+  EXPECT_EQ(Actual, Expected);
+}
+
+TEST_F(DirectXDispatchTest, ExecutesScalarConstantsAndUpdatesEachLaunch) {
+  void *Native = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Native), &Native)));
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
+  HRESULT Status = static_cast<ID3D12Device *>(Native)->CheckFeatureSupport(
+      D3D12_FEATURE_D3D12_OPTIONS1, &Options, sizeof(Options));
+  if (Status == E_INVALIDARG || (SUCCEEDED(Status) && !Options.Int64ShaderOps))
+    GTEST_SKIP() << "scalar fixture requires Int64Ops";
+  ASSERT_TRUE(SUCCEEDED(Status));
+  auto Buffer = llvm::MemoryBuffer::getFile(
+      DIRECTX_TEST_INPUTS_DIR "/manifest.dxil", false);
+  ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+  Shader = (*Buffer)->getBuffer().str();
+  loadProgram(scalarManifest());
+  if (HasFatalFailure())
+    return;
+  std::array<uint32_t, 16> Source{}, Expected{}, Actual{};
+  for (unsigned I = 0; I < Source.size(); ++I)
+    Source[I] = I * 13 + 19;
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Input, Device, Source.data(), nullptr, sizeof(Source))));
+  uint32_t Count = 13;
+  uint64_t Bias = 0x100000025;
+  void *Args[] = {&Input, &Output, &Count, &Bias};
+  size_t Sizes[] = {sizeof(Input), sizeof(Output), sizeof(Count), sizeof(Bias)};
+  for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)}) {
+    Expected.fill(0x55555555);
+    ASSERT_TRUE(succeeded(olMemcpy(Q, Output, Device, Expected.data(), nullptr,
+                                   sizeof(Expected))));
+    ASSERT_TRUE(succeeded(olLaunchKernel(Q, Device, Kernel, &Launch, nullptr,
+                                         std::size(Args), Args, Sizes)));
+    for (unsigned I = 0; I < Count; ++I)
+      Expected[I] = Source[I] + static_cast<uint32_t>(Bias + I);
+    ASSERT_TRUE(succeeded(olMemcpy(nullptr, Actual.data(), nullptr, Output,
+                                   Device, sizeof(Actual))));
+    EXPECT_EQ(Actual, Expected);
+    Count = 5;
+    Bias += 91;
+  }
+}
+
+TEST_F(DirectXDispatchTest, RejectsInvalidGeometryArgumentsAndAliasing) {
+  void *Args[] = {&Input, &Output};
+  size_t Sizes[] = {sizeof(Input), sizeof(Output)};
+  auto Call = [&](size_t Count = 2) {
+    return olLaunchKernel(Queue, Device, Kernel, &Launch, nullptr, Count, Args,
+                          Sizes);
+  };
+  EXPECT_TRUE(failedWith(Call(1), OL_ERRC_INVALID_ARGUMENT));
+  Sizes[0] = sizeof(Input) - 1;
+  EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_SIZE));
+  Sizes[0] = sizeof(Input);
+  Launch.GroupSize = {16, 1, 1};
+  EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
+  Launch.GroupSize = {8, 2, 1};
+  for (size_t Dimension : {0, 4}) {
+    Launch.Dimensions = Dimension;
+    EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
+  }
+  Launch.Dimensions = 3;
+  Launch.NumGroups.x = 65536;
+  EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
+  Launch.NumGroups.x = 1;
+  Launch.DynSharedMemory = 4;
+  EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
+  Launch.DynSharedMemory = 0;
+  if (sizeof(size_t) > sizeof(uint32_t)) {
+    Launch.DynSharedMemory = uint64_t{1} << 32;
+    EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_SIZE));
+    Launch.DynSharedMemory = 0;
+    EXPECT_TRUE(
+        failedWith(Call((uint64_t{1} << 32) + 2), OL_ERRC_INVALID_SIZE));
+  }
+  bool Cooperative = true;
+  ol_kernel_launch_prop_t Props[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE, &Cooperative},
+      OL_KERNEL_LAUNCH_PROP_END};
+  EXPECT_TRUE(failedWith(olLaunchKernel(Queue, Device, Kernel, &Launch, Props,
+                                        std::size(Args), Args, Sizes),
+                         OL_ERRC_UNSUPPORTED));
+  EXPECT_TRUE(failedWith(launch(Queue, Input, Input), OL_ERRC_UNSUPPORTED));
+  EXPECT_TRUE(failedWith(launch(Queue, offset(Input, 4), Output),
+                         OL_ERRC_INVALID_ARGUMENT));
+  EXPECT_TRUE(failedWith(launch(Queue, offset(Input, 80), Output),
+                         OL_ERRC_INVALID_SIZE));
+  void *Host = Args;
+  EXPECT_TRUE(failedWith(launch(nullptr, Host, Output), OL_ERRC_NOT_FOUND));
+  void *Freed = Input;
+  ASSERT_TRUE(succeeded(olMemFree(Context, Input)));
+  Input = nullptr;
+  EXPECT_TRUE(failedWith(launch(Queue, Freed, Output), OL_ERRC_NOT_FOUND));
+}
+
+TEST_F(DirectXDispatchTest, EnforcesProgramAndAllocationContextIsolation) {
+  ol_context_handle_t OtherContext = nullptr;
+  ol_queue_handle_t OtherQueue = nullptr;
+  void *Foreign = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &OtherContext)));
+  ASSERT_TRUE(succeeded(olCreateQueue(OtherContext, Device, &OtherQueue)));
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(OtherContext, Device, OL_ALLOC_TYPE_DEVICE, 83, &Foreign)));
+  EXPECT_TRUE(
+      failedWith(launch(OtherQueue, Input, Output), OL_ERRC_INVALID_ARGUMENT));
+  for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)})
+    EXPECT_TRUE(failedWith(launch(Q, Foreign, Output), OL_ERRC_NOT_FOUND));
+  ASSERT_TRUE(succeeded(olMemFree(OtherContext, Foreign)));
+  ASSERT_TRUE(succeeded(olDestroyQueue(OtherQueue)));
+  ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
+}
+
+TEST_F(DirectXDispatchTest, ZeroGroupsDoNoWorkAndInactiveDimensionsAreOne) {
+  std::vector<uint8_t> Initial(83, 0x55), Actual(83);
+  ASSERT_TRUE(succeeded(olMemcpy(Queue, Output, Device, Initial.data(), nullptr,
+                                 Initial.size())));
+  Launch.NumGroups = {0, 65535, 65535};
+  ASSERT_TRUE(succeeded(launch(Queue, Input, Output)));
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Actual.data(), nullptr, Output, Device, Actual.size())));
+  EXPECT_EQ(Actual, Initial);
+  Launch.Dimensions = 2;
+  Launch.GroupSize.z = 0;
+  Launch.NumGroups = {0, 1, 0};
+  ASSERT_TRUE(succeeded(launch(nullptr, Input, Output)));
+  ASSERT_TRUE(succeeded(olMemcpy(nullptr, Actual.data(), nullptr, Output,
+                                 Device, Actual.size())));
+  EXPECT_EQ(Actual, Initial);
+}
+
+TEST_F(DirectXDispatchTest, ConcurrentLaunchesRetainIndependentBindings) {
+  for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)}) {
+    std::vector<std::future<void>> Tasks;
+    for (unsigned I = 0; I < 4; ++I)
+      Tasks.push_back(std::async(std::launch::async, [&, I, Q] {
+        void *Source = nullptr, *Destination = nullptr;
+        std::array<uint32_t, 16> Expected{}, Actual{};
+        for (unsigned J = 0; J < Expected.size(); ++J)
+          Expected[J] = I * 107 + J * 29 + 31;
+        ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                         sizeof(Expected), &Source)));
+        ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                         sizeof(Actual), &Destination)));
+        ASSERT_TRUE(succeeded(olMemcpy(Q, Source, Device, Expected.data(),
+                                       nullptr, sizeof(Expected))));
+        ASSERT_TRUE(succeeded(launch(Q, Source, Destination)));
+        ASSERT_TRUE(succeeded(olMemcpy(nullptr, Actual.data(), nullptr,
+                                       Destination, Device, sizeof(Actual))));
+        EXPECT_EQ(Actual, Expected);
+        ASSERT_TRUE(succeeded(olMemFree(Context, Destination)));
+        ASSERT_TRUE(succeeded(olMemFree(Context, Source)));
+      }));
+    for (auto &Task : Tasks)
+      Task.get();
+  }
 }
 
 TEST_F(DirectXProgramTest, RejectsUnpackagedAndMismatchedImages) {
@@ -1116,16 +1408,7 @@ TEST_F(DirectXProgramTest, LoadsScalarShaderAccordingToNativeFeatureSupport) {
       DIRECTX_TEST_INPUTS_DIR "/manifest.dxil", false);
   ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
   Shader = (*Buffer)->getBuffer().str();
-  auto Object = manifest();
-  Object["features"] = llvm::json::Array{"Int64Ops"};
-  Object["constants"] =
-      llvm::json::Object{{"register", 4}, {"space", 2}, {"size", 16}};
-  auto *Arguments = Object.getArray("arguments");
-  Arguments->push_back(llvm::json::Object{
-      {"index", 2}, {"kind", "scalar"}, {"size", 4}, {"offset", 0}});
-  Arguments->push_back(llvm::json::Object{
-      {"index", 3}, {"kind", "scalar"}, {"size", 8}, {"offset", 8}});
-  auto Bytes = package(std::move(Object));
+  auto Bytes = package(scalarManifest());
   void *Handle = nullptr;
   ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
                                         sizeof(Handle), &Handle)));

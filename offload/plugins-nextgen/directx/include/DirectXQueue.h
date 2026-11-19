@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -39,6 +40,8 @@ struct PluginContextTy;
 }
 
 namespace llvm::omp::target::plugin::directx {
+
+struct DirectXArgumentBindingsTy;
 
 inline Error check(HRESULT Result, const char *Operation) {
   if (SUCCEEDED(Result))
@@ -74,6 +77,9 @@ struct DirectXQueueTy {
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> List;
     Microsoft::WRL::ComPtr<ID3D12Resource> Source;
     Microsoft::WRL::ComPtr<ID3D12Resource> Destination;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> Pipeline;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
+    std::shared_ptr<DirectXArgumentBindingsTy> Arguments;
   };
 
   Microsoft::WRL::ComPtr<ID3D12Device> Device;
@@ -170,21 +176,49 @@ struct DirectXQueueTy {
     return Error::success();
   }
 
-  Error copy(const DirectXBufferTy &Dst, const DirectXBufferTy &Src,
-             uint64_t Size) {
-    SubmissionTy Submission{};
-    Submission.Source = Src.Resource;
-    Submission.Destination = Dst.Resource;
+  Error createCommandList(SubmissionTy &Submission) {
     if (auto Err = check(
             Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                            IID_PPV_ARGS(&Submission.Allocator)),
             "ID3D12Device::CreateCommandAllocator"))
       return Err;
+    if (auto Err = check(
+            Device->CreateCommandList(
+                0, D3D12_COMMAND_LIST_TYPE_COMPUTE, Submission.Allocator.Get(),
+                Submission.Pipeline.Get(), IID_PPV_ARGS(&Submission.List)),
+            "ID3D12Device::CreateCommandList"))
+      return Err;
+    return Error::success();
+  }
+
+  Error submit(SubmissionTy Submission) {
     if (auto Err =
-            check(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                            Submission.Allocator.Get(), nullptr,
-                                            IID_PPV_ARGS(&Submission.List)),
-                  "ID3D12Device::CreateCommandList"))
+            check(Submission.List->Close(), "ID3D12GraphicsCommandList::Close"))
+      return Err;
+    uint64_t Value;
+    {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      auto Next = nextValue();
+      if (!Next)
+        return Next.takeError();
+      Value = *Next;
+      Submission.Value = Value;
+      ID3D12CommandList *Lists[] = {Submission.List.Get()};
+      // Retain every GPU dependency even if signaling or waiting fails.
+      Submissions.push_back(std::move(Submission));
+      Queue->ExecuteCommandLists(1, Lists);
+      if (auto Err = signalImpl(Value))
+        return Err;
+    }
+    return wait(Value);
+  }
+
+  Error copy(const DirectXBufferTy &Dst, const DirectXBufferTy &Src,
+             uint64_t Size) {
+    SubmissionTy Submission{};
+    Submission.Source = Src.Resource;
+    Submission.Destination = Dst.Resource;
+    if (auto Err = createCommandList(Submission))
       return Err;
 
     D3D12_RESOURCE_BARRIER Barriers[2]{};
@@ -211,26 +245,7 @@ struct DirectXQueueTy {
                 Barriers[I].Transition.StateAfter);
     if (Count)
       Submission.List->ResourceBarrier(Count, Barriers);
-    if (auto Err =
-            check(Submission.List->Close(), "ID3D12GraphicsCommandList::Close"))
-      return Err;
-
-    uint64_t Value;
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      auto Next = nextValue();
-      if (!Next)
-        return Next.takeError();
-      Value = *Next;
-      Submission.Value = Value;
-      ID3D12CommandList *Lists[] = {Submission.List.Get()};
-      // Retain every GPU dependency even if signaling or waiting fails.
-      Submissions.push_back(std::move(Submission));
-      Queue->ExecuteCommandLists(1, Lists);
-      if (auto Err = signalImpl(Value))
-        return Err;
-    }
-    return wait(Value);
+    return submit(std::move(Submission));
   }
 
   Error synchronize() {

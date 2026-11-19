@@ -256,7 +256,8 @@ struct ol_context_impl_t {
   ///
   /// Queues may be added to the outstanding queue list by olDestroyQueue if
   /// they are destroyed but not completed.
-  __tgt_async_info *getOutstandingQueue(ol_device_handle_t Device) {
+  llvm::Expected<__tgt_async_info *>
+  getOutstandingQueue(ol_device_handle_t Device) {
     std::lock_guard<std::mutex> Lock(OutstandingQueuesMutex);
     auto It = OutstandingQueues.find(Device);
     if (It == OutstandingQueues.end() || It->second.empty())
@@ -266,7 +267,10 @@ struct ol_context_impl_t {
     // As queues are pulled and popped from this list, longer running queues
     // naturally bubble to the start of the array. Hence looping backwards.
     for (auto Q = Bucket.rbegin(); Q != Bucket.rend(); Q++) {
-      if (!Device->Device->hasPendingWork(*Q)) {
+      auto Pending = Device->Device->hasPendingWork(*Q);
+      if (!Pending)
+        return Pending.takeError();
+      if (!*Pending) {
         auto OutstandingQueue = *Q;
         *Q = Bucket.back();
         Bucket.pop_back();
@@ -976,16 +980,19 @@ Error olCreateQueue_impl(ol_context_handle_t Context, ol_device_handle_t Device,
       std::make_unique<ol_queue_impl_t>(nullptr, Context, Device);
 
   auto OutstandingQueue = Context->getOutstandingQueue(Device);
-  if (OutstandingQueue) {
+  if (!OutstandingQueue)
+    return OutstandingQueue.takeError();
+  if (*OutstandingQueue) {
     // The queue is empty, but we still need to sync it to release any temporary
     // memory allocations or do other cleanup.
     if (auto Err =
-            Device->Device->synchronize(OutstandingQueue, /*Release=*/false)) {
+            Device->Device->synchronize(*OutstandingQueue, /*Release=*/false)) {
+      Context->addOutstandingQueue(Device, *OutstandingQueue);
       // This only fails after a fatal device error on the destroyed queue.
       return createOffloadError(ErrorCode::UNKNOWN, std::move(Err),
                                 "failed to reuse a destroyed queue");
     }
-    CreatedQueue->AsyncInfo = OutstandingQueue;
+    CreatedQueue->AsyncInfo = *OutstandingQueue;
   } else if (auto Err = Context->PluginCtx->initAsyncInfo(
                  *Device->Device, &(CreatedQueue->AsyncInfo))) {
     return Err;
@@ -1373,6 +1380,13 @@ Error olLaunchKernel_impl(ol_queue_handle_t Queue, ol_device_handle_t Device,
                           const ol_kernel_launch_prop_t *Properties,
                           size_t NumArgs, void **ArgPtrs,
                           const size_t *ArgSizes) {
+  if (NumArgs > std::numeric_limits<uint32_t>::max() ||
+      LaunchSizeArgs->DynSharedMemory > std::numeric_limits<uint32_t>::max())
+    return createOffloadError(ErrorCode::INVALID_SIZE,
+                              "kernel launch arguments exceed backend limits");
+  if (LaunchSizeArgs->Dimensions < 1 || LaunchSizeArgs->Dimensions > 3)
+    return createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                              "kernel launch dimensions must be 1, 2, or 3");
   auto *DeviceImpl = Device->Device;
   if (Queue && Device != Queue->Device) {
     return createOffloadError(
@@ -1391,11 +1405,15 @@ Error olLaunchKernel_impl(ol_queue_handle_t Queue, ol_device_handle_t Device,
   LaunchArgs.ArgSizes =
       reinterpret_cast<int64_t *>(const_cast<size_t *>(ArgSizes));
   LaunchArgs.UserNumBlocks[0] = LaunchSizeArgs->NumGroups.x;
-  LaunchArgs.UserNumBlocks[1] = LaunchSizeArgs->NumGroups.y;
-  LaunchArgs.UserNumBlocks[2] = LaunchSizeArgs->NumGroups.z;
+  LaunchArgs.UserNumBlocks[1] =
+      LaunchSizeArgs->Dimensions >= 2 ? LaunchSizeArgs->NumGroups.y : 1;
+  LaunchArgs.UserNumBlocks[2] =
+      LaunchSizeArgs->Dimensions == 3 ? LaunchSizeArgs->NumGroups.z : 1;
   LaunchArgs.UserThreadLimit[0] = LaunchSizeArgs->GroupSize.x;
-  LaunchArgs.UserThreadLimit[1] = LaunchSizeArgs->GroupSize.y;
-  LaunchArgs.UserThreadLimit[2] = LaunchSizeArgs->GroupSize.z;
+  LaunchArgs.UserThreadLimit[1] =
+      LaunchSizeArgs->Dimensions >= 2 ? LaunchSizeArgs->GroupSize.y : 1;
+  LaunchArgs.UserThreadLimit[2] =
+      LaunchSizeArgs->Dimensions == 3 ? LaunchSizeArgs->GroupSize.z : 1;
   LaunchArgs.DynCGroupMem = LaunchSizeArgs->DynSharedMemory;
 
   while (Properties && Properties->type != OL_KERNEL_LAUNCH_PROP_TYPE_NONE) {

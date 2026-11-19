@@ -18,11 +18,12 @@ directx-manifest
 The opt-in `directx` plugin supports liboffload device discovery and single-device
 context creation, queries, and destruction, explicit device-buffer allocation,
 allocation queries and freeing, compute queues with fence-based synchronization,
-explicit buffer copies, and validated single-entry DXIL program loading/unloading.
+explicit buffer copies, validated single-entry DXIL program loading/unloading,
+and synchronous compute dispatch.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
 and native `ID3D12Device` handles are available. Compute-only adapters, events,
-host callbacks, host/managed allocations, and shader
+host callbacks, host/managed allocations, and asynchronous shader
 execution are not supported yet.
 This is not an OpenMP target.
 
@@ -40,9 +41,12 @@ storage are currently rejected rather than reporting incorrect kernel metadata.
 Internal helpers prepare bounded raw-buffer descriptors, pack scalar constants,
 and record canonical root bindings, retaining the native resources and a
 shader-visible descriptor heap. They enforce 16-byte raw-view alignment and
-exclude allocation padding and pool capacity. Launch-context integration,
-resource transitions, and submission remain deferred; public dispatch is still
-unsupported.
+exclude allocation padding and pool capacity. Launches resolve pointers only in
+the program's context, require exact compiled thread-group dimensions, transition
+resources to their SRV/UAV states and back to `COMMON`, and retain all native
+objects through fence completion. Both null and explicit queues block. Mixed
+SRV/UAV views of one resource, cooperative dispatch, and dynamic shared memory
+remain unsupported.
 Programs currently require exactly one entry in an uncompressed, version-3
 OffloadBinary package; raw DXIL/bitcode and multi-entry packages are not accepted.
 

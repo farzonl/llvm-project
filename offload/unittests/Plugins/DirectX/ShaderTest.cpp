@@ -19,6 +19,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Object/DXContainer.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -140,7 +141,11 @@ TEST_F(DirectXShaderTest, BufferOnlyShaderDoesNotRequireReflection) {
       MemoryBuffer::getFile(DIRECTX_TEST_INPUTS_DIR "/buffers.dxil", false);
   ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
   Bytes = (*Buffer)->getBuffer().str();
-  Bytes.replace(part("STAT"), 4, "PRIV");
+  auto Container =
+      object::DXContainer::create(MemoryBufferRef(Bytes, "buffer"));
+  ASSERT_TRUE(static_cast<bool>(Container)) << toString(Container.takeError());
+  for (const auto &Part : *Container)
+    EXPECT_NE(Part.Part.getName(), "STAT");
   Manifest.Constants.reset();
   Manifest.Arguments.resize(2);
   Manifest.Features = 0;
