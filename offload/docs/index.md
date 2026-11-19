@@ -189,8 +189,11 @@ unavailable index fails instead of falling back to another device.
 The suite covers guarded buffer and scalar dispatches, explicit and null queues,
 copy ranges and GPU virtual-address offsets, logical descriptor bounds, context
 isolation, concurrent copies and launches, and repeated initialization/shutdown.
-Zero-group launches still validate arguments and synchronize preceding queue
-work, but do not issue a native empty `Dispatch`.
+Explicit-queue copies and dispatches are asynchronous; synchronize the queue or
+an event before reading host results or reusing allocations. Null-queue operations
+remain blocking and do not implicitly synchronize other queues.
+Zero-group launches still validate arguments, but do not issue a native empty
+`Dispatch` or wait for explicit-queue work.
 Native validation is necessary: Nacelle's resource barriers are currently no-ops
 and its execution is synchronous, so Linux success alone cannot establish
 Windows resource-state or submission-lifetime correctness.

@@ -10,7 +10,7 @@ are zero. The DXIL payload must be nonempty.
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
 loading with device-capability checks, canonical native root-signature creation,
 and kernel objects with compute pipelines are implemented. `olLaunchKernel`
-supports synchronous compute execution with bounded raw buffers and scalar root
+supports compute execution with bounded raw buffers and scalar root
 constants. The prototype ABI is experimental.
 
 ## Program loading
@@ -74,19 +74,37 @@ subset. Occupancy calculations and cooperative launch queries remain
 Kernel symbols are borrowed from their program and must not be used after its
 destruction.
 
-## Synchronous dispatch
+## Dispatch and copy completion
 
-`olLaunchKernel` accepts null queues and explicit compute queues. Every launch
-blocks until its fence completes. A null queue uses the device-owned synchronous
-queue, but arguments are still resolved only in the program's originating
+`olLaunchKernel` accepts null queues and explicit compute queues. Explicit-queue
+launches and buffer copies enqueue work without waiting for GPU completion.
+Null-queue operations block until their work and host readbacks complete.
+A null queue uses the device-owned synchronous queue, but arguments are still
+resolved only in the program's originating
 context. Explicit queues must belong to that same context. Programs, queues, and
 allocations must be released before destroying their context.
+
+Synchronize an explicit queue or a recorded event before observing readback
+memory or freeing/reusing its allocations. A null-queue operation does not
+implicitly wait for other queues. Use events to order access across queues;
+unsynchronized access to the same resource from multiple queues is not supported.
+Program handles may be destroyed after submission: submitted work owns its native
+pipeline, root signature, descriptors, and bound resources independently.
+Launch argument values are copied during submission; host copy destinations must
+remain valid until completion.
+
+Uploads snapshot pageable host memory into owned staging buffers. Preparing an
+upload may block for earlier readbacks or event waits on that queue so the
+snapshot observes their host writes. Queued host-to-host copies also drain the
+queue before copying; general host callbacks remain unsupported.
 
 Launch dimensions must be 1 through 3; inactive dimensions are normalized to 1.
 The thread-group size must match the compiled `numthreads` in all three
 dimensions. Each dispatch group count must be at most 65535; zero counts are
 allowed and perform no work. Cooperative dispatch and nonzero dynamic shared
 memory are unsupported.
+Zero-group launches still validate arguments. They preserve blocking null-queue
+semantics, but do not wait for explicit-queue work or record an empty dispatch.
 
 Each launch prepares independent bindings and records the pipeline, root
 signature, arguments, and `Dispatch`. Each distinct buffer resource transitions
@@ -98,7 +116,7 @@ transition. Simultaneous SRV and UAV bindings of the same physical resource are
 Submission records retain the pipeline, root signature, descriptor heap, bound
 resources, command allocator, and command list until fence completion. Submitted
 objects remain retained if signaling or waiting fails. Native failures are
-reported as backend errors. Asynchronous launches remain deferred.
+reported as backend errors.
 
 Each queue has a retirement worker and separate execution and completion fences.
 The completion timeline advances only after execution and any host readback

@@ -725,7 +725,8 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
       return unsupported("simultaneous SRV/UAV views of one buffer resource");
   }
   if (!NumBlocks[0] || !NumBlocks[1] || !NumBlocks[2])
-    return (*Queue)->synchronize();
+    return AsyncInfo.isSynchronous() ? (*Queue)->synchronize()
+                                     : Error::success();
   if (auto Err = Bindings->createDescriptorHeap(*Program->NativeDevice.Get()))
     return Err;
   DirectXQueueTy::SubmissionTy Submission{};
@@ -756,7 +757,7 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   if (!Barriers.empty())
     Submission.List->ResourceBarrier(static_cast<UINT>(Barriers.size()),
                                      Barriers.data());
-  return (*Queue)->submit(std::move(Submission));
+  return (*Queue)->submit(std::move(Submission), AsyncInfo.isSynchronous());
 }
 
 Expected<DirectXBufferTy> DirectXDeviceTy::getBuffer(const void *Ptr,
@@ -788,6 +789,7 @@ Error DirectXDeviceTy::copy(void *Dst, const void *Src, int64_t Size,
   auto Queue = getQueue(AsyncInfo);
   if (!Queue)
     return Queue.takeError();
+  bool Blocking = AsyncInfo.isSynchronous();
   DirectXBufferTy Destination, Source;
   if (Kind != CopyKind::Readback) {
     auto Buffer = getBuffer(Dst, Size, (*Queue)->Context);
@@ -807,11 +809,11 @@ Error DirectXDeviceTy::copy(void *Dst, const void *Src, int64_t Size,
           createBuffer(Device.Get(), Size, D3D12_HEAP_TYPE_DEFAULT);
       if (!Temporary)
         return Temporary.takeError();
-      if (auto Err = (*Queue)->copy(*Temporary, Source, Size))
+      if (auto Err = (*Queue)->copy(*Temporary, Source, Size, Blocking))
         return Err;
       Source = std::move(*Temporary);
     }
-    return (*Queue)->copy(Destination, Source, Size);
+    return (*Queue)->copy(Destination, Source, Size, Blocking);
   }
 
   bool Upload = Kind == CopyKind::Upload;
@@ -821,22 +823,32 @@ Error DirectXDeviceTy::copy(void *Dst, const void *Src, int64_t Size,
   if (!Staging)
     return Staging.takeError();
   if (!Upload)
-    if (auto Err = (*Queue)->copy(*Staging, Source, Size))
-      return Err;
+    return (*Queue)->copy(*Staging, Source, Size, Blocking,
+                          [Resource = Staging->Resource, Dst, Size]() -> Error {
+                            void *Mapped = nullptr;
+                            D3D12_RANGE ReadRange{0, static_cast<size_t>(Size)};
+                            if (auto Err =
+                                    check(Resource->Map(0, &ReadRange, &Mapped),
+                                          "ID3D12Resource::Map"))
+                              return Err;
+                            std::memcpy(Dst, Mapped, Size);
+                            D3D12_RANGE None{0, 0};
+                            Resource->Unmap(0, &None);
+                            return Error::success();
+                          });
+
+  // Pageable upload staging must observe earlier readbacks and event waits.
+  if (auto Err = (*Queue)->waitForHostWork())
+    return Err;
   void *Mapped = nullptr;
-  D3D12_RANGE ReadRange{0, Upload ? 0 : static_cast<size_t>(Size)};
+  D3D12_RANGE ReadRange{0, 0};
   if (auto Err = check(Staging->Resource->Map(0, &ReadRange, &Mapped),
                        "ID3D12Resource::Map"))
     return Err;
-  if (Upload)
-    std::memcpy(Mapped, Src, Size);
-  else
-    std::memcpy(Dst, Mapped, Size);
-  D3D12_RANGE WrittenRange{0, Upload ? static_cast<size_t>(Size) : 0};
+  std::memcpy(Mapped, Src, Size);
+  D3D12_RANGE WrittenRange{0, static_cast<size_t>(Size)};
   Staging->Resource->Unmap(0, &WrittenRange);
-  if (Upload)
-    return (*Queue)->copy(Destination, *Staging, Size);
-  return Error::success();
+  return (*Queue)->copy(Destination, *Staging, Size, Blocking);
 }
 
 struct DirectXGlobalHandlerTy final : GenericGlobalHandlerTy {
