@@ -17,12 +17,14 @@ TEST_P(olCreateEventTest, Success) {
   ol_event_handle_t Event = nullptr;
   ASSERT_SUCCESS(olCreateEvent(Queue, OL_EVENT_FLAGS_NONE, &Event));
   ASSERT_NE(Event, nullptr);
+  ASSERT_SUCCESS(olDestroyEvent(Event));
 }
 
 TEST_P(olCreateEventTest, SuccessWithProfiling) {
   ol_event_handle_t Event = nullptr;
   ASSERT_SUCCESS(olCreateEvent(Queue, OL_EVENT_FLAGS_ENABLE_PROFILING, &Event));
   ASSERT_NE(Event, nullptr);
+  ASSERT_SUCCESS(olDestroyEvent(Event));
 }
 
 TEST_P(olCreateEventTest, InvalidNullQueue) {

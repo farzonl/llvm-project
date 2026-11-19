@@ -609,6 +609,33 @@ protected:
   ol_queue_handle_t Producer = nullptr, Consumer = nullptr;
   ol_event_handle_t Event = nullptr;
 
+  void findOtherDevice(ol_platform_backend_t Backend,
+                       ol_device_handle_t &Result) {
+    std::vector<ol_device_handle_t> Devices;
+    ASSERT_TRUE(succeeded(olIterateDevices(
+        [](ol_device_handle_t Device, void *Data) {
+          static_cast<std::vector<ol_device_handle_t> *>(Data)->push_back(
+              Device);
+          return true;
+        },
+        &Devices)));
+    for (auto Candidate : Devices) {
+      if (Candidate == Device)
+        continue;
+      ol_platform_handle_t Platform = nullptr;
+      ol_platform_backend_t CandidateBackend;
+      ASSERT_TRUE(succeeded(olGetDeviceInfo(Candidate, OL_DEVICE_INFO_PLATFORM,
+                                            sizeof(Platform), &Platform)));
+      ASSERT_TRUE(succeeded(
+          olGetPlatformInfo(Platform, OL_PLATFORM_INFO_BACKEND,
+                            sizeof(CandidateBackend), &CandidateBackend)));
+      if (CandidateBackend == Backend) {
+        Result = Candidate;
+        return;
+      }
+    }
+  }
+
   void SetUp() override {
     DirectXDeviceTest::SetUp();
     if (HasFatalFailure() || IsSkipped())
@@ -665,18 +692,9 @@ TEST_F(DirectXEventTest, RejectsCrossContextWaits) {
 
 TEST_F(DirectXEventTest, RejectsOtherDevices) {
   ol_device_handle_t OtherDevice = nullptr;
-  std::vector<ol_device_handle_t> Devices;
-  ASSERT_TRUE(succeeded(olIterateDevices(
-      [](ol_device_handle_t Device, void *Data) {
-        static_cast<std::vector<ol_device_handle_t> *>(Data)->push_back(Device);
-        return true;
-      },
-      &Devices)));
-  for (auto Candidate : Devices)
-    if (Candidate != Device) {
-      OtherDevice = Candidate;
-      break;
-    }
+  findOtherDevice(OL_PLATFORM_BACKEND_DIRECTX, OtherDevice);
+  if (HasFatalFailure())
+    return;
   if (!OtherDevice)
     GTEST_SKIP() << "requires a second DirectX device";
   ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
@@ -688,6 +706,24 @@ TEST_F(DirectXEventTest, RejectsOtherDevices) {
       failedWith(olWaitEvents(OtherQueue, &Event, 1), OL_ERRC_INVALID_DEVICE));
   ASSERT_TRUE(succeeded(olDestroyQueue(OtherQueue)));
   ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
+}
+
+TEST_F(DirectXEventTest, RejectsOtherPlatforms) {
+  ol_device_handle_t Host = nullptr;
+  findOtherDevice(OL_PLATFORM_BACKEND_HOST, Host);
+  if (HasFatalFailure())
+    return;
+  if (!Host)
+    GTEST_SKIP() << "requires the host platform";
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  ol_context_handle_t HostContext = nullptr;
+  ol_queue_handle_t HostQueue = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Host, &HostContext)));
+  ASSERT_TRUE(succeeded(olCreateQueue(HostContext, Host, &HostQueue)));
+  EXPECT_TRUE(
+      failedWith(olWaitEvents(HostQueue, &Event, 1), OL_ERRC_INVALID_DEVICE));
+  ASSERT_TRUE(succeeded(olDestroyQueue(HostQueue)));
+  ASSERT_TRUE(succeeded(olDestroyContext(HostContext)));
 }
 
 TEST_F(DirectXEventTest, NativeWaitsRetainDestroyedEventsAndQueues) {
