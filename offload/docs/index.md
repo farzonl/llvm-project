@@ -10,6 +10,7 @@
 :maxdepth: 2
 
 offload-api
+directx-manifest
 :::
 
 # Experimental DirectX plugin
@@ -24,6 +25,11 @@ and native `ID3D12Device` handles are available. Compute-only adapters, events,
 host callbacks, host/managed allocations, image loading, and shader
 execution are not supported yet.
 This is not an OpenMP target.
+
+The [experimental launch manifest](directx-manifest.md) defines versioned JSON
+metadata for packaged shaders. Its parser and ABI validation are implemented;
+program loading, reflection, root-signature construction, and dispatch remain
+unsupported.
 
 Each context accepts exactly one device entry and retains a COM reference to its
 `ID3D12Device`. Contexts for the same device are distinct liboffload objects but

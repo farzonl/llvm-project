@@ -1,4 +1,4 @@
-add_unittest(OffloadUnitTests directx.unittests DirectXTest.cpp)
+add_unittest(OffloadUnitTests directx.unittests DirectXTest.cpp ManifestTest.cpp)
 target_link_libraries(directx.unittests PRIVATE LLVMOffload omptarget.rtl.directx)
 if(WIN32)
   target_compile_definitions(directx.unittests PRIVATE
