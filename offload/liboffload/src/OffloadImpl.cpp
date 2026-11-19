@@ -546,7 +546,7 @@ Error olGetDeviceInfoImplDetail(ol_device_handle_t Device,
   auto makeError = [&](ErrorCode Code, StringRef Err) {
     std::string ErrBuffer;
     raw_string_ostream(ErrBuffer) << PropName << ": " << Err;
-    return Plugin::error(ErrorCode::UNIMPLEMENTED, ErrBuffer.c_str());
+    return Plugin::error(Code, ErrBuffer.c_str());
   };
   bool IsHost = Device->Platform.BackendType == OL_PLATFORM_BACKEND_HOST;
   // These are not implemented by the plugin interface
@@ -590,8 +590,13 @@ Error olGetDeviceInfoImplDetail(ol_device_handle_t Device,
   case OL_DEVICE_INFO_COMPUTE_UNIT_KIND:
     return Info.writeString(Device->Device->getComputeUnitKind());
 
-  case OL_DEVICE_INFO_TIMESTAMP_FREQUENCY:
-    return Info.write<uint64_t>(Device->Device->getClockFrequency());
+  case OL_DEVICE_INFO_TIMESTAMP_FREQUENCY: {
+    uint64_t Frequency = Device->Device->getClockFrequency();
+    if (!Frequency)
+      return makeError(ErrorCode::UNSUPPORTED,
+                       "device-code clock frequency is unavailable");
+    return Info.write<uint64_t>(Frequency);
+  }
 
   case OL_DEVICE_INFO_HARDWARE_PARALLELISM:
     return Info.write<uint64_t>(Device->Device->getHardwareParallelism());
@@ -637,7 +642,7 @@ Error olGetDeviceInfoImplDetail(ol_device_handle_t Device,
 
   auto EntryOpt = Device->Info.get(static_cast<DeviceInfo>(PropName));
   if (!EntryOpt)
-    return makeError(ErrorCode::UNIMPLEMENTED,
+    return makeError(ErrorCode::UNSUPPORTED,
                      "plugin did not provide a response for this information");
   auto Entry = *EntryOpt;
 

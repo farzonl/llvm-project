@@ -250,6 +250,7 @@ constexpr GV DirectXGridValues = {
 struct DirectXPluginContextTy;
 
 struct DirectXDeviceTy final : GenericDeviceTy {
+  ComPtr<IDXCoreAdapter> Adapter;
   ComPtr<ID3D12Device> Device;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE SerializeRootSignature;
   std::string Name;
@@ -288,7 +289,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   DirectXDeviceTy(GenericPluginTy &Plugin, int32_t DeviceId, int32_t NumDevices,
                   const DirectXAdapterTy &Adapter)
       : GenericDeviceTy(Plugin, DeviceId, NumDevices, DirectXGridValues),
-        Device(Adapter.Device),
+        Adapter(Adapter.Adapter), Device(Adapter.Device),
         SerializeRootSignature(Adapter.SerializeRootSignature),
         Name(Adapter.Name) {
     setDeviceUidFromVendorUid(
@@ -316,7 +317,142 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     InfoTreeNode Info;
     Info.add("Name", Name, "", DeviceInfo::NAME);
     Info.add("Product name", Name, "", DeviceInfo::PRODUCT_NAME);
+    uint32_t Vendor = 0;
+    bool HasVendor = false;
+    if (Adapter->IsPropertySupported(DXCoreAdapterProperty::HardwareIDParts)) {
+      DXCoreHardwareIDParts ID{};
+      if (auto Err =
+              check(Adapter->GetProperty(DXCoreAdapterProperty::HardwareIDParts,
+                                         sizeof(ID), &ID),
+                    "IDXCoreAdapter::GetProperty(HardwareIDParts)"))
+        return std::move(Err);
+      Vendor = ID.vendorID;
+      HasVendor = true;
+    } else if (Adapter->IsPropertySupported(
+                   DXCoreAdapterProperty::HardwareID)) {
+      DXCoreHardwareID ID{};
+      if (auto Err =
+              check(Adapter->GetProperty(DXCoreAdapterProperty::HardwareID,
+                                         sizeof(ID), &ID),
+                    "IDXCoreAdapter::GetProperty(HardwareID)"))
+        return std::move(Err);
+      Vendor = ID.vendorID;
+      HasVendor = true;
+    }
+    if (HasVendor) {
+      std::string VendorName;
+      switch (Vendor) {
+      case 0x1002:
+        VendorName = "AMD";
+        break;
+      case 0x10de:
+        VendorName = "NVIDIA";
+        break;
+      case 0x1414:
+        VendorName = "Microsoft";
+        break;
+      case 0x8086:
+        VendorName = "Intel";
+        break;
+      default:
+        VendorName = formatv("PCI vendor {0:x4}", Vendor).str();
+        break;
+      }
+      Info.add("Vendor", VendorName, "", DeviceInfo::VENDOR);
+      Info.add("Vendor ID", Vendor, "", DeviceInfo::VENDOR_ID);
+    }
+    if (Adapter->IsPropertySupported(DXCoreAdapterProperty::DriverVersion)) {
+      uint64_t Version = 0;
+      if (auto Err =
+              check(Adapter->GetProperty(DXCoreAdapterProperty::DriverVersion,
+                                         sizeof(Version), &Version),
+                    "IDXCoreAdapter::GetProperty(DriverVersion)"))
+        return std::move(Err);
+      Info.add("Driver version",
+               formatv("{0}.{1}.{2}.{3}", Version >> 48,
+                       (Version >> 32) & 0xffff, (Version >> 16) & 0xffff,
+                       Version & 0xffff)
+                   .str(),
+               "", DeviceInfo::DRIVER_VERSION);
+    }
+    Info.add("Maximum work group size",
+             D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP, "",
+             DeviceInfo::MAX_WORK_GROUP_SIZE);
+    auto &Group = *Info.add("Work group limits", std::monostate{}, "",
+                            DeviceInfo::MAX_WORK_GROUP_SIZE_PER_DIMENSION);
+    Group.add("x", D3D12_CS_THREAD_GROUP_MAX_X);
+    Group.add("y", D3D12_CS_THREAD_GROUP_MAX_Y);
+    Group.add("z", D3D12_CS_THREAD_GROUP_MAX_Z);
+    auto &Grid = *Info.add("Work item limits", std::monostate{}, "",
+                           DeviceInfo::MAX_WORK_SIZE_PER_DIMENSION);
+    Grid.add("x", uint64_t{D3D12_CS_THREAD_GROUP_MAX_X} *
+                      D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION);
+    Grid.add("y", uint64_t{D3D12_CS_THREAD_GROUP_MAX_Y} *
+                      D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION);
+    Grid.add("z", uint64_t{D3D12_CS_THREAD_GROUP_MAX_Z} *
+                      D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION);
+    Info.add("Shared memory per work group",
+             uint64_t{D3D12_CS_TGSM_REGISTER_COUNT} * sizeof(uint32_t), "bytes",
+             DeviceInfo::WORK_GROUP_LOCAL_MEM_SIZE);
+    Info.add("Address bits", uint64_t{64}, "", DeviceInfo::ADDRESS_BITS);
+    Info.add("Cooperative launches", false, "",
+             DeviceInfo::COOPERATIVE_LAUNCH_SUPPORT);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
+    if (auto Err =
+            check(Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
+                                              &Options, sizeof(Options)),
+                  "ID3D12Device::CheckFeatureSupport(Options)"))
+      return std::move(Err);
+    Info.add("Single precision", true, "", DeviceInfo::SINGLE_FP_SUPPORT);
+    Info.add("Double precision", bool(Options.DoublePrecisionFloatShaderOps),
+             "", DeviceInfo::DOUBLE_FP_SUPPORT);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS4 Options4{};
+    HRESULT Status = Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4,
+                                                 &Options4, sizeof(Options4));
+    if (Status != E_INVALIDARG)
+      if (auto Err =
+              check(Status, "ID3D12Device::CheckFeatureSupport(Options4)"))
+        return std::move(Err);
+    Info.add("Native half precision",
+             SUCCEEDED(Status) && bool(Options4.Native16BitShaderOpsSupported),
+             "", DeviceInfo::HALF_FP_SUPPORT);
+    D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options1{};
+    Status = Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
+                                         &Options1, sizeof(Options1));
+    if (Status != E_INVALIDARG) {
+      if (auto Err =
+              check(Status, "ID3D12Device::CheckFeatureSupport(Options1)"))
+        return std::move(Err);
+      if (Options1.WaveOps && Options1.WaveLaneCountMin &&
+          Options1.WaveLaneCountMin == Options1.WaveLaneCountMax)
+        Info.add("Wave lanes", Options1.WaveLaneCountMin, "",
+                 DeviceInfo::NUM_LANES);
+    }
     return Info;
+  }
+  Error getDeviceMemorySize(uint64_t &Size) override {
+    uint64_t Dedicated = 0, System = 0, Shared = 0;
+    for (auto [Property, Destination] :
+         {std::pair{DXCoreAdapterProperty::DedicatedAdapterMemory, &Dedicated},
+          std::pair{DXCoreAdapterProperty::DedicatedSystemMemory, &System},
+          std::pair{DXCoreAdapterProperty::SharedSystemMemory, &Shared}}) {
+      if (!Adapter->IsPropertySupported(Property))
+        return unsupported("adapter memory capacity queries");
+      if (auto Err = check(
+              Adapter->GetProperty(Property, sizeof(uint64_t), Destination),
+              "IDXCoreAdapter::GetProperty(memory capacity)"))
+        return Err;
+    }
+    auto Total = checkedAddUnsigned(Dedicated, System);
+    if (!Total || (!*Total && !Shared))
+      return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                           "DirectX adapter returned invalid memory capacity");
+    Size = *Total ? *Total : Shared;
+    return Error::success();
+  }
+  uint64_t getClockFrequency() const override {
+    // D3D12 queue timestamps are not the device-code clock queried by this API.
+    return 0;
   }
   Expected<void *> getNativeHandle() override {
     return static_cast<void *>(Device.Get());

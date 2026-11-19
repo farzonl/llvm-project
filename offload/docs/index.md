@@ -125,8 +125,16 @@ The OffloadAPI initialization, platform, context, basic queue, and buffer copy
 tests can also run. Tests requiring profiling events, host callbacks, host/managed
 allocations, or general-purpose device binaries are not supported yet.
 The DirectX-specific tests exercise packaged compute shaders.
-The full generic device-information suite is not yet supported: queries such as
-vendor, driver version, and per-dimension work limits remain unimplemented.
+Device information reports DXCore vendor/driver identity and memory capacity,
+D3D12 group and per-axis dispatch limits, and native floating-point support.
+Memory capacity describes dedicated memory when present, otherwise shared system
+memory; it is not a guarantee that an allocation of that size will succeed.
+Shared-memory limits describe hardware, not support for `groupshared` in the
+experimental launch ABI. Unknown compute-unit counts, hardware clock rates,
+floating-point mode flags, variable wave widths, and the unrepresentable
+32-bit aggregate work-item limit remain explicitly unsupported rather than
+being guessed. The full generic device-information suite is therefore not yet
+supported.
 Some generic queue and copy tests also require host callbacks even when their
 names do not mention callbacks; those are outside this synchronous prototype.
 

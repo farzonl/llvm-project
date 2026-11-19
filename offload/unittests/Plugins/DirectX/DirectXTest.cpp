@@ -462,6 +462,37 @@ TEST_F(DirectXDeviceTest, RejectsUnsupportedMemoryRequests) {
   ASSERT_TRUE(succeeded(olDestroyContext(Context)));
 }
 
+TEST_F(DirectXDeviceTest, ReportsNativeFloatingPointSupport) {
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  auto &Native = *static_cast<ID3D12Device *>(Handle);
+  D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
+  ASSERT_TRUE(SUCCEEDED(Native.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
+                                                   &Options, sizeof(Options))));
+  bool Double = false, Half = false;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(
+      Device, OL_DEVICE_INFO_DOUBLE_FP_SUPPORT, sizeof(Double), &Double)));
+  EXPECT_EQ(Double, bool(Options.DoublePrecisionFloatShaderOps));
+  D3D12_FEATURE_DATA_D3D12_OPTIONS4 Options4{};
+  HRESULT Status = Native.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS4,
+                                              &Options4, sizeof(Options4));
+  ASSERT_TRUE(SUCCEEDED(Status) || Status == E_INVALIDARG);
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_HALF_FP_SUPPORT,
+                                        sizeof(Half), &Half)));
+  EXPECT_EQ(Half,
+            SUCCEEDED(Status) && bool(Options4.Native16BitShaderOpsSupported));
+}
+
+TEST_F(DirectXDeviceTest, DoesNotInventUnknownClockRates) {
+  uint32_t Clock = 0x12345678;
+  EXPECT_TRUE(
+      failedWith(olGetDeviceInfo(Device, OL_DEVICE_INFO_MAX_CLOCK_FREQUENCY,
+                                 sizeof(Clock), &Clock),
+                 OL_ERRC_UNSUPPORTED));
+  EXPECT_EQ(Clock, 0x12345678u);
+}
+
 TEST_F(DirectXDeviceTest, QueueLifecycle) {
   ol_context_handle_t Context = nullptr;
   ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
