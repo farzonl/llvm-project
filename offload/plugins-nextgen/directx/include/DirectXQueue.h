@@ -27,13 +27,17 @@
 #include <wsl/wrladapter.h>
 #endif
 
-#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
 #include <utility>
-#include <vector>
 
 namespace llvm::omp::target::plugin {
 struct PluginContextTy;
@@ -80,19 +84,107 @@ struct DirectXQueueTy {
     Microsoft::WRL::ComPtr<ID3D12PipelineState> Pipeline;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> RootSignature;
     std::shared_ptr<DirectXArgumentBindingsTy> Arguments;
+    std::function<Error()> Complete;
   };
 
   Microsoft::WRL::ComPtr<ID3D12Device> Device;
   Microsoft::WRL::ComPtr<ID3D12CommandQueue> Queue;
+  Microsoft::WRL::ComPtr<ID3D12Fence> ExecutionFence;
   Microsoft::WRL::ComPtr<ID3D12Fence> Fence;
   std::mutex Mutex;
   uint64_t LastSignaledValue = 0;
+  uint64_t LastHostValue = 0;
   PluginContextTy *Context;
-  std::vector<SubmissionTy> Submissions;
+  std::deque<SubmissionTy> Submissions;
 
+private:
+  std::condition_variable Changed;
+  std::thread Worker;
+  bool Stopping = false;
+  std::string Failure;
+
+  Error checkFailure() {
+    if (Failure.empty())
+      return Error::success();
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE, "%s",
+                                     Failure.c_str());
+  }
+
+  void fail(Error Err) {
+    Failure = toString(std::move(Err));
+    Changed.notify_all();
+  }
+
+  void retire() {
+    std::unique_lock<std::mutex> Lock(Mutex);
+    for (;;) {
+      Changed.wait(Lock, [&] { return Stopping || !Submissions.empty(); });
+      if (!Failure.empty() || (Stopping && Submissions.empty()))
+        return;
+      auto Completed = getCompletedValue(ExecutionFence.Get());
+      if (!Completed) {
+        fail(Completed.takeError());
+        return;
+      }
+      if (*Completed < Submissions.front().Value) {
+        Changed.wait_for(Lock, std::chrono::milliseconds(1));
+        continue;
+      }
+      auto &Submission = Submissions.front();
+      if (Submission.Complete)
+        if (auto Err = Submission.Complete()) {
+          fail(std::move(Err));
+          return;
+        }
+      // Publish completion only after host readbacks have become visible.
+      if (auto Err =
+              check(Fence->Signal(Submission.Value), "ID3D12Fence::Signal")) {
+        fail(std::move(Err));
+        return;
+      }
+      Submissions.pop_front();
+      Changed.notify_all();
+    }
+  }
+
+  Expected<uint64_t> enqueue(SubmissionTy Submission) {
+    if (auto Err = checkFailure())
+      return std::move(Err);
+    auto Value = nextValue();
+    if (!Value)
+      return Value.takeError();
+    Submission.Value = *Value;
+    if (Submission.Complete)
+      LastHostValue = *Value;
+    Submissions.push_back(std::move(Submission));
+    auto &Stored = Submissions.back();
+    if (Stored.List) {
+      ID3D12CommandList *Lists[] = {Stored.List.Get()};
+      Queue->ExecuteCommandLists(1, Lists);
+    }
+    // Keep ownership even when a submitted command list cannot be signaled.
+    if (auto Err = signalImpl(*Value)) {
+      fail(std::move(Err));
+      return checkFailure();
+    }
+    Changed.notify_all();
+    return *Value;
+  }
+
+public:
   explicit DirectXQueueTy(ID3D12Device *Device,
                           PluginContextTy *Context = nullptr)
       : Device(Device), Context(Context) {}
+
+  ~DirectXQueueTy() {
+    {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      Stopping = true;
+      Changed.notify_all();
+    }
+    if (Worker.joinable())
+      Worker.join();
+  }
 
   Error init() {
     D3D12_COMMAND_QUEUE_DESC Desc{};
@@ -102,13 +194,21 @@ struct DirectXQueueTy {
             check(Device->CreateCommandQueue(&Desc, IID_PPV_ARGS(&Queue)),
                   "ID3D12Device::CreateCommandQueue"))
       return Err;
-    return check(
-        Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)),
-        "ID3D12Device::CreateFence");
+    if (auto Err = check(Device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                             IID_PPV_ARGS(&ExecutionFence)),
+                         "ID3D12Device::CreateFence"))
+      return Err;
+    if (auto Err = check(
+            Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)),
+            "ID3D12Device::CreateFence"))
+      return Err;
+    Worker = std::thread([this] { retire(); });
+    return Error::success();
   }
 
-  Expected<uint64_t> getCompletedValue() {
-    uint64_t Completed = Fence->GetCompletedValue();
+  Expected<uint64_t> getCompletedValue(ID3D12Fence *NativeFence = nullptr) {
+    uint64_t Completed =
+        (NativeFence ? NativeFence : Fence.Get())->GetCompletedValue();
     if (Completed == std::numeric_limits<uint64_t>::max())
       return error::createOffloadError(
           error::ErrorCode::BACKEND_FAILURE,
@@ -119,10 +219,11 @@ struct DirectXQueueTy {
 
   Expected<bool> hasPendingWork() {
     std::lock_guard<std::mutex> Lock(Mutex);
+    if (auto Err = checkFailure())
+      return std::move(Err);
     auto Completed = getCompletedValue();
     if (!Completed)
       return Completed.takeError();
-    reclaim(*Completed);
     return !Submissions.empty() || *Completed < LastSignaledValue;
   }
 
@@ -134,7 +235,7 @@ struct DirectXQueueTy {
   }
 
   Error signalImpl(uint64_t Value) {
-    if (auto Err = check(Queue->Signal(Fence.Get(), Value),
+    if (auto Err = check(Queue->Signal(ExecutionFence.Get(), Value),
                          "ID3D12CommandQueue::Signal"))
       return Err;
     LastSignaledValue = Value;
@@ -143,37 +244,32 @@ struct DirectXQueueTy {
 
   Expected<uint64_t> signal() {
     std::lock_guard<std::mutex> Lock(Mutex);
-    auto Value = nextValue();
-    if (!Value)
-      return Value.takeError();
-    if (auto Err = signalImpl(*Value))
-      return std::move(Err);
-    return *Value;
-  }
-
-  void reclaim(uint64_t Completed) {
-    Submissions.erase(std::remove_if(Submissions.begin(), Submissions.end(),
-                                     [=](const SubmissionTy &S) {
-                                       return S.Value <= Completed;
-                                     }),
-                      Submissions.end());
+    return enqueue(SubmissionTy{});
   }
 
   Error wait(uint64_t Value) {
-    // A null event requests a blocking wait, on both Windows and Nacelle.
-    if (auto Err = check(Fence->SetEventOnCompletion(Value, nullptr),
-                         "ID3D12Fence::SetEventOnCompletion"))
-      return Err;
-    auto Completed = getCompletedValue();
-    if (!Completed)
-      return Completed.takeError();
-    if (*Completed < Value)
-      return error::createOffloadError(
-          error::ErrorCode::BACKEND_FAILURE,
-          "DirectX fence wait returned before completion");
-    std::lock_guard<std::mutex> Lock(Mutex);
-    reclaim(*Completed);
-    return Error::success();
+    std::unique_lock<std::mutex> Lock(Mutex);
+    for (;;) {
+      auto Completed = getCompletedValue();
+      if (!Completed)
+        return Completed.takeError();
+      if (*Completed >= Value)
+        return Error::success();
+      if (auto Err = checkFailure())
+        return Err;
+      Changed.wait_for(Lock, std::chrono::milliseconds(1));
+    }
+  }
+
+  Error waitForHostWork() {
+    uint64_t Value;
+    {
+      std::lock_guard<std::mutex> Lock(Mutex);
+      if (auto Err = checkFailure())
+        return Err;
+      Value = LastHostValue;
+    }
+    return wait(Value);
   }
 
   Error createCommandList(SubmissionTy &Submission) {
@@ -191,33 +287,28 @@ struct DirectXQueueTy {
     return Error::success();
   }
 
-  Error submit(SubmissionTy Submission) {
+  Error submit(SubmissionTy Submission, bool Blocking = true) {
     if (auto Err =
             check(Submission.List->Close(), "ID3D12GraphicsCommandList::Close"))
       return Err;
     uint64_t Value;
     {
       std::lock_guard<std::mutex> Lock(Mutex);
-      auto Next = nextValue();
+      auto Next = enqueue(std::move(Submission));
       if (!Next)
         return Next.takeError();
       Value = *Next;
-      Submission.Value = Value;
-      ID3D12CommandList *Lists[] = {Submission.List.Get()};
-      // Retain every GPU dependency even if signaling or waiting fails.
-      Submissions.push_back(std::move(Submission));
-      Queue->ExecuteCommandLists(1, Lists);
-      if (auto Err = signalImpl(Value))
-        return Err;
     }
-    return wait(Value);
+    return Blocking ? wait(Value) : Error::success();
   }
 
   Error copy(const DirectXBufferTy &Dst, const DirectXBufferTy &Src,
-             uint64_t Size) {
+             uint64_t Size, bool Blocking = true,
+             std::function<Error()> Complete = {}) {
     SubmissionTy Submission{};
     Submission.Source = Src.Resource;
     Submission.Destination = Dst.Resource;
+    Submission.Complete = std::move(Complete);
     if (auto Err = createCommandList(Submission))
       return Err;
 
@@ -245,7 +336,7 @@ struct DirectXQueueTy {
                 Barriers[I].Transition.StateAfter);
     if (Count)
       Submission.List->ResourceBarrier(Count, Barriers);
-    return submit(std::move(Submission));
+    return submit(std::move(Submission), Blocking);
   }
 
   Error synchronize() {

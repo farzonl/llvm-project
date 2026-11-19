@@ -215,6 +215,38 @@ protected:
   }
 };
 
+bool hasAsynchronousRuntime() {
+#ifdef _WIN32
+  return !std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY");
+#else
+  return false;
+#endif
+}
+
+class NativeQueueGate {
+  Microsoft::WRL::ComPtr<ID3D12Fence> Fence;
+
+public:
+  ~NativeQueueGate() {
+    if (Fence)
+      EXPECT_TRUE(SUCCEEDED(Fence->Signal(1)));
+  }
+
+  llvm::Error block(ID3D12Device &Device, ID3D12CommandQueue &Queue) {
+    using llvm::omp::target::plugin::directx::check;
+    if (auto Err = check(
+            Device.CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)),
+            "create queue gate"))
+      return Err;
+    return check(Queue.Wait(Fence.Get(), 1), "block queue gate");
+  }
+
+  llvm::Error open() {
+    return llvm::omp::target::plugin::directx::check(Fence->Signal(1),
+                                                     "open queue gate");
+  }
+};
+
 TEST_F(DirectXTest, MissingRuntimeIsAnError) {
   ScopedEnvironment Missing("OFFLOAD_DIRECTX_DXCORE_LIBRARY",
                             "offload-nonexistent-directx-library");
@@ -492,6 +524,62 @@ TEST_F(DirectXDeviceTest, FenceTimelineDoesNotUseDeviceRemovalValue) {
   ASSERT_TRUE(static_cast<bool>(Pending))
       << llvm::toString(Pending.takeError());
   EXPECT_FALSE(*Pending);
+}
+
+TEST_F(DirectXDeviceTest, RetainsSubmissionsUntilFenceCompletion) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  bool HostComplete = false;
+  DirectXQueueTy Queue(static_cast<ID3D12Device *>(Handle));
+  ASSERT_TRUE(succeeded(Queue.init()));
+  NativeQueueGate Gate;
+  ASSERT_TRUE(succeeded(Gate.block(*Queue.Device.Get(), *Queue.Queue.Get())));
+  DirectXQueueTy::SubmissionTy Submission{};
+  Submission.Arguments = std::make_shared<DirectXArgumentBindingsTy>();
+  std::weak_ptr<DirectXArgumentBindingsTy> Arguments = Submission.Arguments;
+  Submission.Complete = [&] {
+    HostComplete = true;
+    return llvm::Error::success();
+  };
+  ASSERT_TRUE(succeeded(Queue.createCommandList(Submission)));
+  ASSERT_TRUE(succeeded(Queue.submit(std::move(Submission), false)));
+  auto Pending = Queue.hasPendingWork();
+  ASSERT_TRUE(static_cast<bool>(Pending))
+      << llvm::toString(Pending.takeError());
+  EXPECT_TRUE(*Pending);
+  EXPECT_FALSE(Arguments.expired());
+  ASSERT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(Queue.synchronize()));
+  EXPECT_TRUE(HostComplete);
+  EXPECT_TRUE(Arguments.expired());
+}
+
+TEST_F(DirectXDeviceTest, HostCompletionFailuresPoisonTheQueue) {
+  using namespace llvm::omp::target::plugin::directx;
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  DirectXQueueTy Queue(static_cast<ID3D12Device *>(Handle));
+  ASSERT_TRUE(succeeded(Queue.init()));
+  DirectXQueueTy::SubmissionTy Submission{};
+  Submission.Complete = [] {
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                     "injected readback failure");
+  };
+  ASSERT_TRUE(succeeded(Queue.createCommandList(Submission)));
+  auto Err = Queue.submit(std::move(Submission));
+  ASSERT_TRUE(static_cast<bool>(Err));
+  EXPECT_NE(llvm::toString(std::move(Err)).find("injected readback failure"),
+            std::string::npos);
+  auto Pending = Queue.hasPendingWork();
+  ASSERT_FALSE(static_cast<bool>(Pending));
+  EXPECT_NE(
+      llvm::toString(Pending.takeError()).find("injected readback failure"),
+      std::string::npos);
 }
 
 TEST_F(DirectXDeviceTest, StagedBufferCopies) {

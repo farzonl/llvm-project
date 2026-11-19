@@ -100,6 +100,12 @@ resources, command allocator, and command list until fence completion. Submitted
 objects remain retained if signaling or waiting fails. Native failures are
 reported as backend errors. Events and asynchronous launches remain deferred.
 
+Each queue has a retirement worker and separate execution and completion fences.
+The completion timeline advances only after execution and any host readback
+action finish, so observing completion also makes readback bytes visible.
+Completion failures poison the queue and are reported by subsequent operations
+and synchronization rather than publishing successful completion.
+
 ## Argument binding preparation
 
 The internal `DirectXArgumentBindingsTy` helper prepares arguments from a
