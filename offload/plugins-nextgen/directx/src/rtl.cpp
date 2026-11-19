@@ -7,11 +7,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "DirectXQueue.h"
+#include "DirectXFeatures.h"
 #include "GlobalHandler.h"
 #include "PluginInterface.h"
 
 #include "llvm/Frontend/OpenMP/OMPGridValues.h"
+#include "llvm/Object/OffloadBinary.h"
 #include "llvm/Support/CheckedArithmetic.h"
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -32,6 +33,7 @@ namespace {
 
 using directx::check;
 using directx::DirectXBufferTy;
+using directx::DirectXManifestTy;
 using directx::DirectXQueueTy;
 using error::ErrorCode;
 using Microsoft::WRL::ComPtr;
@@ -41,6 +43,80 @@ Error unsupported(const char *Operation) {
   return Plugin::error(ErrorCode::UNSUPPORTED,
                        "DirectX prototype does not support %s", Operation);
 }
+
+struct DirectXProgramDataTy {
+  DirectXManifestTy Manifest;
+  std::unique_ptr<MemoryBuffer> Shader;
+};
+
+Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
+  using object::OffloadBinary;
+  auto Invalid = [](const char *Message) {
+    return Plugin::error(ErrorCode::INVALID_BINARY,
+                         "invalid DirectX package: %s", Message);
+  };
+  auto Buffer = MemoryBuffer::getMemBufferCopy(Input);
+  auto Header = OffloadBinary::extractHeader(Buffer->getMemBufferRef());
+  if (!Header)
+    return Plugin::error(ErrorCode::INVALID_BINARY, Header.takeError(),
+                         "expected a DirectX OffloadBinary package");
+  if ((*Header)->Version != OffloadBinary::Version ||
+      OffloadBinary::isCompressed(Buffer->getMemBufferRef()))
+    return unsupported("compressed or legacy OffloadBinary packages");
+  if ((*Header)->Size != Input.size())
+    return Invalid("trailing bytes or concatenated packages");
+  if (!(*Header)->EntriesCount)
+    return Invalid("package has no entries");
+  if ((*Header)->EntriesCount != 1)
+    return unsupported("OffloadBinary packages with more than one entry");
+
+  // OffloadBinary's string-map views assume valid offsets and terminated keys.
+  // Validate those before constructing the entry, including its alignment.
+  uint64_t Offset = (*Header)->EntriesOffset;
+  if (Offset % OffloadBinary::getAlignment() || Offset > Input.size() ||
+      sizeof(OffloadBinary::Entry) > Input.size() - Offset)
+    return Invalid("invalid entry offset");
+  OffloadBinary::Entry Entry;
+  memcpy(&Entry, Buffer->getBufferStart() + Offset, sizeof(Entry));
+  if (Entry.StringOffset % OffloadBinary::getAlignment() ||
+      Entry.StringOffset > Input.size() ||
+      Entry.NumStrings > (Input.size() - Entry.StringOffset) /
+                             sizeof(OffloadBinary::StringEntry))
+    return Invalid("invalid string table");
+  for (uint64_t I = 0; I < Entry.NumStrings; ++I) {
+    OffloadBinary::StringEntry String;
+    memcpy(&String,
+           Buffer->getBufferStart() + Entry.StringOffset + I * sizeof(String),
+           sizeof(String));
+    if (String.KeyOffset >= Input.size() ||
+        Input.drop_front(String.KeyOffset).find('\0') == StringRef::npos ||
+        String.ValueOffset > Input.size() ||
+        String.ValueSize > Input.size() - String.ValueOffset)
+      return Invalid("invalid metadata string");
+  }
+  auto Entries = OffloadBinary::create(Buffer->getMemBufferRef());
+  if (!Entries)
+    return Plugin::error(ErrorCode::INVALID_BINARY, Entries.takeError(),
+                         "cannot decode DirectX OffloadBinary package");
+  auto &Binary = *Entries->front();
+  auto Manifest = DirectXManifestTy::parse(Binary);
+  if (!Manifest)
+    return Manifest.takeError();
+  auto Shader = MemoryBuffer::getMemBufferCopy(Binary.getImage());
+  if (auto Err = Manifest->validateShader(Shader->getMemBufferRef()))
+    return std::move(Err);
+  return DirectXProgramDataTy{std::move(*Manifest), std::move(Shader)};
+}
+
+struct DirectXImageTy final : DeviceImageTy {
+  DirectXManifestTy Manifest;
+  ComPtr<ID3D12Device> NativeDevice;
+
+  DirectXImageTy(int32_t Id, GenericDeviceTy &Device, DirectXProgramDataTy Data,
+                 ID3D12Device *NativeDevice)
+      : DeviceImageTy(Id, Device, std::move(Data.Shader)),
+        Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice) {}
+};
 
 Expected<DirectXBufferTy> createBuffer(ID3D12Device *Device, uint64_t Size,
                                        D3D12_HEAP_TYPE Type) {
@@ -181,13 +257,22 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
   Error setDeviceStackSize(uint64_t) override { return Error::success(); }
 
-  Expected<DeviceImageTy *> loadBinaryImpl(std::unique_ptr<MemoryBuffer> &&,
-                                           int32_t,
-                                           PluginContextTy *) override {
-    return unsupported("image loading");
+  Expected<DeviceImageTy *>
+  loadBinaryImpl(std::unique_ptr<MemoryBuffer> &&Buffer, int32_t Id,
+                 PluginContextTy *Context) override {
+    if (!Context)
+      return unsupported("image loading without a user context");
+    auto Data = readProgram(Buffer->getBuffer());
+    if (!Data)
+      return Data.takeError();
+    if (auto Err =
+            directx::checkDeviceCapabilities(Data->Manifest, *Device.Get()))
+      return std::move(Err);
+    return new DirectXImageTy(Id, *this, std::move(*Data), Device.Get());
   }
-  Error unloadBinaryImpl(DeviceImageTy *) override {
-    return unsupported("image unloading");
+  Error unloadBinaryImpl(DeviceImageTy *Image) override {
+    delete static_cast<DirectXImageTy *>(Image);
+    return Error::success();
   }
   Expected<GenericKernelTy &> constructKernel(StringRef) override {
     return unsupported("kernels");
@@ -651,8 +736,27 @@ struct DirectXPluginTy final : GenericPluginTy {
   uint16_t getMagicElfBits() const override { return ELF::EM_NONE; }
   Triple::ArchType getTripleArch() const override { return Triple::dxil; }
   const char *getName() const override { return "DIRECTX"; }
+  bool supportsJIT() const override { return false; }
   Expected<bool> isELFCompatible(uint32_t, StringRef) const override {
     return false;
+  }
+  Expected<bool> isImageCompatible(StringRef Image) const override {
+    auto Data = readProgram(Image);
+    if (!Data)
+      return Data.takeError();
+    return true;
+  }
+  Expected<bool> isImageCompatible(uint32_t DeviceId,
+                                   StringRef Image) const override {
+    if (DeviceId >= Adapters.size())
+      return Plugin::error(ErrorCode::INVALID_DEVICE, "invalid DirectX device");
+    auto Data = readProgram(Image);
+    if (!Data)
+      return Data.takeError();
+    if (auto Err = directx::checkDeviceCapabilities(
+            Data->Manifest, *Adapters[DeviceId].Device.Get()))
+      return std::move(Err);
+    return true;
   }
   bool isDataExchangable(int32_t SrcDeviceId, int32_t DstDeviceId) override {
     return SrcDeviceId == DstDeviceId && isValidDeviceId(SrcDeviceId);

@@ -8,6 +8,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectXQueue.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Object/OffloadBinary.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/raw_ostream.h"
 #include <OffloadAPI.h>
 #include <gtest/gtest.h>
 
@@ -16,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <limits>
 #include <optional>
@@ -592,6 +600,222 @@ TEST_F(DirectXDeviceTest, CopiesUseNativeGPUAddressOffsets) {
   std::vector<uint8_t> Expected(64, 0);
   std::fill_n(Expected.begin() + 7, 9, uint8_t{123});
   EXPECT_EQ(Output, Expected);
+}
+
+class DirectXProgramTest : public DirectXDeviceTest {
+protected:
+  ol_context_handle_t Context = nullptr;
+  std::string Shader;
+
+  void SetUp() override {
+    DirectXDeviceTest::SetUp();
+    if (HasFatalFailure() || IsSkipped())
+      return;
+    void *Handle = nullptr;
+    ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                          sizeof(Handle), &Handle)));
+    D3D12_FEATURE_DATA_SHADER_MODEL Model{D3D_SHADER_MODEL_6_0};
+    HRESULT Result = static_cast<ID3D12Device *>(Handle)->CheckFeatureSupport(
+        D3D12_FEATURE_SHADER_MODEL, &Model, sizeof(Model));
+    if (Result == E_INVALIDARG ||
+        (SUCCEEDED(Result) && Model.HighestShaderModel < D3D_SHADER_MODEL_6_0))
+      GTEST_SKIP() << "program tests require shader model 6.0";
+    ASSERT_TRUE(SUCCEEDED(Result));
+    ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+    auto Buffer = llvm::MemoryBuffer::getFile(
+        DIRECTX_TEST_INPUTS_DIR "/buffers.dxil", false);
+    ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+    Shader = (*Buffer)->getBuffer().str();
+  }
+
+  void TearDown() override {
+    if (Context)
+      EXPECT_TRUE(succeeded(olDestroyContext(Context)));
+    DirectXDeviceTest::TearDown();
+  }
+
+  static llvm::json::Object manifest() {
+    using namespace llvm;
+    return json::Object{
+        {"version", 1},
+        {"entry", "main"},
+        {"shader_model", json::Array{6, 0}},
+        {"numthreads", json::Array{8, 2, 1}},
+        {"features", json::Array{}},
+        {"constants", nullptr},
+        {"arguments", json::Array{json::Object{{"index", 0},
+                                               {"kind", "srv"},
+                                               {"register", 2},
+                                               {"space", 1},
+                                               {"min_size", 4}},
+                                  json::Object{{"index", 1},
+                                               {"kind", "uav"},
+                                               {"register", 3},
+                                               {"space", 1},
+                                               {"min_size", 4}}}}};
+  }
+
+  std::string package(llvm::json::Object Manifest = manifest(),
+                      unsigned Count = 1) {
+    using namespace llvm;
+    std::string JSON;
+    raw_string_ostream OS(JSON);
+    OS << json::Value(std::move(Manifest));
+    SmallVector<object::OffloadBinary::OffloadingImage> Images;
+    for (unsigned I = 0; I < Count; ++I) {
+      auto &Image = Images.emplace_back();
+      Image.TheImageKind = object::IMG_DXIL;
+      Image.StringData["directx.manifest"] = JSON;
+      Image.Image = MemoryBuffer::getMemBufferCopy(Shader);
+    }
+    auto Bytes = object::OffloadBinary::write(Images);
+    return std::string(Bytes.data(), Bytes.size());
+  }
+
+  void expectRejected(llvm::StringRef Bytes, ol_errc_t Code) {
+    bool Valid = true;
+    ASSERT_TRUE(
+        succeeded(olIsValidBinary(Device, Bytes.data(), Bytes.size(), &Valid)));
+    EXPECT_FALSE(Valid);
+    ol_program_handle_t Program = nullptr;
+    EXPECT_TRUE(failedWith(
+        olCreateProgram(Context, Device, Bytes.data(), Bytes.size(), &Program),
+        Code));
+    EXPECT_EQ(Program, nullptr);
+  }
+};
+
+TEST_F(DirectXProgramTest, OwnsBytecodeAndKeepsLoadingIndependent) {
+  auto Bytes = package();
+  std::string Unaligned = "x" + Bytes;
+  bool Valid = false;
+  ASSERT_TRUE(succeeded(
+      olIsValidBinary(Device, Unaligned.data() + 1, Bytes.size(), &Valid)));
+  ASSERT_TRUE(Valid);
+  ol_program_handle_t Programs[2] = {};
+  for (auto &Program : Programs)
+    ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
+                                          Bytes.size(), &Program)));
+  Bytes.assign(Bytes.size(), 'x');
+  for (auto Program : Programs) {
+    void *Base = nullptr;
+    size_t Size = 0;
+    ASSERT_TRUE(succeeded(olGetProgramInfo(Program, OL_PROGRAM_INFO_IMAGE_BASE,
+                                           sizeof(Base), &Base)));
+    ASSERT_TRUE(succeeded(olGetProgramInfo(Program, OL_PROGRAM_INFO_IMAGE_SIZE,
+                                           sizeof(Size), &Size)));
+    ASSERT_EQ(Size, Shader.size());
+    EXPECT_EQ(llvm::StringRef(static_cast<const char *>(Base), Size), Shader);
+    ol_symbol_handle_t Symbol = nullptr;
+    EXPECT_TRUE(
+        failedWith(olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Symbol),
+                   OL_ERRC_UNSUPPORTED));
+    EXPECT_TRUE(failedWith(olIterateSymbols(
+                               Program, OL_SYMBOL_KIND_KERNEL,
+                               [](ol_symbol_handle_t, void *) { return true; },
+                               nullptr),
+                           OL_ERRC_UNSUPPORTED));
+    ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+  }
+  for (unsigned I = 0; I < 8; ++I) {
+    Bytes = package();
+    ol_program_handle_t Program = nullptr;
+    ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
+                                          Bytes.size(), &Program)));
+    ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+  }
+}
+
+TEST_F(DirectXProgramTest, RejectsUnpackagedAndMismatchedImages) {
+  expectRejected(Shader, OL_ERRC_INVALID_BINARY);
+  auto Object = manifest();
+  Object["entry"] = "wrong";
+  expectRejected(package(std::move(Object)), OL_ERRC_INVALID_BINARY);
+  Object = manifest();
+  Object["features"] = llvm::json::Array{"ResourceDescriptorHeapIndexing"};
+  expectRejected(package(std::move(Object)), OL_ERRC_UNSUPPORTED);
+  expectRejected(package(manifest(), 2), OL_ERRC_UNSUPPORTED);
+  auto Bytes = package();
+  expectRejected(Bytes + Bytes, OL_ERRC_INVALID_BINARY);
+  expectRejected(llvm::StringRef(Bytes).drop_back(), OL_ERRC_INVALID_BINARY);
+
+  llvm::LLVMContext LLVMContext;
+  llvm::Module M("raw DXIL", LLVMContext);
+  M.setTargetTriple(llvm::Triple("dxil-pc-shadermodel6.0-compute"));
+  llvm::SmallString<0> Bitcode;
+  llvm::raw_svector_ostream OS(Bitcode);
+  llvm::WriteBitcodeToFile(M, OS);
+  expectRejected(Bitcode, OL_ERRC_UNSUPPORTED);
+}
+
+TEST_F(DirectXProgramTest, LoadsScalarShaderAccordingToNativeFeatureSupport) {
+  auto Buffer = llvm::MemoryBuffer::getFile(
+      DIRECTX_TEST_INPUTS_DIR "/manifest.dxil", false);
+  ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+  Shader = (*Buffer)->getBuffer().str();
+  auto Object = manifest();
+  Object["features"] = llvm::json::Array{"Int64Ops"};
+  Object["constants"] =
+      llvm::json::Object{{"register", 4}, {"space", 2}, {"size", 16}};
+  auto *Arguments = Object.getArray("arguments");
+  Arguments->push_back(llvm::json::Object{
+      {"index", 2}, {"kind", "scalar"}, {"size", 4}, {"offset", 0}});
+  Arguments->push_back(llvm::json::Object{
+      {"index", 3}, {"kind", "scalar"}, {"size", 8}, {"offset", 8}});
+  auto Bytes = package(std::move(Object));
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
+  HRESULT Result = static_cast<ID3D12Device *>(Handle)->CheckFeatureSupport(
+      D3D12_FEATURE_D3D12_OPTIONS1, &Options, sizeof(Options));
+  ASSERT_TRUE(SUCCEEDED(Result) || Result == E_INVALIDARG);
+  if (Result == E_INVALIDARG || !Options.Int64ShaderOps) {
+    expectRejected(Bytes, OL_ERRC_UNSUPPORTED);
+    return;
+  }
+  bool Valid = false;
+  ASSERT_TRUE(
+      succeeded(olIsValidBinary(Device, Bytes.data(), Bytes.size(), &Valid)));
+  ASSERT_TRUE(Valid);
+  ol_program_handle_t Program = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateProgram(Context, Device, Bytes.data(), Bytes.size(), &Program)));
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+}
+
+TEST_F(DirectXProgramTest, RejectsMalformedPackageMetadataSafely) {
+  using Binary = llvm::object::OffloadBinary;
+  auto Bytes = package();
+  Binary::Header Header;
+  memcpy(&Header, Bytes.data(), sizeof(Header));
+  Binary::Entry Entry;
+  memcpy(&Entry, Bytes.data() + Header.EntriesOffset, sizeof(Entry));
+  Binary::StringEntry String;
+  memcpy(&String, Bytes.data() + Entry.StringOffset, sizeof(String));
+  String.KeyOffset = Bytes.size();
+  memcpy(Bytes.data() + Entry.StringOffset, &String, sizeof(String));
+  expectRejected(Bytes, OL_ERRC_INVALID_BINARY);
+
+  Bytes = package();
+  String.KeyOffset = 0;
+  String.ValueSize = std::numeric_limits<uint64_t>::max();
+  memcpy(Bytes.data() + Entry.StringOffset, &String, sizeof(String));
+  expectRejected(Bytes, OL_ERRC_INVALID_BINARY);
+  Bytes = package();
+  Entry.StringOffset = Bytes.size() + 1;
+  memcpy(Bytes.data() + Header.EntriesOffset, &Entry, sizeof(Entry));
+  expectRejected(Bytes, OL_ERRC_INVALID_BINARY);
+
+  Bytes = package();
+  Header.EntriesCount = 0;
+  memcpy(Bytes.data(), &Header, sizeof(Header));
+  expectRejected(Bytes, OL_ERRC_INVALID_BINARY);
+  Bytes = package();
+  Header.EntriesCount = 1;
+  Header.InflatedSize = Bytes.size();
+  memcpy(Bytes.data(), &Header, sizeof(Header));
+  expectRejected(Bytes, OL_ERRC_UNSUPPORTED);
 }
 
 } // namespace

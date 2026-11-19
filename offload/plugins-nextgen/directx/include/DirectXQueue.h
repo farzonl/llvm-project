@@ -15,13 +15,10 @@
 #ifdef _WIN32
 #include <windows.h>
 
-#include <initguid.h>
-
 #include <d3d12.h>
 #include <dxcore_interface.h>
 #include <wrl/client.h>
 #else
-#define INITGUID
 #include <wsl/winadapter.h>
 
 #include <directx/d3d12.h>

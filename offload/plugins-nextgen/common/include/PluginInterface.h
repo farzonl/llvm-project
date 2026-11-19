@@ -1399,6 +1399,9 @@ struct GenericPluginTy {
   /// plugin.
   JITEngine &getJIT() { return JIT; }
 
+  /// Whether this plugin accepts raw LLVM bitcode for runtime compilation.
+  virtual bool supportsJIT() const { return true; }
+
   /// Get a reference to the RPC server used to provide host services.
   RPCServerTy &getRPCServer() {
     assert(RPCServer && "RPC server not initialized");

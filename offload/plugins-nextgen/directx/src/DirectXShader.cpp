@@ -165,6 +165,9 @@ Expected<uint64_t> featureFlags(uint64_t ModuleFlags) {
 
 Error checkModule(const Module &M, const DirectXManifestTy &Manifest,
                   uint64_t ContainerFeatures, bool Reflection) {
+  if (M.getNamedGlobal("llvm.global_ctors") ||
+      M.getNamedGlobal("llvm.global_dtors"))
+    return unsupported("global constructors or destructors");
   auto Model = namedNode(M, "dx.shaderModel", 3);
   if (!Model)
     return Model.takeError();

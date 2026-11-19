@@ -255,6 +255,9 @@ GenericDeviceTy::loadBinary(GenericPluginTy &Plugin, StringRef InputTgtImage,
 
   std::unique_ptr<MemoryBuffer> Buffer;
   if (identify_magic(InputTgtImage) == file_magic::bitcode) {
+    if (!Plugin.supportsJIT())
+      return Plugin::error(ErrorCode::UNSUPPORTED,
+                           "plugin requires a packaged executable image");
     auto CompiledImageOrErr = Plugin.getJIT().process(InputTgtImage, *this);
     if (!CompiledImageOrErr) {
       return Plugin::error(ErrorCode::COMPILE_FAILURE,
@@ -1083,7 +1086,7 @@ Expected<bool> GenericPluginTy::checkELFImage(StringRef Image) const {
 }
 
 Expected<bool> GenericPluginTy::checkBitcodeImage(StringRef Image) const {
-  if (identify_magic(Image) != file_magic::bitcode)
+  if (!supportsJIT() || identify_magic(Image) != file_magic::bitcode)
     return false;
 
   LLVMContext Context;

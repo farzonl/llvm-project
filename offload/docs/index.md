@@ -18,19 +18,22 @@ directx-manifest
 The opt-in `directx` plugin supports liboffload device discovery and single-device
 context creation, queries, and destruction, explicit device-buffer allocation,
 allocation queries and freeing, compute queues with fence-based synchronization,
-and explicit buffer copies.
+explicit buffer copies, and validated single-entry DXIL program loading/unloading.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
 and native `ID3D12Device` handles are available. Compute-only adapters, events,
-host callbacks, host/managed allocations, image loading, and shader
+host callbacks, host/managed allocations, kernel objects, and shader
 execution are not supported yet.
 This is not an OpenMP target.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
 validation helper are implemented, including explicit scalar field layouts and
-feature-declaration checks. Program loading, device-capability checks,
-root-signature construction, and dispatch remain unsupported.
+feature-declaration checks. Loading checks the device shader model and supported
+optional features before retaining owned bytecode and a manifest. Kernel
+lookup/enumeration, root-signature construction, and dispatch remain unsupported.
+Programs currently require exactly one entry in an uncompressed, version-3
+OffloadBinary package; raw DXIL/bitcode and multi-entry packages are not accepted.
 
 Each context accepts exactly one device entry and retains a COM reference to its
 `ID3D12Device`. Contexts for the same device are distinct liboffload objects but
@@ -92,13 +95,14 @@ remain loaded until process exit.
 Build `directx.unittests` and run
 `llvm-lit --filter='directx[.]unittests' <runtime-build>/offload/test/unit`.
 On Linux, set both runtime path variables to the Nacelle shared library to
-enable real-device discovery, context, buffer and queue lifecycle, allocation
+enable real-device discovery, context, buffer, queue and program lifecycle, allocation
 isolation, alignment, real fence waiting, exact buffer copy results and range
 checks, and repeated initialization/shutdown tests. Nacelle currently submits
 queue work synchronously; its tests do not
 validate native Windows asynchronous submission.
 The missing-runtime test does not require a DirectX runtime or GPU.
-Manifest and shader validation tests also run without a DirectX runtime or GPU.
+Manifest, shader validation, and feature-query unit tests also run without a
+DirectX runtime or GPU.
 Their checked-in DXIL fixtures are generated from the accompanying HLSL with
 the documented DXC command; running the tests does not require DXC.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy

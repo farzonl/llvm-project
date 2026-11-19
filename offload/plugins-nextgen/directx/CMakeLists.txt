@@ -4,6 +4,8 @@ endif()
 
 add_target_library(omptarget.rtl.directx DirectX)
 target_sources(omptarget.rtl.directx PRIVATE
+  src/DirectXFeatures.cpp
+  src/DirectXGuids.cpp
   src/DirectXManifest.cpp
   src/DirectXShader.cpp
   src/rtl.cpp)

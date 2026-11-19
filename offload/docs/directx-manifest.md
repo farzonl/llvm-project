@@ -7,10 +7,41 @@ point. Multiple entries keep independent payload/manifest associations.
 The image kind is `IMG_DXIL`, the producer kind is `OFK_None`, and entry flags
 are zero. The DXIL payload must be nonempty.
 
-Manifest decoding and device-independent DXIL/manifest validation are implemented.
-This does not enable program loading or execution. Device-capability checks,
-root-signature creation, and launch-time argument validation are subsequent
-implementation steps. The prototype ABI is experimental.
+Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
+loading with device-capability checks are implemented. Root-signature creation,
+kernel objects, and execution remain unsupported. The prototype ABI is experimental.
+
+## Program loading
+
+`olCreateProgram` accepts exactly one entry in one current-version (version 3),
+uncompressed OffloadBinary package. Multi-entry packages are explicitly
+`UNSUPPORTED`; no entry is silently selected. Concatenated packages, trailing
+bytes, malformed package metadata, missing manifests, and mismatched DXIL are
+rejected. Legacy and compressed packages are not enabled in this prototype.
+Raw DXIL, HLSL, and LLVM bitcode are not accepted; raw bitcode is rejected before
+the shared runtime JIT path.
+
+Loading validates the launch ABI, queries the selected D3D12 device's shader-model
+support, and checks all declared feature requirements. The prototype currently
+implements device queries for `Doubles`, `WaveOps`, `Int64Ops`,
+`NativeLowPrecision`, and `AtomicInt64OnGroupShared`. Other requirements produce
+`UNSUPPORTED` rather than being assumed available. Optional feature queries are
+made only when required. An unrecognized query (`E_INVALIDARG`) means the
+requirement is unsupported; other failed driver queries remain backend errors.
+Overdeclared features must also pass these checks.
+
+`olIsValidBinary` uses the same package, reflection, and device checks, reporting
+false for invalid or unsupported input. A true result establishes compatibility
+with this loading slice, not availability of kernel creation or dispatch.
+
+Each successful program owns a copy of the executable DXIL bytes, its decoded
+manifest, and a native device reference until unload. Program image-base and
+image-size queries describe those DXIL bytes, not the surrounding package.
+The caller may release the input package after successful creation. Programs are
+independent even when created from identical packages.
+`olDestroyProgram` releases the image and removes it from device shutdown cleanup.
+Kernel lookup/enumeration, device globals, and execution remain explicitly
+unsupported. DXIL global constructors/destructors are rejected during validation.
 
 ## Shader validation
 
@@ -41,7 +72,9 @@ offsets come from reflection, not LLVM's replacement layout.
 Embedded root signatures and additional entry/resource properties are
 conservatively rejected until their compatibility checks are implemented. The
 helper does not perform DXIL validator/signature verification, establish device
-support, create native objects, or make `olCreateProgram` available.
+support, or create native objects. Program loading separately checks device
+capabilities before publishing an image. Pipeline/root-signature and descriptor
+limits will be checked when those native objects are implemented.
 
 ## Version 1 schema
 

@@ -22,6 +22,7 @@
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "gtest/gtest.h"
 
 #include <limits>
@@ -327,6 +328,19 @@ TEST_F(DirectXShaderTest, RejectsAbsentOrMalformedConstantAnnotations) {
       "STAT");
   expectError(validate(Changed), error::ErrorCode::INVALID_BINARY,
               "i32 metadata");
+}
+
+TEST_F(DirectXShaderTest, RejectsGlobalConstructorsAndDestructors) {
+  for (bool Destructor : {false, true}) {
+    auto Changed = rewriteProgram([Destructor](Module &M) {
+      if (Destructor)
+        appendToGlobalDtors(M, M.getFunction("main"), 65535);
+      else
+        appendToGlobalCtors(M, M.getFunction("main"), 65535);
+    });
+    expectError(validate(Changed), error::ErrorCode::UNSUPPORTED,
+                "global constructors or destructors");
+  }
 }
 
 } // namespace
