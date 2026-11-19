@@ -197,6 +197,9 @@ Zero-group launches still validate arguments, but do not issue a native empty
 Native validation is necessary: Nacelle's resource barriers are currently no-ops
 and its execution is synchronous, so Linux success alone cannot establish
 Windows resource-state or submission-lifetime correctness.
+Tests that deliberately gate pending GPU work run only with the default native
+Windows runtime. They are skipped on Linux and with runtime-library overrides;
+portable discovery, execution, event, and ABI tests still run with Nacelle.
 
 # Indices and tables
 

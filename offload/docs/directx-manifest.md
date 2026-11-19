@@ -81,8 +81,8 @@ launches and buffer copies enqueue work without waiting for GPU completion.
 Null-queue operations block until their work and host readbacks complete.
 A null queue uses the device-owned synchronous queue, but arguments are still
 resolved only in the program's originating
-context. Explicit queues must belong to that same context. Programs, queues, and
-allocations must be released before destroying their context.
+context. Explicit queues must belong to that same context. Programs, queues,
+events, and allocations must be released before destroying their context.
 
 Synchronize an explicit queue or a recorded event before observing readback
 memory or freeing/reusing its allocations. A null-queue operation does not

@@ -243,6 +243,8 @@ public:
   }
 
   llvm::Error open() {
+    if (!Fence)
+      return llvm::Error::success();
     return llvm::omp::target::plugin::directx::check(Fence->Signal(1),
                                                      "open queue gate");
   }
@@ -657,6 +659,33 @@ TEST_F(DirectXEventTest, RejectsCrossContextWaits) {
   ASSERT_TRUE(succeeded(olCreateQueue(OtherContext, Device, &OtherQueue)));
   EXPECT_TRUE(failedWith(olWaitEvents(OtherQueue, &Event, 1),
                          OL_ERRC_INVALID_ARGUMENT));
+  ASSERT_TRUE(succeeded(olDestroyQueue(OtherQueue)));
+  ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
+}
+
+TEST_F(DirectXEventTest, RejectsOtherDevices) {
+  ol_device_handle_t OtherDevice = nullptr;
+  std::vector<ol_device_handle_t> Devices;
+  ASSERT_TRUE(succeeded(olIterateDevices(
+      [](ol_device_handle_t Device, void *Data) {
+        static_cast<std::vector<ol_device_handle_t> *>(Data)->push_back(Device);
+        return true;
+      },
+      &Devices)));
+  for (auto Candidate : Devices)
+    if (Candidate != Device) {
+      OtherDevice = Candidate;
+      break;
+    }
+  if (!OtherDevice)
+    GTEST_SKIP() << "requires a second DirectX device";
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  ol_context_handle_t OtherContext = nullptr;
+  ol_queue_handle_t OtherQueue = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &OtherDevice, &OtherContext)));
+  ASSERT_TRUE(succeeded(olCreateQueue(OtherContext, OtherDevice, &OtherQueue)));
+  EXPECT_TRUE(
+      failedWith(olWaitEvents(OtherQueue, &Event, 1), OL_ERRC_INVALID_DEVICE));
   ASSERT_TRUE(succeeded(olDestroyQueue(OtherQueue)));
   ASSERT_TRUE(succeeded(olDestroyContext(OtherContext)));
 }
@@ -1707,6 +1736,13 @@ TEST_F(DirectXDispatchTest, NativeCopiesAndDispatchReturnBeforeCompletion) {
       return Result;
     if (auto Result = launch(Queue, Input, Output))
       return Result;
+    auto Zero = Launch;
+    Zero.NumGroups.x = 0;
+    void *Args[] = {&Input, &Output};
+    size_t Sizes[] = {sizeof(Input), sizeof(Output)};
+    if (auto Result = olLaunchKernel(Queue, Device, Kernel, &Zero, nullptr,
+                                     std::size(Args), Args, Sizes))
+      return Result;
     return olMemcpy(Queue, Actual.data(), nullptr, Output, Device,
                     sizeof(Actual));
   });
@@ -1745,6 +1781,150 @@ TEST_F(DirectXDispatchTest, QueuedReadbacksFeedSubsequentUploads) {
   ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
   EXPECT_EQ(Intermediate, Source);
   EXPECT_EQ(Actual, Source);
+}
+
+TEST_F(DirectXDispatchTest, NativeCrossQueuePipelineSurvivesHandleDestruction) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  std::array<uint32_t, 16> Source{}, Actual{};
+  for (unsigned I = 0; I < Source.size(); ++I)
+    Source[I] = I * 43 + 29;
+  ol_queue_handle_t Upload = nullptr, Readback = nullptr;
+  ol_event_handle_t Uploaded = nullptr, Launched = nullptr, Done = nullptr;
+  NativeQueueGate Gate;
+  auto Drain = llvm::scope_exit([&] {
+    EXPECT_TRUE(succeeded(Gate.open()));
+    if (Upload)
+      EXPECT_TRUE(succeeded(olSyncQueue(Upload)));
+    if (Queue)
+      EXPECT_TRUE(succeeded(olSyncQueue(Queue)));
+    if (Readback)
+      EXPECT_TRUE(succeeded(olSyncQueue(Readback)));
+    if (Done)
+      EXPECT_TRUE(succeeded(olSyncEvent(Done)));
+    for (auto Event : {Uploaded, Launched, Done})
+      if (Event)
+        EXPECT_TRUE(succeeded(olDestroyEvent(Event)));
+    for (auto Q : {Upload, Readback})
+      if (Q)
+        EXPECT_TRUE(succeeded(olDestroyQueue(Q)));
+  });
+  ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Upload)));
+  ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Readback)));
+  ASSERT_TRUE(Gate.block(Device, Upload));
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Upload, Input, Device, Source.data(), nullptr, sizeof(Source))));
+  ASSERT_TRUE(succeeded(olCreateEvent(Upload, OL_EVENT_FLAGS_NONE, &Uploaded)));
+  ASSERT_TRUE(succeeded(olWaitEvents(Queue, &Uploaded, 1)));
+  ASSERT_TRUE(succeeded(launch(Queue, Input, Output)));
+  ASSERT_TRUE(succeeded(olCreateEvent(Queue, OL_EVENT_FLAGS_NONE, &Launched)));
+  ASSERT_TRUE(succeeded(olWaitEvents(Readback, &Launched, 1)));
+  ASSERT_TRUE(succeeded(olMemcpy(Readback, Actual.data(), nullptr, Output,
+                                 Device, sizeof(Actual))));
+  ASSERT_TRUE(succeeded(olCreateEvent(Readback, OL_EVENT_FLAGS_NONE, &Done)));
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+  Program = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyEvent(Uploaded)));
+  Uploaded = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyEvent(Launched)));
+  Launched = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyQueue(Upload)));
+  Upload = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
+  Queue = nullptr;
+  ASSERT_TRUE(succeeded(olDestroyQueue(Readback)));
+  Readback = nullptr;
+  bool Complete = true;
+  ASSERT_TRUE(succeeded(olGetEventInfo(Done, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_FALSE(Complete);
+  EXPECT_EQ(Actual, (std::array<uint32_t, 16>{}));
+  ASSERT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(olSyncEvent(Done)));
+  EXPECT_EQ(Actual, Source);
+  ASSERT_TRUE(succeeded(olGetEventInfo(Done, OL_EVENT_INFO_IS_COMPLETE,
+                                       sizeof(Complete), &Complete)));
+  EXPECT_TRUE(Complete);
+}
+
+TEST_F(DirectXDispatchTest, NativeUploadStagingObservesCrossQueueReadbacks) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  std::array<uint32_t, 16> Source{}, Intermediate{}, Actual{};
+  for (unsigned I = 0; I < Source.size(); ++I)
+    Source[I] = I * 59 + 13;
+  ol_queue_handle_t Producer = nullptr;
+  ol_event_handle_t Ready = nullptr;
+  NativeQueueGate Gate;
+  auto Drain = llvm::scope_exit([&] {
+    EXPECT_TRUE(succeeded(Gate.open()));
+    if (Producer)
+      EXPECT_TRUE(succeeded(olSyncQueue(Producer)));
+    EXPECT_TRUE(succeeded(olSyncQueue(Queue)));
+    if (Ready)
+      EXPECT_TRUE(succeeded(olDestroyEvent(Ready)));
+    if (Producer)
+      EXPECT_TRUE(succeeded(olDestroyQueue(Producer)));
+  });
+  ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Producer)));
+  ASSERT_TRUE(succeeded(olMemcpy(nullptr, Input, Device, Source.data(), nullptr,
+                                 sizeof(Source))));
+  ASSERT_TRUE(Gate.block(Device, Producer));
+  ASSERT_TRUE(succeeded(olMemcpy(Producer, Intermediate.data(), nullptr, Input,
+                                 Device, sizeof(Intermediate))));
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Ready)));
+  ASSERT_TRUE(succeeded(olWaitEvents(Queue, &Ready, 1)));
+  auto Upload = std::async(std::launch::async, [&] {
+    return olMemcpy(Queue, Output, Device, Intermediate.data(), nullptr,
+                    sizeof(Intermediate));
+  });
+  EXPECT_EQ(Upload.wait_for(std::chrono::milliseconds(30)),
+            std::future_status::timeout);
+  EXPECT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(Upload.get()));
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Actual.data(), nullptr, Output, Device, sizeof(Actual))));
+  ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+  EXPECT_EQ(Intermediate, Source);
+  EXPECT_EQ(Actual, Source);
+}
+
+TEST_F(DirectXDispatchTest, ConcurrentAsynchronousBatchesKeepBindingsAlive) {
+  std::vector<std::future<void>> Tasks;
+  for (unsigned I = 0; I < 4; ++I)
+    Tasks.push_back(std::async(std::launch::async, [&, I] {
+      std::array<uint32_t, 16> Source{};
+      std::array<std::array<uint32_t, 16>, 8> Actual{};
+      std::array<void *, 8> Destinations{};
+      void *Input = nullptr;
+      auto Drain = llvm::scope_exit([&] {
+        EXPECT_TRUE(succeeded(olSyncQueue(Queue)));
+        for (auto Destination : Destinations)
+          if (Destination)
+            EXPECT_TRUE(succeeded(olMemFree(Context, Destination)));
+        if (Input)
+          EXPECT_TRUE(succeeded(olMemFree(Context, Input)));
+      });
+      for (unsigned J = 0; J < Source.size(); ++J)
+        Source[J] = I * 103 + J * 7 + 37;
+      ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                       sizeof(Source), &Input)));
+      ASSERT_TRUE(succeeded(olMemcpy(Queue, Input, Device, Source.data(),
+                                     nullptr, sizeof(Source))));
+      for (unsigned J = 0; J < Destinations.size(); ++J) {
+        ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                         sizeof(Actual[J]), &Destinations[J])));
+        ASSERT_TRUE(succeeded(launch(Queue, Input, Destinations[J])));
+        ASSERT_TRUE(
+            succeeded(olMemcpy(Queue, Actual[J].data(), nullptr,
+                               Destinations[J], Device, sizeof(Actual[J]))));
+      }
+      ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+      for (auto &Output : Actual)
+        EXPECT_EQ(Output, Source);
+    }));
+  for (auto &Task : Tasks)
+    Task.get();
 }
 
 TEST_F(DirectXProgramTest, RejectsUnpackagedAndMismatchedImages) {
