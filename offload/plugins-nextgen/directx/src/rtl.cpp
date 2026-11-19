@@ -7,6 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DirectXQueue.h"
 #include "GlobalHandler.h"
 #include "PluginInterface.h"
 
@@ -15,24 +16,6 @@
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
-
-#ifdef _WIN32
-#include <windows.h>
-
-#include <initguid.h>
-
-#include <d3d12.h>
-#include <dxcore_interface.h>
-#include <wrl/client.h>
-#else
-#define INITGUID
-#include <wsl/winadapter.h>
-
-#include <directx/d3d12.h>
-#include <directx/dxcore_interface.h>
-#include <dxguids/dxguids.h>
-#include <wsl/wrladapter.h>
-#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -45,6 +28,8 @@
 namespace llvm::omp::target::plugin {
 namespace {
 
+using directx::check;
+using directx::DirectXQueueTy;
 using error::ErrorCode;
 using Microsoft::WRL::ComPtr;
 using sys::DynamicLibrary;
@@ -52,13 +37,6 @@ using sys::DynamicLibrary;
 Error unsupported(const char *Operation) {
   return Plugin::error(ErrorCode::UNSUPPORTED,
                        "DirectX prototype does not support %s", Operation);
-}
-
-Error check(HRESULT Result, const char *Operation) {
-  if (SUCCEEDED(Result))
-    return Error::success();
-  return Plugin::error(ErrorCode::BACKEND_FAILURE, "%s failed (HRESULT 0x%08x)",
-                       Operation, static_cast<uint32_t>(Result));
 }
 
 Expected<DynamicLibrary> loadRuntime(const char *Envar,
@@ -188,14 +166,48 @@ struct DirectXDeviceTy final : GenericDeviceTy {
                             AsyncInfoWrapperTy &) override {
     return unsupported("queued host calls");
   }
-  Error synchronizeImpl(__tgt_async_info &, bool) override {
-    return unsupported("queue synchronization");
+  Error synchronizeImpl(__tgt_async_info &AsyncInfo,
+                        bool ReleaseQueue) override {
+    auto *Queue = static_cast<DirectXQueueTy *>(AsyncInfo.Queue);
+    if (!Queue)
+      return Error::success();
+    auto Err = Queue->synchronize();
+    if (ReleaseQueue) {
+      delete Queue;
+      AsyncInfo.Queue = nullptr;
+    }
+    return Err;
   }
-  Error queryAsyncImpl(__tgt_async_info &, bool, bool *) override {
-    return unsupported("queue queries");
+  Error queryAsyncImpl(__tgt_async_info &AsyncInfo, bool ReleaseQueue,
+                       bool *IsQueueWorkCompleted) override {
+    auto *Queue = static_cast<DirectXQueueTy *>(AsyncInfo.Queue);
+    bool Completed = true;
+    if (Queue) {
+      auto Pending = Queue->hasPendingWork();
+      if (!Pending)
+        return Pending.takeError();
+      Completed = !*Pending;
+    }
+    if (IsQueueWorkCompleted)
+      *IsQueueWorkCompleted = Completed;
+    if (Completed && ReleaseQueue) {
+      delete Queue;
+      AsyncInfo.Queue = nullptr;
+    }
+    return Error::success();
   }
-  Expected<bool> hasPendingWorkImpl(AsyncInfoWrapperTy &) override {
-    return unsupported("pending work queries");
+  Expected<bool> hasPendingWorkImpl(AsyncInfoWrapperTy &AsyncInfo) override {
+    auto *Queue = AsyncInfo.getQueueAs<DirectXQueueTy *>();
+    if (!Queue)
+      return false;
+    return Queue->hasPendingWork();
+  }
+  Expected<void *> getNativeQueueHandle(__tgt_async_info *AsyncInfo) override {
+    if (!AsyncInfo || !AsyncInfo->Queue)
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "no DirectX queue associated with the async info");
+    return static_cast<void *>(
+        static_cast<DirectXQueueTy *>(AsyncInfo->Queue)->Queue.Get());
   }
   Error createEventImpl(void **, bool) override {
     return unsupported("event creation");
@@ -242,8 +254,14 @@ struct DirectXPluginContextTy final : PluginContextTy {
   Expected<void *> getNativeHandle() override {
     return static_cast<void *>(Device.Get());
   }
-  Error initAsyncInfoImpl(GenericDeviceTy &, AsyncInfoWrapperTy &) override {
-    return unsupported("queue creation");
+  Error initAsyncInfoImpl(GenericDeviceTy &,
+                          AsyncInfoWrapperTy &AsyncInfo) override {
+    auto Queue = std::make_unique<DirectXQueueTy>(Device.Get());
+    if (auto Err = Queue->init())
+      return Err;
+    __tgt_async_info *Info = AsyncInfo;
+    Info->Queue = Queue.release();
+    return Error::success();
   }
   Expected<void *> allocateImpl(GenericDeviceTy &, int64_t Size,
                                 ol_alloc_type_t Kind, size_t Alignment,

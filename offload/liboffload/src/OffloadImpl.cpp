@@ -1010,6 +1010,7 @@ Error olDestroyQueue_impl(ol_queue_handle_t Queue) {
     if (auto Err = Device->Device->synchronize(Queue->AsyncInfo,
                                                /*Release=*/true))
       return Err;
+    delete Queue->AsyncInfo;
   } else {
     // The queue still has outstanding work. Store it so we can check it later.
     Context->addOutstandingQueue(Device, Queue->AsyncInfo);

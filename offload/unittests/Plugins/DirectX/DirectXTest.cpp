@@ -7,12 +7,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "DirectXQueue.h"
 #include <OffloadAPI.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <future>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -24,6 +28,12 @@ testing::AssertionResult succeeded(ol_result_t Result) {
   if (!Result)
     return testing::AssertionSuccess();
   return testing::AssertionFailure() << Result->Details;
+}
+
+testing::AssertionResult succeeded(llvm::Error Err) {
+  if (Err)
+    return testing::AssertionFailure() << llvm::toString(std::move(Err));
+  return testing::AssertionSuccess();
 }
 
 testing::AssertionResult failedWith(ol_result_t Result, ol_errc_t Code) {
@@ -79,7 +89,7 @@ protected:
 #ifndef _WIN32
     if (!std::getenv("OFFLOAD_DIRECTX_DXCORE_LIBRARY") ||
         !std::getenv("OFFLOAD_DIRECTX_D3D12_LIBRARY"))
-      GTEST_SKIP() << "Set DirectX runtime paths to run Linux buffer tests";
+      GTEST_SKIP() << "Set DirectX runtime paths to run Linux device tests";
 #endif
     std::vector<ol_device_handle_t> Devices;
     ASSERT_TRUE(succeeded(olIterateDevices(
@@ -189,10 +199,10 @@ TEST_F(DirectXTest, DiscoversDevicesAndRestarts) {
       EXPECT_EQ(Allocation, nullptr);
 
       ol_queue_handle_t Queue = nullptr;
-      Result = olCreateQueue(Contexts[1], Device, &Queue);
-      ASSERT_NE(Result, nullptr);
-      EXPECT_EQ(Result->Code, OL_ERRC_UNSUPPORTED);
-      EXPECT_EQ(Queue, nullptr);
+      ASSERT_TRUE(succeeded(olCreateQueue(Contexts[1], Device, &Queue)));
+      ASSERT_NE(Queue, nullptr);
+      ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+      ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
 
       ASSERT_TRUE(succeeded(olDestroyContext(Contexts[1])));
     }
@@ -302,6 +312,86 @@ TEST_F(DirectXDeviceTest, RejectsUnsupportedMemoryRequests) {
                          OL_ERRC_UNSUPPORTED));
   EXPECT_EQ(Buffer, nullptr);
   ASSERT_TRUE(succeeded(olDestroyContext(Context)));
+}
+
+TEST_F(DirectXDeviceTest, QueueLifecycle) {
+  ol_context_handle_t Context = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Context)));
+  for (unsigned Iteration = 0; Iteration != 10; ++Iteration) {
+    ol_queue_handle_t Queue = nullptr;
+    ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Queue)));
+    void *First = nullptr;
+    ASSERT_TRUE(succeeded(olGetQueueInfo(Queue, OL_QUEUE_INFO_NATIVE_HANDLE,
+                                         sizeof(First), &First)));
+    ASSERT_NE(First, nullptr);
+    bool Empty = false;
+    ASSERT_TRUE(succeeded(
+        olGetQueueInfo(Queue, OL_QUEUE_INFO_EMPTY, sizeof(Empty), &Empty)));
+    EXPECT_TRUE(Empty);
+    bool Completed = false;
+    ASSERT_TRUE(succeeded(olQueryQueue(Queue, &Completed)));
+    EXPECT_TRUE(Completed);
+    ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+    void *Second = nullptr;
+    ASSERT_TRUE(succeeded(olGetQueueInfo(Queue, OL_QUEUE_INFO_NATIVE_HANDLE,
+                                         sizeof(Second), &Second)));
+    EXPECT_EQ(First, Second);
+    ol_event_handle_t Event = nullptr;
+    EXPECT_TRUE(failedWith(olCreateEvent(Queue, OL_EVENT_FLAGS_NONE, &Event),
+                           OL_ERRC_UNSUPPORTED));
+    EXPECT_EQ(Event, nullptr);
+    ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
+  }
+  ASSERT_TRUE(succeeded(olDestroyContext(Context)));
+}
+
+TEST_F(DirectXDeviceTest, NativeFenceWaitsForCompletion) {
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  llvm::omp::target::plugin::directx::DirectXQueueTy Queue(
+      static_cast<ID3D12Device *>(Handle));
+  ASSERT_TRUE(succeeded(Queue.init()));
+  auto Value = Queue.signal();
+  ASSERT_TRUE(static_cast<bool>(Value)) << llvm::toString(Value.takeError());
+  ASSERT_TRUE(succeeded(Queue.wait(*Value)));
+
+  // Rewind the real fence without submitting work, then release the CPU wait.
+  ASSERT_TRUE(SUCCEEDED(Queue.Fence->Signal(*Value - 1)));
+  auto Pending = Queue.hasPendingWork();
+  ASSERT_TRUE(static_cast<bool>(Pending))
+      << llvm::toString(Pending.takeError());
+  EXPECT_TRUE(*Pending);
+  auto Wait =
+      std::async(std::launch::async, [&] { return Queue.wait(*Value); });
+  EXPECT_EQ(Wait.wait_for(std::chrono::milliseconds(30)),
+            std::future_status::timeout);
+  EXPECT_TRUE(SUCCEEDED(Queue.Fence->Signal(*Value)));
+  EXPECT_TRUE(succeeded(Wait.get()));
+  Pending = Queue.hasPendingWork();
+  ASSERT_TRUE(static_cast<bool>(Pending))
+      << llvm::toString(Pending.takeError());
+  EXPECT_FALSE(*Pending);
+  ASSERT_TRUE(succeeded(Queue.synchronize()));
+}
+
+TEST_F(DirectXDeviceTest, FenceTimelineDoesNotUseDeviceRemovalValue) {
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  llvm::omp::target::plugin::directx::DirectXQueueTy Queue(
+      static_cast<ID3D12Device *>(Handle));
+  ASSERT_TRUE(succeeded(Queue.init()));
+  Queue.LastSignaledValue = std::numeric_limits<uint64_t>::max() - 2;
+  ASSERT_TRUE(succeeded(Queue.synchronize()));
+  auto Value = Queue.signal();
+  ASSERT_FALSE(static_cast<bool>(Value));
+  EXPECT_EQ(llvm::errorToErrorCode(Value.takeError()),
+            error::make_error_code(error::ErrorCode::OUT_OF_RESOURCES));
+  auto Pending = Queue.hasPendingWork();
+  ASSERT_TRUE(static_cast<bool>(Pending))
+      << llvm::toString(Pending.takeError());
+  EXPECT_FALSE(*Pending);
 }
 
 } // namespace

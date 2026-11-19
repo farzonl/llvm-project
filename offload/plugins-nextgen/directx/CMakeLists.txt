@@ -4,6 +4,8 @@ endif()
 
 add_target_library(omptarget.rtl.directx DirectX)
 target_sources(omptarget.rtl.directx PRIVATE src/rtl.cpp)
+target_include_directories(omptarget.rtl.directx PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 if(WIN32)
   target_compile_definitions(omptarget.rtl.directx PRIVATE
