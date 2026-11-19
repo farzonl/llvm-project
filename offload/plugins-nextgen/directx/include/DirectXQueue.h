@@ -119,6 +119,7 @@ struct DirectXQueueTy {
   std::deque<SubmissionTy> Submissions;
 
 private:
+  std::mutex SubmissionMutex;
   std::condition_variable Changed;
   std::thread Worker;
   bool Stopping = false;
@@ -157,11 +158,18 @@ private:
         continue;
       }
       auto &Submission = Submissions.front();
-      if (Submission.Complete)
-        if (auto Err = Submission.Complete()) {
+      if (Submission.Complete) {
+        auto Complete = std::move(Submission.Complete);
+        Lock.unlock();
+        auto Err = Complete();
+        Lock.lock();
+        if (Err) {
           fail(std::move(Err));
           return;
         }
+        if (Failed)
+          return;
+      }
       // Publish completion only after host readbacks have become visible.
       if (auto Err =
               check(Fence->Signal(Submission.Value), "ID3D12Fence::Signal")) {
@@ -280,6 +288,7 @@ public:
     Submission.Dependency = Dependency->Fence;
     Submission.DependencyFailure = Dependency->Failure;
     Submission.DependencyValue = Value;
+    std::lock_guard<std::mutex> SubmitLock(SubmissionMutex);
     std::lock_guard<std::mutex> Lock(Mutex);
     auto Result = enqueue(std::move(Submission));
     if (!Result)
@@ -303,8 +312,34 @@ public:
   }
 
   Expected<uint64_t> signal() {
+    std::lock_guard<std::mutex> SubmitLock(SubmissionMutex);
     std::lock_guard<std::mutex> Lock(Mutex);
     return enqueue(SubmissionTy{});
+  }
+
+  Error enqueueHostCall(std::function<Error()> Complete, bool Blocking) {
+    uint64_t Value;
+    {
+      std::lock_guard<std::mutex> SubmitLock(SubmissionMutex);
+      std::unique_lock<std::mutex> Lock(Mutex);
+      SubmissionTy Submission{};
+      Submission.Complete = std::move(Complete);
+      auto Next = enqueue(std::move(Submission));
+      if (!Next)
+        return Next.takeError();
+      Value = *Next;
+      // Some portable D3D12 implementations block the caller in Queue::Wait.
+      // Let retirement publish host completion while submission stays ordered.
+      Lock.unlock();
+      auto Err = check(Queue->Wait(Fence.Get(), Value),
+                       "ID3D12CommandQueue::Wait(host callback)");
+      Lock.lock();
+      if (Err) {
+        fail(std::move(Err));
+        return checkFailure();
+      }
+    }
+    return Blocking ? wait(Value) : Error::success();
   }
 
   Error wait(uint64_t Value) {
@@ -324,6 +359,7 @@ public:
   Error waitForHostWork() {
     uint64_t Value;
     {
+      std::lock_guard<std::mutex> SubmitLock(SubmissionMutex);
       std::lock_guard<std::mutex> Lock(Mutex);
       if (auto Err = checkFailure())
         return Err;

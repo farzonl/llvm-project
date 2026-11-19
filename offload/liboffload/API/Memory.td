@@ -240,14 +240,14 @@ def olMemFill : Function {
     "The fill size must be a multiple of the pattern size",
   ];
   let params = [
-      Param<"ol_queue_handle_t", "Queue", "handle of the queue", PARAM_IN_OPTIONAL>,
+      Param<"ol_queue_handle_t", "Queue", "handle of the queue", PARAM_IN>,
       Param<"void*", "Ptr", "destination pointer to start filling at", PARAM_IN>,
       Param<"size_t", "PatternSize", "the size of the pattern in bytes", PARAM_IN>,
       Param<"const void*", "PatternPtr", "", PARAM_IN>,
       Param<"size_t", "FillSize", "number of bytes to fill", PARAM_IN>,
   ];
   let returns = [
-    Return<"OL_ERRC_INVALID_SIZE", ["`FillSize % PatternSize != 0`"]>
+    Return<"OL_ERRC_INVALID_SIZE", ["`PatternSize == 0 || FillSize % PatternSize != 0`"]>
   ];
 }
 

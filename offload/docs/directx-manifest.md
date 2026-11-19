@@ -96,7 +96,15 @@ remain valid until completion.
 Uploads snapshot pageable host memory into owned staging buffers. Preparing an
 upload may block for earlier readbacks or event waits on that queue so the
 snapshot observes their host writes. Queued host-to-host copies also drain the
-queue before copying; general host callbacks remain unsupported.
+queue before copying.
+
+Host callbacks run on the retirement worker after earlier queue work completes.
+Later GPU work waits for the callback to return, without preventing queue queries
+or further submissions. Callbacks must not call liboffload or backend APIs.
+Pattern fills snapshot arbitrary positive-sized patterns into owned upload
+staging, validate the destination against the queue's context and allocation
+bounds, and enqueue a buffer copy. The fill size must be a multiple of the
+pattern size. These staging-based fills prioritize correctness over throughput.
 
 Launch dimensions must be 1 through 3; inactive dimensions are normalized to 1.
 The thread-group size must match the compiled `numthreads` in all three

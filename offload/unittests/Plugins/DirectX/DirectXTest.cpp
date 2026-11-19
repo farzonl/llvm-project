@@ -709,6 +709,98 @@ TEST_F(DirectXEventTest, EventsOutliveTheirOriginatingQueue) {
   ASSERT_TRUE(succeeded(olSyncQueue(Consumer)));
 }
 
+TEST_F(DirectXEventTest, PatternFillsPreserveBoundsAndSnapshotPatterns) {
+  void *Buffer = nullptr;
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE, 64, &Buffer)));
+  auto Cleanup = llvm::scope_exit([&] {
+    EXPECT_TRUE(succeeded(olSyncQueue(Producer)));
+    EXPECT_TRUE(succeeded(olMemFree(Context, Buffer)));
+  });
+  uint8_t Zero = 0;
+  ASSERT_TRUE(succeeded(olMemFill(Producer, Buffer, 1, &Zero, 64)));
+  auto *Interior =
+      reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(Buffer) + 3);
+  uint8_t Pattern[] = {17, 29, 41};
+  ASSERT_TRUE(succeeded(olMemFill(Producer, Interior, 3, Pattern, 51)));
+  std::fill(std::begin(Pattern), std::end(Pattern), 0);
+  EXPECT_TRUE(failedWith(olMemFill(Producer, Buffer, 0, Pattern, 0),
+                         OL_ERRC_INVALID_SIZE));
+  EXPECT_TRUE(failedWith(olMemFill(Producer, Buffer, 3, Pattern, 50),
+                         OL_ERRC_INVALID_SIZE));
+  EXPECT_TRUE(failedWith(olMemFill(Producer, Interior, 3, Pattern, 63),
+                         OL_ERRC_INVALID_SIZE));
+  EXPECT_TRUE(failedWith(olMemFill(nullptr, Buffer, 3, Pattern, 3),
+                         OL_ERRC_INVALID_NULL_HANDLE));
+  ASSERT_TRUE(succeeded(olMemFill(Producer, Buffer, 3, Pattern, 0)));
+  uint8_t Output[64]{};
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Producer, Output, nullptr, Buffer, Device, sizeof(Output))));
+  ASSERT_TRUE(succeeded(olSyncQueue(Producer)));
+  const uint8_t Expected[] = {17, 29, 41};
+  for (size_t I = 0; I < sizeof(Output); ++I)
+    EXPECT_EQ(Output[I], I >= 3 && I < 54 ? Expected[(I - 3) % 3] : 0)
+        << "byte " << I;
+}
+
+TEST_F(DirectXEventTest, PatternFillsRejectAnotherContext) {
+  ol_context_handle_t Other = nullptr;
+  ASSERT_TRUE(succeeded(olCreateContext(1, &Device, &Other)));
+  void *Buffer = nullptr;
+  ASSERT_TRUE(
+      succeeded(olMemAlloc(Other, Device, OL_ALLOC_TYPE_DEVICE, 8, &Buffer)));
+  uint8_t Pattern = 7;
+  EXPECT_TRUE(failedWith(olMemFill(Producer, Buffer, 1, &Pattern, 8),
+                         OL_ERRC_NOT_FOUND));
+  ASSERT_TRUE(succeeded(olMemFree(Other, Buffer)));
+  ASSERT_TRUE(succeeded(olDestroyContext(Other)));
+}
+
+TEST_F(DirectXEventTest, HostCallbacksGateGpuWorkWithoutBlockingQueries) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  struct StateTy {
+    std::promise<void> Started;
+    std::promise<void> Release;
+    std::shared_future<void> Released = Release.get_future().share();
+  } State;
+  auto Started = State.Started.get_future();
+  ASSERT_TRUE(succeeded(olLaunchHostFunction(
+      Producer,
+      [](void *Data) {
+        auto &State = *static_cast<StateTy *>(Data);
+        State.Started.set_value();
+        State.Released.wait();
+      },
+      &State)));
+  auto Unblock = llvm::scope_exit([&] {
+    State.Release.set_value();
+    EXPECT_TRUE(succeeded(olSyncQueue(Producer)));
+  });
+  ASSERT_EQ(Started.wait_for(std::chrono::seconds(5)),
+            std::future_status::ready);
+  bool Complete = true;
+  ASSERT_TRUE(succeeded(olQueryQueue(Producer, &Complete)));
+  EXPECT_FALSE(Complete);
+  ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
+  void *Handle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(Handle), &Handle)));
+  Microsoft::WRL::ComPtr<ID3D12Fence> Probe;
+  ASSERT_TRUE(SUCCEEDED(static_cast<ID3D12Device *>(Handle)->CreateFence(
+      0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Probe))));
+  ASSERT_TRUE(succeeded(olGetQueueInfo(Producer, OL_QUEUE_INFO_NATIVE_HANDLE,
+                                       sizeof(Handle), &Handle)));
+  ASSERT_TRUE(SUCCEEDED(
+      static_cast<ID3D12CommandQueue *>(Handle)->Signal(Probe.Get(), 1)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  EXPECT_EQ(Probe->GetCompletedValue(), 0u);
+  State.Release.set_value();
+  Unblock.release();
+  ASSERT_TRUE(succeeded(olSyncQueue(Producer)));
+  EXPECT_EQ(Probe->GetCompletedValue(), 1u);
+}
+
 TEST_F(DirectXEventTest, RejectsCrossContextWaits) {
   ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
   ol_context_handle_t OtherContext = nullptr;

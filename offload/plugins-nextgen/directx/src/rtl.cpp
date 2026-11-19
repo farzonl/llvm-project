@@ -538,17 +538,50 @@ struct DirectXDeviceTy final : GenericDeviceTy {
       return unsupported("peer copies");
     return copy(Dst, Src, Size, AsyncInfo, CopyKind::Device);
   }
-  Error dataFillImpl(void *, const void *, int64_t, int64_t,
-                     AsyncInfoWrapperTy &) override {
-    return unsupported("memory fills");
+  Error dataFillImpl(void *Ptr, const void *Pattern, int64_t PatternSize,
+                     int64_t Size, AsyncInfoWrapperTy &AsyncInfo) override {
+    if (PatternSize <= 0 || Size < 0 || Size % PatternSize)
+      return Plugin::error(ErrorCode::INVALID_SIZE,
+                           "DirectX fill requires a positive pattern size "
+                           "that divides the representable fill size");
+    auto Queue = getQueue(AsyncInfo);
+    if (!Queue)
+      return Queue.takeError();
+    auto Destination = getBuffer(Ptr, Size, (*Queue)->Context);
+    if (!Destination)
+      return Destination.takeError();
+    if (!Size)
+      return Error::success();
+    auto Staging = createBuffer(Device.Get(), Size, D3D12_HEAP_TYPE_UPLOAD);
+    if (!Staging)
+      return Staging.takeError();
+    void *Mapped = nullptr;
+    D3D12_RANGE None{0, 0};
+    if (auto Err = check(Staging->Resource->Map(0, &None, &Mapped),
+                         "ID3D12Resource::Map"))
+      return Err;
+    for (int64_t Offset = 0; Offset < Size; Offset += PatternSize)
+      std::memcpy(static_cast<char *>(Mapped) + Offset, Pattern, PatternSize);
+    D3D12_RANGE Written{0, static_cast<size_t>(Size)};
+    Staging->Resource->Unmap(0, &Written);
+    return (*Queue)->copy(*Destination, *Staging, Size,
+                          AsyncInfo.isSynchronous());
   }
   Error dataPrefetchImpl(size_t, const void **, const size_t *, bool,
                          AsyncInfoWrapperTy &) override {
     return unsupported("memory prefetch");
   }
-  Error enqueueHostCallImpl(void (*)(void *), void *,
-                            AsyncInfoWrapperTy &) override {
-    return unsupported("queued host calls");
+  Error enqueueHostCallImpl(void (*Callback)(void *), void *Data,
+                            AsyncInfoWrapperTy &AsyncInfo) override {
+    auto Queue = getQueue(AsyncInfo);
+    if (!Queue)
+      return Queue.takeError();
+    return (*Queue)->enqueueHostCall(
+        [Callback, Data] {
+          Callback(Data);
+          return Error::success();
+        },
+        AsyncInfo.isSynchronous());
   }
   Error synchronizeImpl(__tgt_async_info &AsyncInfo,
                         bool ReleaseQueue) override {
