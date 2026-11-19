@@ -144,7 +144,17 @@ Events keep their native queue state alive and remain usable after
 device and in the same context. It does not block the calling thread.
 Queued waits retain their fence dependencies even if the event or originating
 queue handle is destroyed. Cross-device and cross-context waits are explicitly
-rejected. Profiling-enabled events and event timing remain `UNSUPPORTED`.
+rejected.
+
+Profiling-enabled events record D3D12 timestamp queries and retain their query
+heaps and readback buffers through completion, independently of event-handle
+lifetime. Synchronize both events before querying elapsed milliseconds;
+incomplete or reversed intervals return `INVALID_ARGUMENT`. Same-queue intervals
+use the native queue timestamp frequency. On Windows, cross-queue intervals use
+`GetClockCalibration` to correlate each queue to QPC; other platforms explicitly
+reject cross-queue timing. Calibration is approximate and can drift when hardware
+stops its GPU timestamp clock while idle; it does not change GPU power policy.
+Queue timestamp frequencies are not advertised as device-code clock frequencies.
 
 ## Argument binding preparation
 

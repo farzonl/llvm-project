@@ -43,9 +43,21 @@ using sys::DynamicLibrary;
 
 using DirectXQueueHandleTy = std::shared_ptr<DirectXQueueTy>;
 
+struct DirectXEventTimingTy {
+  ComPtr<ID3D12QueryHeap> Heap;
+  ComPtr<ID3D12Resource> Readback;
+  uint64_t Timestamp = 0;
+  uint64_t Frequency = 0;
+#ifdef _WIN32
+  uint64_t GPUCalibration = 0, CPUCalibration = 0;
+  uint64_t CPUFrequency = 0;
+#endif
+};
+
 struct DirectXEventTy {
   DirectXQueueHandleTy Queue;
   uint64_t Value = 0;
+  std::shared_ptr<DirectXEventTimingTy> Timing;
 };
 
 Error unsupported(const char *Operation) {
@@ -628,8 +640,6 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     return static_cast<void *>((*Handle)->Queue.Get());
   }
   Error createEventImpl(void **Storage, bool EnableProfiling) override {
-    if (EnableProfiling)
-      return unsupported("event timing");
     *Storage = new DirectXEventTy;
     return Error::success();
   }
@@ -639,19 +649,76 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
   Error recordEventImpl(void *Event, AsyncInfoWrapperTy &AsyncInfo,
                         bool EnableProfiling) override {
-    if (EnableProfiling)
-      return unsupported("event timing");
     if (!AsyncInfo.hasQueue())
       return unsupported("event recording without an explicit queue");
     auto Queue = getQueue(AsyncInfo);
     if (!Queue)
       return Queue.takeError();
-    auto Value = (*Queue)->signal();
+    std::shared_ptr<DirectXEventTimingTy> Timing;
+    auto Record = [&]() -> Expected<uint64_t> {
+      if (!EnableProfiling)
+        return (*Queue)->signal();
+      Timing = std::make_shared<DirectXEventTimingTy>();
+      if (auto Err =
+              check((*Queue)->Queue->GetTimestampFrequency(&Timing->Frequency),
+                    "ID3D12CommandQueue::GetTimestampFrequency"))
+        return std::move(Err);
+      if (!Timing->Frequency)
+        return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                             "DirectX queue returned zero timestamp frequency");
+      D3D12_QUERY_HEAP_DESC Desc{};
+      Desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+      Desc.Count = 1;
+      Desc.NodeMask = 1;
+      if (auto Err =
+              check(Device->CreateQueryHeap(&Desc, IID_PPV_ARGS(&Timing->Heap)),
+                    "ID3D12Device::CreateQueryHeap"))
+        return std::move(Err);
+      auto Readback = createBuffer(Device.Get(), sizeof(uint64_t),
+                                   D3D12_HEAP_TYPE_READBACK);
+      if (!Readback)
+        return Readback.takeError();
+      Timing->Readback = Readback->Resource;
+      DirectXQueueTy::SubmissionTy Submission{};
+      if (auto Err = (*Queue)->createCommandList(Submission))
+        return std::move(Err);
+      Submission.List->EndQuery(Timing->Heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                                0);
+      Submission.List->ResolveQueryData(Timing->Heap.Get(),
+                                        D3D12_QUERY_TYPE_TIMESTAMP, 0, 1,
+                                        Timing->Readback.Get(), 0);
+      Submission.Complete = [Timing, NativeQueue = (*Queue)->Queue]() -> Error {
+        void *Mapped = nullptr;
+        D3D12_RANGE Range{0, sizeof(uint64_t)};
+        if (auto Err = check(Timing->Readback->Map(0, &Range, &Mapped),
+                             "ID3D12Resource::Map(timestamp)"))
+          return Err;
+        std::memcpy(&Timing->Timestamp, Mapped, sizeof(uint64_t));
+        D3D12_RANGE None{0, 0};
+        Timing->Readback->Unmap(0, &None);
+#ifdef _WIN32
+        if (auto Err =
+                check(NativeQueue->GetClockCalibration(&Timing->GPUCalibration,
+                                                       &Timing->CPUCalibration),
+                      "ID3D12CommandQueue::GetClockCalibration"))
+          return Err;
+        LARGE_INTEGER Frequency;
+        if (!QueryPerformanceFrequency(&Frequency) || Frequency.QuadPart <= 0)
+          return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                               "QueryPerformanceFrequency failed");
+        Timing->CPUFrequency = Frequency.QuadPart;
+#endif
+        return Error::success();
+      };
+      return (*Queue)->submitWithValue(std::move(Submission));
+    };
+    auto Value = Record();
     if (!Value)
       return Value.takeError();
     auto &DXEvent = *static_cast<DirectXEventTy *>(Event);
     DXEvent.Queue = *AsyncInfo.getQueueAs<DirectXQueueHandleTy *>();
     DXEvent.Value = *Value;
+    DXEvent.Timing = std::move(Timing);
     return Error::success();
   }
   Error waitEventImpl(void *Event, AsyncInfoWrapperTy &AsyncInfo) override {
@@ -688,8 +755,47 @@ struct DirectXDeviceTy final : GenericDeviceTy {
                            "DirectX event has not been recorded");
     return DXEvent.Queue->wait(DXEvent.Value);
   }
-  Expected<float> getEventElapsedTimeImpl(void *, void *) override {
-    return unsupported("event timing");
+  Expected<float> getEventElapsedTimeImpl(void *Start, void *End) override {
+    auto &First = *static_cast<DirectXEventTy *>(Start);
+    auto &Last = *static_cast<DirectXEventTy *>(End);
+    for (auto *Event : {&First, &Last}) {
+      if (!Event->Queue || !Event->Timing)
+        return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                             "DirectX event has no recorded profiling data");
+      auto Complete = Event->Queue->isComplete(Event->Value);
+      if (!Complete)
+        return Complete.takeError();
+      if (!*Complete)
+        return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                             "DirectX profiling event is not complete");
+    }
+    const auto &A = *First.Timing;
+    const auto &B = *Last.Timing;
+    double Seconds;
+    if (First.Queue == Last.Queue) {
+      if (Last.Value < First.Value || B.Timestamp < A.Timestamp)
+        return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                             "DirectX profiling events are reversed");
+      Seconds = double(B.Timestamp - A.Timestamp) / A.Frequency;
+    } else {
+#ifdef _WIN32
+      // Queue clocks need not share an epoch. Correlate each to Windows QPC.
+      auto Difference = [](uint64_t X, uint64_t Y) {
+        return X >= Y ? double(X - Y) : -double(Y - X);
+      };
+      Seconds =
+          Difference(B.CPUCalibration, A.CPUCalibration) / A.CPUFrequency +
+          Difference(B.Timestamp, B.GPUCalibration) / B.Frequency -
+          Difference(A.Timestamp, A.GPUCalibration) / A.Frequency;
+      if (Seconds < 0)
+        return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                             "DirectX profiling events are reversed or "
+                             "their clock calibrations overlap");
+#else
+      return unsupported("cross-queue timing without a Windows QPC clock");
+#endif
+    }
+    return static_cast<float>(Seconds * 1000.0);
   }
 };
 

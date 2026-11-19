@@ -383,19 +383,20 @@ public:
     return Error::success();
   }
 
-  Error submit(SubmissionTy Submission, bool Blocking = true) {
+  Expected<uint64_t> submitWithValue(SubmissionTy Submission) {
     if (auto Err =
             check(Submission.List->Close(), "ID3D12GraphicsCommandList::Close"))
-      return Err;
-    uint64_t Value;
-    {
-      std::lock_guard<std::mutex> Lock(Mutex);
-      auto Next = enqueue(std::move(Submission));
-      if (!Next)
-        return Next.takeError();
-      Value = *Next;
-    }
-    return Blocking ? wait(Value) : Error::success();
+      return std::move(Err);
+    std::lock_guard<std::mutex> SubmitLock(SubmissionMutex);
+    std::lock_guard<std::mutex> Lock(Mutex);
+    return enqueue(std::move(Submission));
+  }
+
+  Error submit(SubmissionTy Submission, bool Blocking = true) {
+    auto Value = submitWithValue(std::move(Submission));
+    if (!Value)
+      return Value.takeError();
+    return Blocking ? wait(*Value) : Error::success();
   }
 
   Error copy(const DirectXBufferTy &Dst, const DirectXBufferTy &Src,

@@ -692,10 +692,9 @@ protected:
 TEST_F(DirectXEventTest, EventsOutliveTheirOriginatingQueue) {
   ASSERT_TRUE(succeeded(olCreateEvent(Producer, OL_EVENT_FLAGS_NONE, &Event)));
   ol_event_handle_t Profile = nullptr;
-  EXPECT_TRUE(failedWith(
-      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Profile),
-      OL_ERRC_UNSUPPORTED));
-  EXPECT_EQ(Profile, nullptr);
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Profile)));
+  ASSERT_TRUE(succeeded(olDestroyEvent(Profile)));
   ASSERT_TRUE(succeeded(olDestroyQueue(Producer)));
   Producer = nullptr;
   ASSERT_TRUE(succeeded(olSyncEvent(Event)));
@@ -741,6 +740,81 @@ TEST_F(DirectXEventTest, PatternFillsPreserveBoundsAndSnapshotPatterns) {
   for (size_t I = 0; I < sizeof(Output); ++I)
     EXPECT_EQ(Output[I], I >= 3 && I < 54 ? Expected[(I - 3) % 3] : 0)
         << "byte " << I;
+}
+
+TEST_F(DirectXEventTest, ProfilingMeasuresQueueIntervalsAfterQueueDestruction) {
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Event)));
+  ASSERT_TRUE(succeeded(olLaunchHostFunction(
+      Producer,
+      [](void *) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+      },
+      nullptr)));
+  ol_event_handle_t End = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &End)));
+  auto Cleanup =
+      llvm::scope_exit([&] { EXPECT_TRUE(succeeded(olDestroyEvent(End))); });
+  ASSERT_TRUE(succeeded(olSyncEvent(End)));
+  ASSERT_TRUE(succeeded(olDestroyQueue(Producer)));
+  Producer = nullptr;
+  float Milliseconds = -1;
+  ASSERT_TRUE(succeeded(olGetEventElapsedTime(Event, End, &Milliseconds)));
+  EXPECT_GE(Milliseconds, 5.0f);
+  EXPECT_LT(Milliseconds, 10000.0f);
+  ASSERT_TRUE(succeeded(olGetEventElapsedTime(Event, Event, &Milliseconds)));
+  EXPECT_EQ(Milliseconds, 0.0f);
+  EXPECT_TRUE(failedWith(olGetEventElapsedTime(End, Event, &Milliseconds),
+                         OL_ERRC_INVALID_ARGUMENT));
+}
+
+TEST_F(DirectXEventTest, ProfilingCalibratesIndependentQueueClocks) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native Windows clock calibration";
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Event)));
+  ASSERT_TRUE(succeeded(olSyncEvent(Event)));
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  ASSERT_TRUE(succeeded(olWaitEvents(Consumer, &Event, 1)));
+  ol_event_handle_t End = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Consumer, OL_EVENT_FLAGS_ENABLE_PROFILING, &End)));
+  auto Cleanup =
+      llvm::scope_exit([&] { EXPECT_TRUE(succeeded(olDestroyEvent(End))); });
+  ASSERT_TRUE(succeeded(olSyncEvent(End)));
+  float Milliseconds = -1;
+  ASSERT_TRUE(succeeded(olGetEventElapsedTime(Event, End, &Milliseconds)));
+  EXPECT_GE(Milliseconds, 20.0f);
+  EXPECT_LT(Milliseconds, 10000.0f);
+}
+
+TEST_F(DirectXEventTest, ProfilingRetainsQueriesAndRejectsPendingIntervals) {
+  if (!hasAsynchronousRuntime())
+    GTEST_SKIP() << "requires native asynchronous D3D12";
+  void *DeviceHandle = nullptr, *QueueHandle = nullptr;
+  ASSERT_TRUE(succeeded(olGetDeviceInfo(Device, OL_DEVICE_INFO_NATIVE_HANDLE,
+                                        sizeof(DeviceHandle), &DeviceHandle)));
+  ASSERT_TRUE(succeeded(olGetQueueInfo(Producer, OL_QUEUE_INFO_NATIVE_HANDLE,
+                                       sizeof(QueueHandle), &QueueHandle)));
+  NativeQueueGate Gate;
+  ASSERT_TRUE(
+      succeeded(Gate.block(*static_cast<ID3D12Device *>(DeviceHandle),
+                           *static_cast<ID3D12CommandQueue *>(QueueHandle))));
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Event)));
+  ol_event_handle_t Transient = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateEvent(Producer, OL_EVENT_FLAGS_ENABLE_PROFILING, &Transient)));
+  ASSERT_TRUE(succeeded(olDestroyEvent(Transient)));
+  float Milliseconds = -17;
+  EXPECT_TRUE(failedWith(olGetEventElapsedTime(Event, Event, &Milliseconds),
+                         OL_ERRC_INVALID_ARGUMENT));
+  EXPECT_EQ(Milliseconds, -17.0f);
+  ASSERT_TRUE(succeeded(Gate.open()));
+  ASSERT_TRUE(succeeded(olSyncQueue(Producer)));
+  ASSERT_TRUE(succeeded(olGetEventElapsedTime(Event, Event, &Milliseconds)));
+  EXPECT_EQ(Milliseconds, 0.0f);
 }
 
 TEST_F(DirectXEventTest, PatternFillsRejectAnotherContext) {
