@@ -21,6 +21,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -29,6 +31,7 @@ namespace llvm::omp::target::plugin {
 namespace {
 
 using directx::check;
+using directx::DirectXBufferTy;
 using directx::DirectXQueueTy;
 using error::ErrorCode;
 using Microsoft::WRL::ComPtr;
@@ -37,6 +40,35 @@ using sys::DynamicLibrary;
 Error unsupported(const char *Operation) {
   return Plugin::error(ErrorCode::UNSUPPORTED,
                        "DirectX prototype does not support %s", Operation);
+}
+
+Expected<DirectXBufferTy> createBuffer(ID3D12Device *Device, uint64_t Size,
+                                       D3D12_HEAP_TYPE Type) {
+  D3D12_HEAP_PROPERTIES Heap{};
+  Heap.Type = Type;
+  Heap.CreationNodeMask = 1;
+  Heap.VisibleNodeMask = 1;
+  D3D12_RESOURCE_DESC Desc{};
+  Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  Desc.Width = Size;
+  Desc.Height = 1;
+  Desc.DepthOrArraySize = 1;
+  Desc.MipLevels = 1;
+  Desc.SampleDesc.Count = 1;
+  Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  DirectXBufferTy Buffer;
+  if (Type == D3D12_HEAP_TYPE_DEFAULT)
+    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  else
+    Buffer.State = Type == D3D12_HEAP_TYPE_UPLOAD
+                       ? D3D12_RESOURCE_STATE_GENERIC_READ
+                       : D3D12_RESOURCE_STATE_COPY_DEST;
+  if (auto Err = check(Device->CreateCommittedResource(
+                           &Heap, D3D12_HEAP_FLAG_NONE, &Desc, Buffer.State,
+                           nullptr, IID_PPV_ARGS(&Buffer.Resource)),
+                       "ID3D12Device::CreateCommittedResource"))
+    return std::move(Err);
+  return Buffer;
 }
 
 Expected<DynamicLibrary> loadRuntime(const char *Envar,
@@ -72,9 +104,42 @@ constexpr GV DirectXGridValues = {
     1, 0, D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP,
     1};
 
+struct DirectXPluginContextTy;
+
 struct DirectXDeviceTy final : GenericDeviceTy {
   ComPtr<ID3D12Device> Device;
   std::string Name;
+  std::mutex ContextsMutex;
+  SmallVector<DirectXPluginContextTy *> Contexts;
+  std::mutex SynchronousQueueMutex;
+  std::unique_ptr<DirectXQueueTy> SynchronousQueue;
+
+  enum class CopyKind { Upload, Readback, Device };
+  Expected<DirectXQueueTy *> getQueue(AsyncInfoWrapperTy &AsyncInfo) {
+    if (AsyncInfo.hasQueue()) {
+      auto *Queue = AsyncInfo.getQueueAs<DirectXQueueTy *>();
+      if (Queue->Device.Get() != Device.Get())
+        return Plugin::error(ErrorCode::INVALID_DEVICE,
+                             "DirectX copy queue belongs to another device");
+      return Queue;
+    }
+    if (!AsyncInfo.isSynchronous())
+      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                           "DirectX copy has no native queue");
+    std::lock_guard<std::mutex> Lock(SynchronousQueueMutex);
+    if (!SynchronousQueue) {
+      auto Queue = std::make_unique<DirectXQueueTy>(Device.Get());
+      if (auto Err = Queue->init())
+        return std::move(Err);
+      SynchronousQueue = std::move(Queue);
+    }
+    return SynchronousQueue.get();
+  }
+
+  Expected<DirectXBufferTy> getBuffer(const void *Ptr, size_t Size,
+                                      PluginContextTy *Context);
+  Error copy(void *Dst, const void *Src, int64_t Size,
+             AsyncInfoWrapperTy &AsyncInfo, CopyKind Kind);
 
   DirectXDeviceTy(GenericPluginTy &Plugin, int32_t DeviceId, int32_t NumDevices,
                   const DirectXAdapterTy &Adapter)
@@ -90,6 +155,11 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     return Error::success();
   }
   Error deinitImpl() override {
+    if (SynchronousQueue) {
+      if (auto Err = SynchronousQueue->synchronize())
+        return Err;
+      SynchronousQueue.reset();
+    }
     Device.Reset();
     return Error::success();
   }
@@ -138,21 +208,35 @@ struct DirectXDeviceTy final : GenericDeviceTy {
                                  size_t &) const override {
     return unsupported("pinned memory queries");
   }
-  Error dataSubmitImpl(void *, const void *, int64_t, AsyncInfoWrapperTy &,
+  Error dataSubmitImpl(void *Dst, const void *Src, int64_t Size,
+                       AsyncInfoWrapperTy &AsyncInfo,
                        GenericProfilerTy *) override {
-    return unsupported("host-to-device copies");
+    return copy(Dst, Src, Size, AsyncInfo, CopyKind::Upload);
   }
-  Error dataRetrieveImpl(void *, const void *, int64_t, AsyncInfoWrapperTy &,
+  Error dataRetrieveImpl(void *Dst, const void *Src, int64_t Size,
+                         AsyncInfoWrapperTy &AsyncInfo,
                          GenericProfilerTy *) override {
-    return unsupported("device-to-host copies");
+    return copy(Dst, Src, Size, AsyncInfo, CopyKind::Readback);
   }
-  Error dataMemcpyImpl(void *, const void *, int64_t,
-                       AsyncInfoWrapperTy &) override {
-    return unsupported("memory copies");
+  Error dataMemcpyImpl(void *Dst, const void *Src, int64_t Size,
+                       AsyncInfoWrapperTy &AsyncInfo) override {
+    if (Size < 0)
+      return Plugin::error(ErrorCode::INVALID_SIZE,
+                           "DirectX copy size is not representable");
+    auto Queue = getQueue(AsyncInfo);
+    if (!Queue)
+      return Queue.takeError();
+    if (auto Err = (*Queue)->synchronize())
+      return Err;
+    std::memcpy(Dst, Src, Size);
+    return Error::success();
   }
-  Error dataExchangeImpl(const void *, GenericDeviceTy &, void *, int64_t,
-                         AsyncInfoWrapperTy &, GenericProfilerTy *) override {
-    return unsupported("peer copies");
+  Error dataExchangeImpl(const void *Src, GenericDeviceTy &DstDevice, void *Dst,
+                         int64_t Size, AsyncInfoWrapperTy &AsyncInfo,
+                         GenericProfilerTy *) override {
+    if (&DstDevice != this)
+      return unsupported("peer copies");
+    return copy(Dst, Src, Size, AsyncInfo, CopyKind::Device);
   }
   Error dataFillImpl(void *, const void *, int64_t, int64_t,
                      AsyncInfoWrapperTy &) override {
@@ -171,12 +255,13 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     auto *Queue = static_cast<DirectXQueueTy *>(AsyncInfo.Queue);
     if (!Queue)
       return Error::success();
-    auto Err = Queue->synchronize();
+    if (auto Err = Queue->synchronize())
+      return Err;
     if (ReleaseQueue) {
       delete Queue;
       AsyncInfo.Queue = nullptr;
     }
-    return Err;
+    return Error::success();
   }
   Error queryAsyncImpl(__tgt_async_info &AsyncInfo, bool ReleaseQueue,
                        bool *IsQueueWorkCompleted) override {
@@ -233,6 +318,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
 };
 
 struct DirectXPluginContextTy final : PluginContextTy {
+  DirectXDeviceTy &Owner;
   ComPtr<ID3D12Device> Device;
   std::mutex AllocationsMutex;
   // Pool backing resources and live user allocations have different lifetimes.
@@ -242,7 +328,17 @@ struct DirectXPluginContextTy final : PluginContextTy {
   DirectXPluginContextTy(GenericPluginTy &Plugin,
                          ArrayRef<GenericDeviceTy *> Devices,
                          const ComPtr<ID3D12Device> &Device)
-      : PluginContextTy(Plugin, Devices), Device(Device) {}
+      : PluginContextTy(Plugin, Devices),
+        Owner(static_cast<DirectXDeviceTy &>(*Devices.front())),
+        Device(Device) {
+    std::lock_guard<std::mutex> Lock(Owner.ContextsMutex);
+    Owner.Contexts.push_back(this);
+  }
+
+  ~DirectXPluginContextTy() override {
+    std::lock_guard<std::mutex> Lock(Owner.ContextsMutex);
+    llvm::erase(Owner.Contexts, this);
+  }
 
   Error deinit() override {
     std::lock_guard<std::mutex> Lock(AllocationsMutex);
@@ -256,7 +352,7 @@ struct DirectXPluginContextTy final : PluginContextTy {
   }
   Error initAsyncInfoImpl(GenericDeviceTy &,
                           AsyncInfoWrapperTy &AsyncInfo) override {
-    auto Queue = std::make_unique<DirectXQueueTy>(Device.Get());
+    auto Queue = std::make_unique<DirectXQueueTy>(Device.Get(), this);
     if (auto Err = Queue->init())
       return Err;
     __tgt_async_info *Info = AsyncInfo;
@@ -278,30 +374,14 @@ struct DirectXPluginContextTy final : PluginContextTy {
       return Plugin::error(ErrorCode::INVALID_SIZE,
                            "DirectX buffer size and alignment overflow");
 
-    D3D12_HEAP_PROPERTIES Heap{};
-    Heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-    Heap.CreationNodeMask = 1;
-    Heap.VisibleNodeMask = 1;
-    D3D12_RESOURCE_DESC Desc{};
-    Desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    Desc.Width = *Width;
-    Desc.Height = 1;
-    Desc.DepthOrArraySize = 1;
-    Desc.MipLevels = 1;
-    Desc.SampleDesc.Count = 1;
-    Desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    Desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    ComPtr<ID3D12Resource> Resource;
-    if (auto Err = check(
-            Device->CreateCommittedResource(&Heap, D3D12_HEAP_FLAG_NONE, &Desc,
-                                            D3D12_RESOURCE_STATE_COMMON,
-                                            nullptr, IID_PPV_ARGS(&Resource)),
-            "ID3D12Device::CreateCommittedResource"))
-      return std::move(Err);
+    auto Buffer = createBuffer(Device.Get(), *Width, D3D12_HEAP_TYPE_DEFAULT);
+    if (!Buffer)
+      return Buffer.takeError();
+    auto &Resource = Buffer->Resource;
 
     uint64_t Address = Resource->GetGPUVirtualAddress();
-    if (!Address || Desc.Width > std::numeric_limits<uintptr_t>::max() ||
-        Address > std::numeric_limits<uintptr_t>::max() - (Desc.Width - 1))
+    if (!Address || *Width > std::numeric_limits<uintptr_t>::max() ||
+        Address > std::numeric_limits<uintptr_t>::max() - (*Width - 1))
       return Plugin::error(ErrorCode::BACKEND_FAILURE,
                            "DirectX buffer address is not representable");
     uintptr_t AlignedAddress = alignTo(Address, Alignment);
@@ -350,7 +430,109 @@ struct DirectXPluginContextTy final : PluginContextTy {
         ErrorCode::NOT_FOUND,
         "pointer is not a known DirectX allocation in this context");
   }
+
+  Expected<DirectXBufferTy> getBuffer(const void *Ptr, size_t Size) {
+    uintptr_t Address = reinterpret_cast<uintptr_t>(Ptr);
+    std::lock_guard<std::mutex> Lock(AllocationsMutex);
+    auto Allocation = Allocations.upper_bound(Address);
+    if (Allocation == Allocations.begin() ||
+        Address - std::prev(Allocation)->first >=
+            std::prev(Allocation)->second.Size)
+      return Plugin::error(ErrorCode::NOT_FOUND,
+                           "pointer is not a live DirectX allocation");
+    --Allocation;
+    if (Size > Allocation->second.Size - (Address - Allocation->first))
+      return Plugin::error(
+          ErrorCode::INVALID_SIZE,
+          "DirectX copy exceeds the requested allocation size");
+    auto Resource = Resources.upper_bound(Address);
+    if (Resource == Resources.begin())
+      return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                           "DirectX allocation has no backing resource");
+    --Resource;
+    return directx::getBufferFromAddress(Resource->second, Address, Size);
+  }
 };
+
+Expected<DirectXBufferTy> DirectXDeviceTy::getBuffer(const void *Ptr,
+                                                     size_t Size,
+                                                     PluginContextTy *Context) {
+  if (Context)
+    return static_cast<DirectXPluginContextTy *>(Context)->getBuffer(Ptr, Size);
+  std::lock_guard<std::mutex> Lock(ContextsMutex);
+  for (auto *Candidate : Contexts) {
+    auto Buffer = Candidate->getBuffer(Ptr, Size);
+    if (Buffer)
+      return std::move(*Buffer);
+    if (auto Err =
+            error::consumeErrorIfCode(Buffer.takeError(), ErrorCode::NOT_FOUND))
+      return std::move(Err);
+  }
+  return Plugin::error(
+      ErrorCode::NOT_FOUND,
+      "pointer is not a live allocation on this DirectX device");
+}
+
+Error DirectXDeviceTy::copy(void *Dst, const void *Src, int64_t Size,
+                            AsyncInfoWrapperTy &AsyncInfo, CopyKind Kind) {
+  if (Size < 0)
+    return Plugin::error(ErrorCode::INVALID_SIZE,
+                         "DirectX copy size is not representable");
+  if (Size == 0)
+    return Error::success();
+  auto Queue = getQueue(AsyncInfo);
+  if (!Queue)
+    return Queue.takeError();
+  DirectXBufferTy Destination, Source;
+  if (Kind != CopyKind::Readback) {
+    auto Buffer = getBuffer(Dst, Size, (*Queue)->Context);
+    if (!Buffer)
+      return Buffer.takeError();
+    Destination = std::move(*Buffer);
+  }
+  if (Kind != CopyKind::Upload) {
+    auto Buffer = getBuffer(Src, Size, (*Queue)->Context);
+    if (!Buffer)
+      return Buffer.takeError();
+    Source = std::move(*Buffer);
+  }
+  if (Kind == CopyKind::Device) {
+    if (Destination.Resource.Get() == Source.Resource.Get()) {
+      auto Temporary =
+          createBuffer(Device.Get(), Size, D3D12_HEAP_TYPE_DEFAULT);
+      if (!Temporary)
+        return Temporary.takeError();
+      if (auto Err = (*Queue)->copy(*Temporary, Source, Size))
+        return Err;
+      Source = std::move(*Temporary);
+    }
+    return (*Queue)->copy(Destination, Source, Size);
+  }
+
+  bool Upload = Kind == CopyKind::Upload;
+  auto Staging =
+      createBuffer(Device.Get(), Size,
+                   Upload ? D3D12_HEAP_TYPE_UPLOAD : D3D12_HEAP_TYPE_READBACK);
+  if (!Staging)
+    return Staging.takeError();
+  if (!Upload)
+    if (auto Err = (*Queue)->copy(*Staging, Source, Size))
+      return Err;
+  void *Mapped = nullptr;
+  D3D12_RANGE ReadRange{0, Upload ? 0 : static_cast<size_t>(Size)};
+  if (auto Err = check(Staging->Resource->Map(0, &ReadRange, &Mapped),
+                       "ID3D12Resource::Map"))
+    return Err;
+  if (Upload)
+    std::memcpy(Mapped, Src, Size);
+  else
+    std::memcpy(Dst, Mapped, Size);
+  D3D12_RANGE WrittenRange{0, Upload ? static_cast<size_t>(Size) : 0};
+  Staging->Resource->Unmap(0, &WrittenRange);
+  if (Upload)
+    return (*Queue)->copy(Destination, *Staging, Size);
+  return Error::success();
+}
 
 struct DirectXGlobalHandlerTy final : GenericGlobalHandlerTy {
   Error getGlobalMetadataFromDevice(GenericDeviceTy &, DeviceImageTy &,
@@ -472,7 +654,9 @@ struct DirectXPluginTy final : GenericPluginTy {
   Expected<bool> isELFCompatible(uint32_t, StringRef) const override {
     return false;
   }
-  bool isDataExchangable(int32_t, int32_t) override { return false; }
+  bool isDataExchangable(int32_t SrcDeviceId, int32_t DstDeviceId) override {
+    return SrcDeviceId == DstDeviceId && isValidDeviceId(SrcDeviceId);
+  }
   Expected<std::unique_ptr<PluginContextTy>>
   createPluginContext(ArrayRef<GenericDeviceTy *> Devices) override {
     if (Devices.empty())
