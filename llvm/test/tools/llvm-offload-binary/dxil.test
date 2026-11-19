@@ -1,0 +1,26 @@
+## Test packaging, inspecting, and extracting DXIL images. The payload is
+## opaque: packaging does not validate the contents of the shader container.
+
+# RUN: split-file %s %t
+# RUN: llvm-offload-binary -o %t/image.bin --image=file=%t/shader.dxil,triple=dxil-pc-shadermodel6.0-compute
+# RUN: llvm-objdump --offloading %t/image.bin | FileCheck %s --check-prefix=DUMP
+# RUN: obj2yaml %t/image.bin | FileCheck %s --check-prefix=YAML
+# RUN: obj2yaml %t/image.bin | yaml2obj -o %t/roundtrip.bin
+# RUN: llvm-objdump --offloading %t/roundtrip.bin | FileCheck %s --check-prefix=DUMP
+# RUN: llvm-offload-binary %t/roundtrip.bin --image=file=%t/extracted.dxil
+# RUN: diff %t/shader.dxil %t/extracted.dxil
+# RUN: cd %t && llvm-offload-binary image.bin | FileCheck %s --check-prefix=EXTRACT
+# RUN: diff %t/shader.dxil %t/image-dxil-pc-shadermodel6.0-compute.0.dxil
+
+# DUMP:      OFFLOADING IMAGE [0]:
+# DUMP-NEXT: kind            dxil
+# DUMP-NEXT: arch
+# DUMP-NEXT: triple          dxil-pc-shadermodel6.0-compute
+# DUMP-NEXT: producer        none
+
+# YAML: ImageKind: IMG_DXIL
+
+# EXTRACT: Extracted: image-dxil-pc-shadermodel6.0-compute.0.dxil
+
+#--- shader.dxil
+DXBC opaque shader payload

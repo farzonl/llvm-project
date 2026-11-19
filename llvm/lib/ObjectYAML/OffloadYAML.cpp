@@ -26,6 +26,7 @@ void ScalarEnumerationTraits<object::ImageKind>::enumeration(
   ECase(IMG_Cubin);
   ECase(IMG_Fatbinary);
   ECase(IMG_PTX);
+  ECase(IMG_DXIL);
   ECase(IMG_LAST);
 #undef ECase
   IO.enumFallback<Hex16>(Value);

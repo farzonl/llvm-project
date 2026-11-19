@@ -39,6 +39,10 @@ Extraction handles compressed binaries automatically.
 $ llvm-offload-binary -o out.bin \
       --image=file=input.o,triple=nvptx64,arch=sm_70
 
+# Package a DirectX shader container as a DXIL image:
+$ llvm-offload-binary -o shader.bin \
+      --image=file=shader.dxil,triple=dxil-pc-shadermodel6.0-compute
+
 # Extract all offload images from an executable (no filters):
 $ llvm-offload-binary in.bin
 # Output:
@@ -185,6 +189,7 @@ The enumerated values for `image kind` and `offload kind` are:
 | IMG_Cubin     | 0x03   | The image is a CUDA object file        |
 | IMG_Fatbinary | 0x04   | The image is a CUDA fatbinary file     |
 | IMG_PTX       | 0x05   | The image is a CUDA PTX file           |
+| IMG_DXIL      | 0x08   | The image is a DirectX shader container |
 :::
 
 :::{table} Offload Kind
