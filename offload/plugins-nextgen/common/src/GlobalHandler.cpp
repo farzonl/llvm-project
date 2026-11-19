@@ -48,8 +48,9 @@ extern "C" int __llvm_write_custom_profile_default(
 
 Expected<std::unique_ptr<ObjectFile>>
 GenericGlobalHandlerTy::getELFObjectFile(DeviceImageTy &Image) {
-  assert(utils::elf::isELF(Image.getMemoryBuffer().getBuffer()) &&
-         "Input is not an ELF file");
+  if (!utils::elf::isELF(Image.getMemoryBuffer().getBuffer()))
+    return Plugin::error(ErrorCode::UNSUPPORTED,
+                         "global handler requires an ELF image");
 
   auto Expected =
       ELFObjectFileBase::createELFObjectFile(Image.getMemoryBuffer());

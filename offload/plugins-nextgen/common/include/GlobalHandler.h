@@ -148,11 +148,12 @@ class GenericGlobalHandlerTy {
 public:
   virtual ~GenericGlobalHandlerTy() {}
 
-  /// Helper function for getting an ELF from a device image.
+  /// Helper function for getting an ELF from a device image. Returns
+  /// UNSUPPORTED for non-ELF images and INVALID_BINARY for malformed ELF.
   Expected<std::unique_ptr<ObjectFile>> getELFObjectFile(DeviceImageTy &Image);
 
   /// Returns whether the symbol named \p SymName is present in the given \p
-  /// Image.
+  /// Image. Returns false for non-ELF images.
   bool isSymbolInImage(GenericDeviceTy &Device, DeviceImageTy &Image,
                        StringRef SymName);
 
@@ -215,7 +216,7 @@ public:
 
   /// Reads profiling data from a GPU image to supplied profdata struct.
   /// Iterates through the image symbol table and stores global values
-  /// with profiling prefixes.
+  /// with profiling prefixes. Returns empty profiling data for non-ELF images.
   Expected<GPUProfGlobals> readProfilingGlobals(GenericDeviceTy &Device,
                                                 DeviceImageTy &Image);
 
