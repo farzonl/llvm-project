@@ -787,14 +787,9 @@ TEST_F(DirectXProgramTest, OwnsBytecodeAndKeepsLoadingIndependent) {
     ASSERT_EQ(Size, Shader.size());
     EXPECT_EQ(llvm::StringRef(static_cast<const char *>(Base), Size), Shader);
     ol_symbol_handle_t Symbol = nullptr;
-    EXPECT_TRUE(
-        failedWith(olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Symbol),
-                   OL_ERRC_UNSUPPORTED));
-    EXPECT_TRUE(failedWith(olIterateSymbols(
-                               Program, OL_SYMBOL_KIND_KERNEL,
-                               [](ol_symbol_handle_t, void *) { return true; },
-                               nullptr),
-                           OL_ERRC_UNSUPPORTED));
+    ASSERT_TRUE(succeeded(
+        olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Symbol)));
+    EXPECT_NE(Symbol, nullptr);
     ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
   }
   for (unsigned I = 0; I < 8; ++I) {
@@ -802,8 +797,129 @@ TEST_F(DirectXProgramTest, OwnsBytecodeAndKeepsLoadingIndependent) {
     ol_program_handle_t Program = nullptr;
     ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
                                           Bytes.size(), &Program)));
+    ol_symbol_handle_t Symbol = nullptr;
+    ASSERT_TRUE(succeeded(
+        olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Symbol)));
     ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
   }
+}
+
+TEST_F(DirectXProgramTest, LooksUpAndEnumeratesOnlyTheManifestEntry) {
+  auto Bytes = package();
+  ol_program_handle_t Programs[2] = {};
+  ol_symbol_handle_t Kernels[2] = {};
+  for (unsigned I = 0; I < 2; ++I) {
+    ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
+                                          Bytes.size(), &Programs[I])));
+    ol_symbol_handle_t Missing = nullptr;
+    for (unsigned Attempt = 0; Attempt < 2; ++Attempt) {
+      EXPECT_TRUE(failedWith(
+          olGetSymbol(Programs[I], "missing", OL_SYMBOL_KIND_KERNEL, &Missing),
+          OL_ERRC_NOT_FOUND));
+      EXPECT_EQ(Missing, nullptr);
+    }
+    ASSERT_TRUE(succeeded(
+        olGetSymbol(Programs[I], "main", OL_SYMBOL_KIND_KERNEL, &Kernels[I])));
+    ol_symbol_handle_t Repeated = nullptr;
+    ASSERT_TRUE(succeeded(
+        olGetSymbol(Programs[I], "main", OL_SYMBOL_KIND_KERNEL, &Repeated)));
+    EXPECT_EQ(Repeated, Kernels[I]);
+    ol_symbol_kind_t Kind{};
+    ASSERT_TRUE(succeeded(
+        olGetSymbolInfo(Kernels[I], OL_SYMBOL_INFO_KIND, sizeof(Kind), &Kind)));
+    EXPECT_EQ(Kind, OL_SYMBOL_KIND_KERNEL);
+    size_t Size = 0;
+    ASSERT_TRUE(
+        succeeded(olGetSymbolInfoSize(Kernels[I], OL_SYMBOL_INFO_NAME, &Size)));
+    std::string Name(Size, '\0');
+    ASSERT_TRUE(succeeded(
+        olGetSymbolInfo(Kernels[I], OL_SYMBOL_INFO_NAME, Size, Name.data())));
+    EXPECT_STREQ(Name.c_str(), "main");
+    uint32_t Threads = 0, SharedBytes = 1;
+    ASSERT_TRUE(
+        succeeded(olGetSymbolInfo(Kernels[I], OL_SYMBOL_INFO_KERNEL_MAX_THREADS,
+                                  sizeof(Threads), &Threads)));
+    EXPECT_EQ(Threads, 16u);
+    ASSERT_TRUE(succeeded(
+        olGetSymbolInfo(Kernels[I], OL_SYMBOL_INFO_KERNEL_STATIC_BLOCK_MEM_SIZE,
+                        sizeof(SharedBytes), &SharedBytes)));
+    EXPECT_EQ(SharedBytes, 0u);
+
+    std::vector<ol_symbol_handle_t> Enumerated;
+    ASSERT_TRUE(succeeded(olIterateSymbols(
+        Programs[I], OL_SYMBOL_KIND_KERNEL,
+        [](ol_symbol_handle_t Symbol, void *Data) {
+          static_cast<std::vector<ol_symbol_handle_t> *>(Data)->push_back(
+              Symbol);
+          return false;
+        },
+        &Enumerated)));
+    ASSERT_EQ(Enumerated.size(), 1u);
+    EXPECT_EQ(Enumerated[0], Kernels[I]);
+    ol_symbol_handle_t Global = nullptr;
+    EXPECT_TRUE(failedWith(olGetSymbol(Programs[I], "main",
+                                       OL_SYMBOL_KIND_GLOBAL_VARIABLE, &Global),
+                           OL_ERRC_UNSUPPORTED));
+    EXPECT_TRUE(failedWith(olIterateSymbols(
+                               Programs[I], OL_SYMBOL_KIND_GLOBAL_VARIABLE,
+                               [](ol_symbol_handle_t, void *) {
+                                 ADD_FAILURE() << "globals are unsupported";
+                                 return true;
+                               },
+                               nullptr),
+                           OL_ERRC_UNSUPPORTED));
+  }
+  EXPECT_NE(Kernels[0], Kernels[1]);
+  ASSERT_TRUE(succeeded(olDestroyProgram(Programs[0])));
+  uint32_t Threads = 0;
+  ASSERT_TRUE(
+      succeeded(olGetSymbolInfo(Kernels[1], OL_SYMBOL_INFO_KERNEL_MAX_THREADS,
+                                sizeof(Threads), &Threads)));
+  EXPECT_EQ(Threads, 16u);
+  ASSERT_TRUE(succeeded(olDestroyProgram(Programs[1])));
+}
+
+TEST_F(DirectXProgramTest, EnumeratesBeforeLookupAndStillRejectsDispatch) {
+  auto Bytes = package();
+  ol_program_handle_t Program = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateProgram(Context, Device, Bytes.data(), Bytes.size(), &Program)));
+  std::vector<ol_symbol_handle_t> Enumerated;
+  auto Collect = [](ol_symbol_handle_t Symbol, void *Data) {
+    static_cast<std::vector<ol_symbol_handle_t> *>(Data)->push_back(Symbol);
+    return true;
+  };
+  ASSERT_TRUE(succeeded(
+      olIterateSymbols(Program, OL_SYMBOL_KIND_KERNEL, Collect, &Enumerated)));
+  ASSERT_EQ(Enumerated.size(), 1u);
+  ol_symbol_handle_t Kernel = nullptr;
+  ASSERT_TRUE(
+      succeeded(olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel)));
+  EXPECT_EQ(Enumerated[0], Kernel);
+  size_t GroupSize = 0;
+  EXPECT_TRUE(
+      failedWith(olCalculateOptimalOccupancy(Device, Kernel, 0, &GroupSize),
+                 OL_ERRC_UNSUPPORTED));
+  ol_kernel_launch_size_args_t Launch{};
+  Launch.Dimensions = 3;
+  Launch.NumGroups = {1, 1, 1};
+  Launch.GroupSize = {8, 2, 1};
+  uint32_t MaxGroups = 0;
+  EXPECT_TRUE(failedWith(
+      olGetKernelMaxCooperativeGroupCount(Device, Kernel, &Launch, &MaxGroups),
+      OL_ERRC_UNSUPPORTED));
+  void *Input = nullptr, *Output = nullptr;
+  void *Args[] = {&Input, &Output};
+  size_t Sizes[] = {sizeof(Input), sizeof(Output)};
+  ol_queue_handle_t Queue = nullptr;
+  ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Queue)));
+  for (auto Q : {static_cast<ol_queue_handle_t>(nullptr), Queue})
+    EXPECT_TRUE(failedWith(olLaunchKernel(Q, Device, Kernel, &Launch, nullptr,
+                                          std::size(Args), Args, Sizes),
+                           OL_ERRC_UNSUPPORTED));
+  ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+  ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
 }
 
 TEST_F(DirectXProgramTest, RejectsUnpackagedAndMismatchedImages) {
@@ -861,6 +977,10 @@ TEST_F(DirectXProgramTest, LoadsScalarShaderAccordingToNativeFeatureSupport) {
   ol_program_handle_t Program = nullptr;
   ASSERT_TRUE(succeeded(
       olCreateProgram(Context, Device, Bytes.data(), Bytes.size(), &Program)));
+  ol_symbol_handle_t Kernel = nullptr;
+  ASSERT_TRUE(
+      succeeded(olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel)));
+  EXPECT_NE(Kernel, nullptr);
   ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
 }
 

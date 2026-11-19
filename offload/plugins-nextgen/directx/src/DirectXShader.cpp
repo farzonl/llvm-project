@@ -168,6 +168,11 @@ Error checkModule(const Module &M, const DirectXManifestTy &Manifest,
   if (M.getNamedGlobal("llvm.global_ctors") ||
       M.getNamedGlobal("llvm.global_dtors"))
     return unsupported("global constructors or destructors");
+  // Static shared-memory usage is not reflected for kernel queries yet.
+  constexpr unsigned GroupSharedAddressSpace = 3;
+  for (const auto &Global : M.globals())
+    if (Global.getAddressSpace() == GroupSharedAddressSpace)
+      return unsupported("groupshared storage");
   auto Model = namedNode(M, "dx.shaderModel", 3);
   if (!Model)
     return Model.takeError();

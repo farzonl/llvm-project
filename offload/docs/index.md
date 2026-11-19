@@ -22,7 +22,7 @@ explicit buffer copies, and validated single-entry DXIL program loading/unloadin
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
 and native `ID3D12Device` handles are available. Compute-only adapters, events,
-host callbacks, host/managed allocations, kernel objects, and shader
+host callbacks, host/managed allocations, and shader
 execution are not supported yet.
 This is not an OpenMP target.
 
@@ -33,7 +33,11 @@ feature-declaration checks. Loading checks the device shader model and supported
 optional features before retaining owned bytecode and a manifest. It serializes
 the canonical root-signature 1.0 layout through the D3D12 runtime and retains a
 native root signature per program. Embedded root signatures are still rejected.
-Descriptor heaps/views, kernel lookup/enumeration, and dispatch remain unsupported.
+Kernel lookup/enumeration expose the manifest's exact entry and lazily create a
+compute pipeline, owned by its program. Missing entries return `NOT_FOUND`.
+Static shared-memory reflection is deferred, so shaders using `groupshared`
+storage are currently rejected rather than reporting incorrect kernel metadata.
+Descriptor heaps/views, argument binding, and dispatch remain unsupported.
 Programs currently require exactly one entry in an uncompressed, version-3
 OffloadBinary package; raw DXIL/bitcode and multi-entry packages are not accepted.
 

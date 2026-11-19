@@ -1542,6 +1542,7 @@ Error olIterateSymbols_impl(ol_program_handle_t Program, ol_symbol_kind_t Kind,
   Error SymbolErr = Error::success();
   Error IterateErr = Device.Plugin.getGlobalHandler().iterateSymbols(
       *Program->Image, PluginKind, [&](StringRef Name) {
+        ErrorAsOutParameter Out(SymbolErr);
         auto SymbolOrErr = getSymbolImplDetail(Program, Name, Kind);
         if (!SymbolOrErr) {
           SymbolErr = SymbolOrErr.takeError();

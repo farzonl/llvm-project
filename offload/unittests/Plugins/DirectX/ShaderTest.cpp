@@ -343,4 +343,15 @@ TEST_F(DirectXShaderTest, RejectsGlobalConstructorsAndDestructors) {
   }
 }
 
+TEST_F(DirectXShaderTest, RejectsUnreflectedGroupSharedStorage) {
+  auto Changed = rewriteProgram([](Module &M) {
+    auto *Ty = Type::getInt32Ty(M.getContext());
+    new GlobalVariable(M, Ty, false, GlobalValue::InternalLinkage,
+                       UndefValue::get(Ty), "shared", nullptr,
+                       GlobalVariable::NotThreadLocal, 3);
+  });
+  expectError(validate(Changed), error::ErrorCode::UNSUPPORTED,
+              "groupshared storage");
+}
+
 } // namespace

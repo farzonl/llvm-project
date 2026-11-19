@@ -8,9 +8,9 @@ The image kind is `IMG_DXIL`, the producer kind is `OFK_None`, and entry flags
 are zero. The DXIL payload must be nonempty.
 
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
-loading with device-capability checks and canonical native root-signature creation
-are implemented. Kernel objects and execution remain unsupported. The prototype
-ABI is experimental.
+loading with device-capability checks, canonical native root-signature creation,
+and kernel objects with compute pipelines are implemented. Argument binding and
+execution remain unsupported. The prototype ABI is experimental.
 
 ## Program loading
 
@@ -32,8 +32,9 @@ requirement is unsupported; other failed driver queries remain backend errors.
 Overdeclared features must also pass these checks.
 
 `olIsValidBinary` uses the same package, reflection, and device checks, reporting
-false for invalid or unsupported input. A true result establishes compatibility
-with this loading slice, not availability of kernel creation or dispatch.
+false for invalid or unsupported input. A true result does not guarantee that
+subsequent native root-signature or pipeline creation will succeed, nor does it
+establish dispatch support.
 
 After validation, loading serializes the canonical root layout using
 `D3D12SerializeRootSignature` from the already-loaded D3D12 runtime, then creates
@@ -48,15 +49,36 @@ Program image-base and image-size queries describe those DXIL bytes, not the
 surrounding package.
 The caller may release the input package after successful creation. Programs are
 independent even when created from identical packages.
-`olDestroyProgram` releases the image and removes it from device shutdown cleanup.
-Kernel lookup/enumeration, device globals, and execution remain explicitly
-unsupported. DXIL global constructors/destructors are rejected during validation.
+`olDestroyProgram` releases the image, its kernel/pipeline objects, and removes it
+from device shutdown cleanup. Device globals and execution remain explicitly
+unsupported. DXIL global constructors/destructors and `groupshared` storage are
+rejected during validation. Static shared-memory reflection is not implemented;
+rejecting such storage avoids reporting an incorrect zero shared-memory size.
+
+## Kernel lookup
+
+`olGetSymbol` accepts the manifest's exact entry name for kernel symbols; other
+names return `NOT_FOUND`. The first successful lookup creates an
+`ID3D12PipelineState` using the program's canonical root signature and owned DXIL.
+Native creation failures are backend errors, and a failed lookup publishes no
+kernel symbol. Repeated successful lookups return the same symbol within a
+program; different programs own independent kernels and pipelines.
+
+Kernel enumeration visits exactly that entry, creating its kernel on demand
+through the same lookup path. Global lookup/enumeration remain `UNSUPPORTED`.
+Kernel names, kinds, and metadata queries are available. Maximum threads is the
+product of the compiled `numthreads` dimensions, not permission to reshape the
+fixed thread group; static shared memory is zero in the currently supported
+subset. Occupancy calculations, cooperative launch queries, argument binding,
+and dispatch remain `UNSUPPORTED`, including dispatch with an explicit queue.
+Kernel symbols are borrowed from their program and must not be used after its
+destruction.
 
 ## Shader validation
 
 The internal `DirectXManifestTy::validateShader` helper validates a decoded
 manifest against a DXBC container using LLVM's container and bitcode readers.
-There is no DXC library dependency or runtime compilation. Validation checks:
+There is no DXC compiler/reflection library dependency. Validation checks:
 
 - Container, part, and embedded bitcode bounds; executable compute DXIL, rather
   than a debug-only image or shader library.

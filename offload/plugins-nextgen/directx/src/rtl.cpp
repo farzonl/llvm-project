@@ -109,10 +109,13 @@ Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
   return DirectXProgramDataTy{std::move(*Manifest), std::move(Shader)};
 }
 
+struct DirectXKernelTy;
+
 struct DirectXImageTy final : DeviceImageTy {
   DirectXManifestTy Manifest;
   ComPtr<ID3D12Device> NativeDevice;
   ComPtr<ID3D12RootSignature> RootSignature;
+  SmallVector<DirectXKernelTy *> Kernels;
 
   DirectXImageTy(int32_t Id, GenericDeviceTy &Device, DirectXProgramDataTy Data,
                  ID3D12Device *NativeDevice,
@@ -120,7 +123,56 @@ struct DirectXImageTy final : DeviceImageTy {
       : DeviceImageTy(Id, Device, std::move(Data.Shader)),
         Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice),
         RootSignature(std::move(RootSignature)) {}
+
+  ~DirectXImageTy() override;
 };
+
+struct DirectXKernelTy final : GenericKernelTy {
+  ComPtr<ID3D12PipelineState> Pipeline;
+  uint32_t NumThreads = 0;
+
+  DirectXKernelTy(StringRef Name) : GenericKernelTy(Name) {}
+
+  Error initImpl(GenericDeviceTy &, DeviceImageTy &Image) override {
+    auto &DXImage = static_cast<DirectXImageTy &>(Image);
+    if (DXImage.Manifest.Entry != getName())
+      return Plugin::error(ErrorCode::NOT_FOUND,
+                           "DirectX kernel '%s' is not the program entry point",
+                           getName());
+    D3D12_COMPUTE_PIPELINE_STATE_DESC Desc{};
+    Desc.pRootSignature = DXImage.RootSignature.Get();
+    Desc.CS = {DXImage.getStart(), DXImage.getSize()};
+    if (auto Err = check(DXImage.NativeDevice->CreateComputePipelineState(
+                             &Desc, IID_PPV_ARGS(&Pipeline)),
+                         "ID3D12Device::CreateComputePipelineState"))
+      return Err;
+    if (!Pipeline)
+      return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                           "DirectX device returned no compute pipeline");
+    const auto &Threads = DXImage.Manifest.NumThreads;
+    NumThreads = Threads[0] * Threads[1] * Threads[2];
+    DXImage.Kernels.push_back(this);
+    return Error::success();
+  }
+
+  Error launchImpl(GenericDeviceTy &, uint32_t[3], uint32_t[3], uint32_t,
+                   KernelLaunchArgsTy &, AsyncInfoWrapperTy &,
+                   GenericProfilerTy *) const override {
+    return unsupported("kernel dispatch");
+  }
+
+  Expected<uint64_t> maxGroupSize(GenericDeviceTy &, uint64_t) const override {
+    return unsupported("occupancy calculations");
+  }
+
+  uint32_t getMaxThreads() const override { return NumThreads; }
+};
+
+DirectXImageTy::~DirectXImageTy() {
+  // liboffload owns symbol wrappers, but not their backend kernel objects.
+  for (auto *Kernel : Kernels)
+    getDevice().Plugin.free(Kernel);
+}
 
 Expected<DirectXBufferTy> createBuffer(ID3D12Device *Device, uint64_t Size,
                                        D3D12_HEAP_TYPE Type) {
@@ -287,8 +339,12 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     delete static_cast<DirectXImageTy *>(Image);
     return Error::success();
   }
-  Expected<GenericKernelTy &> constructKernel(StringRef) override {
-    return unsupported("kernels");
+  Expected<GenericKernelTy &> constructKernel(StringRef Name) override {
+    auto *Kernel = Plugin.allocate<DirectXKernelTy>();
+    if (!Kernel)
+      return Plugin::error(ErrorCode::OUT_OF_RESOURCES,
+                           "failed to allocate DirectX kernel");
+    return *new (Kernel) DirectXKernelTy(Name);
   }
   Expected<void *> allocate(size_t, ol_alloc_type_t, size_t) override {
     return unsupported("memory allocation");
@@ -637,9 +693,12 @@ struct DirectXGlobalHandlerTy final : GenericGlobalHandlerTy {
                                     GlobalTy &) override {
     return unsupported("device globals");
   }
-  Error iterateSymbols(DeviceImageTy &, SymbolKindTy,
-                       function_ref<bool(StringRef)>) override {
-    return unsupported("symbol enumeration");
+  Error iterateSymbols(DeviceImageTy &Image, SymbolKindTy Kind,
+                       function_ref<bool(StringRef)> Callback) override {
+    if (Kind != SymbolKindTy::Kernel)
+      return unsupported("global symbol enumeration");
+    Callback(static_cast<DirectXImageTy &>(Image).Manifest.Entry);
+    return Error::success();
   }
 };
 
