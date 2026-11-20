@@ -68,6 +68,7 @@ Error unsupported(const char *Operation) {
 struct DirectXProgramDataTy {
   DirectXManifestTy Manifest;
   std::unique_ptr<MemoryBuffer> Shader;
+  uint32_t StaticSharedMemory = 0;
 };
 
 Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
@@ -124,15 +125,19 @@ Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
   if (!Manifest)
     return Manifest.takeError();
   auto Shader = MemoryBuffer::getMemBufferCopy(Binary.getImage());
-  if (auto Err = Manifest->validateShader(Shader->getMemBufferRef()))
+  uint32_t StaticSharedMemory = 0;
+  if (auto Err = Manifest->validateShader(Shader->getMemBufferRef(),
+                                          &StaticSharedMemory))
     return std::move(Err);
-  return DirectXProgramDataTy{std::move(*Manifest), std::move(Shader)};
+  return DirectXProgramDataTy{std::move(*Manifest), std::move(Shader),
+                              StaticSharedMemory};
 }
 
 struct DirectXKernelTy;
 
 struct DirectXImageTy final : DeviceImageTy {
   DirectXManifestTy Manifest;
+  uint32_t StaticSharedMemory;
   ComPtr<ID3D12Device> NativeDevice;
   ComPtr<ID3D12RootSignature> RootSignature;
   PluginContextTy *Context;
@@ -143,7 +148,8 @@ struct DirectXImageTy final : DeviceImageTy {
                  ComPtr<ID3D12RootSignature> RootSignature,
                  PluginContextTy *Context)
       : DeviceImageTy(Id, Device, std::move(Data.Shader)),
-        Manifest(std::move(Data.Manifest)), NativeDevice(NativeDevice),
+        Manifest(std::move(Data.Manifest)),
+        StaticSharedMemory(Data.StaticSharedMemory), NativeDevice(NativeDevice),
         RootSignature(std::move(RootSignature)), Context(Context) {}
 
   ~DirectXImageTy() override;
@@ -174,6 +180,7 @@ struct DirectXKernelTy final : GenericKernelTy {
                            "DirectX device returned no compute pipeline");
     const auto &Threads = DXImage.Manifest.NumThreads;
     NumThreads = Threads[0] * Threads[1] * Threads[2];
+    StaticBlockMemSize = DXImage.StaticSharedMemory;
     Program = &DXImage;
     DXImage.Kernels.push_back(this);
     return Error::success();
@@ -311,6 +318,8 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
 
   Error initImpl(GenericPluginTy &, GenericProfilerTy *) override {
+    MaxBlockSharedMemSize =
+        uint64_t{D3D12_CS_TGSM_REGISTER_COUNT} * sizeof(uint32_t);
     return Error::success();
   }
   Error deinitImpl() override {

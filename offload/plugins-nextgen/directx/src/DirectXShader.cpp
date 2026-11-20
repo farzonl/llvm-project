@@ -13,6 +13,7 @@
 #include "llvm/BinaryFormat/DXContainer.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
@@ -129,17 +130,58 @@ Expected<StringRef> checkContainer(StringRef Bytes) {
 }
 
 Expected<std::unique_ptr<Module>> readModule(StringRef Bitcode,
-                                             LLVMContext &Context) {
+                                             LLVMContext &Context,
+                                             std::string *Layout = nullptr) {
   ParserCallbacks Callbacks;
   // Legacy DXIL uses alignments rejected by modern LLVM. Reflection uses
   // explicit HLSL field offsets and widths, never LLVM's replacement layout.
-  Callbacks.DataLayout =
-      [](StringRef, StringRef) -> std::optional<std::string> { return "e"; };
+  Callbacks.DataLayout = [Layout](StringRef,
+                                  StringRef DL) -> std::optional<std::string> {
+    if (Layout)
+      *Layout = DL.str();
+    return "e";
+  };
   auto M = parseBitcodeFile(MemoryBufferRef(Bitcode, "DirectX shader"), Context,
                             Callbacks);
   if (!M)
     return invalid("cannot read bitcode: " + toString(M.takeError()));
   return std::move(*M);
+}
+
+Expected<uint32_t> staticSharedMemory(const Module &M, StringRef Layout) {
+  // Old DXIL layouts over-align i8, which modern LLVM rejects. Shared storage
+  // below accepts only numeric scalars of at least 16 bits (and i1).
+  std::string CompatibleLayout = Layout.str();
+  size_t I8 = CompatibleLayout.find("i8:32");
+  if (I8 != std::string::npos)
+    CompatibleLayout.replace(I8, 5, "i8:8");
+  auto DL = DataLayout::parse(CompatibleLayout);
+  if (!DL)
+    return invalid("invalid DXIL data layout: " + toString(DL.takeError()));
+  constexpr uint64_t MaxBytes = 32768;
+  uint64_t Total = 0;
+  for (const GlobalVariable &Global : M.globals()) {
+    if (Global.getAddressSpace() != 3)
+      continue;
+    Type *Ty = Global.getValueType();
+    uint64_t Count = 1;
+    while (auto *Array = dyn_cast<ArrayType>(Ty)) {
+      uint64_t Elements = Array->getNumElements();
+      if (!Elements || Elements > MaxBytes / Count)
+        return invalid("groupshared storage exceeds 32768 bytes");
+      Count *= Elements;
+      Ty = Array->getElementType();
+    }
+    if (!Ty->isIntegerTy(1) && !Ty->isIntegerTy(16) && !Ty->isIntegerTy(32) &&
+        !Ty->isIntegerTy(64) && !Ty->isHalfTy() && !Ty->isFloatTy() &&
+        !Ty->isDoubleTy())
+      return unsupported("groupshared storage type");
+    uint64_t Size = DL->getTypeAllocSize(Ty).getFixedValue();
+    if (Count > (MaxBytes - Total) / Size)
+      return invalid("groupshared storage exceeds 32768 bytes");
+    Total += Count * Size;
+  }
+  return static_cast<uint32_t>(Total);
 }
 
 constexpr uint64_t moduleBit(int Bit) {
@@ -168,11 +210,6 @@ Error checkModule(const Module &M, const DirectXManifestTy &Manifest,
   if (M.getNamedGlobal("llvm.global_ctors") ||
       M.getNamedGlobal("llvm.global_dtors"))
     return unsupported("global constructors or destructors");
-  // Static shared-memory usage is not reflected for kernel queries yet.
-  constexpr unsigned GroupSharedAddressSpace = 3;
-  for (const auto &Global : M.globals())
-    if (Global.getAddressSpace() == GroupSharedAddressSpace)
-      return unsupported("groupshared storage");
   auto Model = namedNode(M, "dx.shaderModel", 3);
   if (!Model)
     return Model.takeError();
@@ -418,7 +455,8 @@ Error checkConstants(const Module &M, StringRef ConstantName,
 
 } // namespace
 
-Error DirectXManifestTy::validateShader(MemoryBufferRef Shader) const {
+Error DirectXManifestTy::validateShader(MemoryBufferRef Shader,
+                                        uint32_t *StaticSharedMemory) const {
   auto Reflection = checkContainer(Shader.getBuffer());
   if (!Reflection)
     return Reflection.takeError();
@@ -441,16 +479,24 @@ Error DirectXManifestTy::validateShader(MemoryBufferRef Shader) const {
     return invalid("manifest understates shader feature requirements");
 
   LLVMContext Context;
-  auto M = readModule(StringRef(Program->second, Header.Bitcode.Size), Context);
+  std::string Layout;
+  auto M = readModule(StringRef(Program->second, Header.Bitcode.Size), Context,
+                      &Layout);
   if (!M)
     return M.takeError();
   if (auto Err = checkModule(**M, *this, *Features, false))
     return Err;
+  auto SharedBytes = staticSharedMemory(**M, Layout);
+  if (!SharedBytes)
+    return SharedBytes.takeError();
   auto Constant = checkResources(**M, *this);
   if (!Constant)
     return Constant.takeError();
-  if (!Constants)
+  if (!Constants) {
+    if (StaticSharedMemory)
+      *StaticSharedMemory = *SharedBytes;
     return Error::success();
+  }
   if (Reflection->empty())
     return unsupported("scalar arguments require a STAT reflection part");
   LLVMContext ReflectionContext;
@@ -462,7 +508,11 @@ Error DirectXManifestTy::validateShader(MemoryBufferRef Shader) const {
   auto Name = checkResources(**RM, *this);
   if (!Name)
     return Name.takeError();
-  return checkConstants(**RM, *Name, *this);
+  if (auto Err = checkConstants(**RM, *Name, *this))
+    return Err;
+  if (StaticSharedMemory)
+    *StaticSharedMemory = *SharedBytes;
+  return Error::success();
 }
 
 } // namespace llvm::omp::target::plugin::directx

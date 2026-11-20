@@ -1615,6 +1615,65 @@ protected:
   }
 };
 
+TEST_F(DirectXProgramTest, ExecutesGroupSharedMemoryAndBarriers) {
+  auto Buffer = llvm::MemoryBuffer::getFile(
+      DIRECTX_TEST_INPUTS_DIR "/groupshared.dxil", false);
+  ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+  Shader = (*Buffer)->getBuffer().str();
+  auto Object = manifest();
+  Object["numthreads"] = llvm::json::Array{128, 1, 1};
+  auto Bytes = package(std::move(Object));
+  ol_program_handle_t Program = nullptr;
+  ASSERT_TRUE(succeeded(
+      olCreateProgram(Context, Device, Bytes.data(), Bytes.size(), &Program)));
+  ol_symbol_handle_t Kernel = nullptr;
+  ASSERT_TRUE(
+      succeeded(olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel)));
+  uint32_t SharedBytes = 0;
+  ASSERT_TRUE(succeeded(
+      olGetSymbolInfo(Kernel, OL_SYMBOL_INFO_KERNEL_STATIC_BLOCK_MEM_SIZE,
+                      sizeof(SharedBytes), &SharedBytes)));
+  EXPECT_EQ(SharedBytes, 512u);
+
+  constexpr unsigned Groups = 32, Threads = 128, Elements = Groups * Threads;
+  std::array<uint32_t, Elements> Source{}, Actual{};
+  for (unsigned I = 0; I < Elements; ++I)
+    Source[I] = I * 37 + 11;
+  void *Input = nullptr, *Output = nullptr;
+  for (auto *Pointer : {&Input, &Output})
+    ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                     sizeof(Source), Pointer)));
+  ol_queue_handle_t Queue = nullptr;
+  ASSERT_TRUE(succeeded(olCreateQueue(Context, Device, &Queue)));
+  ol_kernel_launch_size_args_t Launch{};
+  Launch.Dimensions = 3;
+  Launch.NumGroups = {Groups, 1, 1};
+  Launch.GroupSize = {Threads, 1, 1};
+  void *Args[] = {&Input, &Output};
+  size_t Sizes[] = {sizeof(Input), sizeof(Output)};
+  for (auto Q : {static_cast<ol_queue_handle_t>(nullptr), Queue}) {
+    ASSERT_TRUE(succeeded(
+        olMemcpy(Q, Input, Device, Source.data(), nullptr, sizeof(Source))));
+    ASSERT_TRUE(succeeded(olLaunchKernel(Q, Device, Kernel, &Launch, nullptr,
+                                         std::size(Args), Args, Sizes)));
+    ASSERT_TRUE(succeeded(
+        olMemcpy(Q, Actual.data(), nullptr, Output, Device, sizeof(Actual))));
+    if (Q)
+      ASSERT_TRUE(succeeded(olSyncQueue(Q)));
+    for (unsigned G = 0; G < Groups; ++G) {
+      uint32_t Sum = 0;
+      for (unsigned I = 0; I < Threads; ++I)
+        Sum += Source[G * Threads + I];
+      for (unsigned I = 0; I < Threads; ++I)
+        EXPECT_EQ(Actual[G * Threads + I], Sum + Threads - 1 - I);
+    }
+  }
+  ASSERT_TRUE(succeeded(olDestroyQueue(Queue)));
+  ASSERT_TRUE(succeeded(olMemFree(Context, Input)));
+  ASSERT_TRUE(succeeded(olMemFree(Context, Output)));
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+}
+
 TEST_F(DirectXProgramTest, OwnsBytecodeAndKeepsLoadingIndependent) {
   auto Bytes = package();
   std::string Unaligned = "x" + Bytes;
@@ -1966,7 +2025,7 @@ TEST_F(DirectXDispatchTest, RejectsInvalidGeometryArgumentsAndAliasing) {
   EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
   Launch.NumGroups.x = 1;
   Launch.DynSharedMemory = 4;
-  EXPECT_TRUE(failedWith(Call(), OL_ERRC_INVALID_ARGUMENT));
+  EXPECT_TRUE(failedWith(Call(), OL_ERRC_UNSUPPORTED));
   Launch.DynSharedMemory = 0;
   if (sizeof(size_t) > sizeof(uint32_t)) {
     Launch.DynSharedMemory = uint64_t{1} << 32;

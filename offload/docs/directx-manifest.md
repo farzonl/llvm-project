@@ -51,9 +51,18 @@ The caller may release the input package after successful creation. Programs are
 independent even when created from identical packages.
 `olDestroyProgram` releases the image, its kernel/pipeline objects, and removes it
 from device shutdown cleanup. Device globals remain explicitly unsupported.
-DXIL global constructors/destructors and `groupshared` storage are
-rejected during validation. Static shared-memory reflection is not implemented;
-rejecting such storage avoids reporting an incorrect zero shared-memory size.
+DXIL global constructors/destructors remain rejected during validation.
+Static `groupshared` storage supports numeric scalars (`i1`, 16/32/64-bit integers,
+half, float, and double) and nested arrays of those scalars, as emitted by the
+supported compiler lowering. Other shared-storage types are explicitly
+unsupported. Storage is summed over executable DXIL address-space-3 globals
+using the original DXIL scalar allocation sizes, not the replacement layout used
+for bitcode decoding or the optional `STAT` module. Both Clang's external
+shared-storage declarations and DXC's internal definitions are reflected.
+Zero-length arrays and totals above the D3D12 32 KiB group limit are rejected
+before loading. Shared storage is allocated by the shader pipeline; no launch
+argument or root binding is needed. Group synchronization and shared-memory
+barriers execute as compiled DXIL instructions.
 
 ## Kernel lookup
 
@@ -68,8 +77,8 @@ Kernel enumeration visits exactly that entry, creating its kernel on demand
 through the same lookup path. Global lookup/enumeration remain `UNSUPPORTED`.
 Kernel names, kinds, and metadata queries are available. Maximum threads is the
 product of the compiled `numthreads` dimensions, not permission to reshape the
-fixed thread group; static shared memory is zero in the currently supported
-subset. Occupancy calculations and cooperative launch queries remain
+fixed thread group. Static shared-memory queries report the reflected byte count,
+including zero for shaders without shared storage. Occupancy calculations and cooperative launch queries remain
 `UNSUPPORTED`.
 Kernel symbols are borrowed from their program and must not be used after its
 destruction.
@@ -239,6 +248,9 @@ an inability to compile scalar HLSL with Clang. Fixture-generation commands are
 documented in their HLSL source; no compiler or DXC library is needed at runtime.
 Legacy DXIL's data layout is overridden only for LLVM bitcode decoding; HLSL
 offsets come from reflection, not LLVM's replacement layout.
+Shared-memory reflection preserves the original scalar layout, including legacy
+16-bit scalar padding. Legacy i8 over-alignment is normalized only to allow
+modern LLVM to parse that layout; i8 shared-storage types remain unsupported.
 
 Embedded root signatures and additional entry/resource properties are
 conservatively rejected until their compatibility checks are implemented. The

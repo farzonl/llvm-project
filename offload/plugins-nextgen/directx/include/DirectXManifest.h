@@ -70,7 +70,9 @@ struct DirectXManifestTy {
   static Expected<DirectXManifestTy> parse(StringRef JSON);
   static Expected<DirectXManifestTy> parse(const object::OffloadBinary &Image);
 
-  Error validateShader(MemoryBufferRef Shader) const;
+  // Publish reflected storage only after the entire shader passes validation.
+  Error validateShader(MemoryBufferRef Shader,
+                       uint32_t *StaticSharedMemory = nullptr) const;
 };
 
 } // namespace llvm::omp::target::plugin::directx

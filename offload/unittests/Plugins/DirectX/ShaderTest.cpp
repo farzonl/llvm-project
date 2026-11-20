@@ -348,15 +348,55 @@ TEST_F(DirectXShaderTest, RejectsGlobalConstructorsAndDestructors) {
   }
 }
 
-TEST_F(DirectXShaderTest, RejectsUnreflectedGroupSharedStorage) {
+TEST_F(DirectXShaderTest, ReflectsStaticGroupSharedStorage) {
   auto Changed = rewriteProgram([](Module &M) {
-    auto *Ty = Type::getInt32Ty(M.getContext());
-    new GlobalVariable(M, Ty, false, GlobalValue::InternalLinkage,
-                       UndefValue::get(Ty), "shared", nullptr,
-                       GlobalVariable::NotThreadLocal, 3);
+    for (auto *Ty : {ArrayType::get(Type::getInt32Ty(M.getContext()), 16),
+                     ArrayType::get(Type::getDoubleTy(M.getContext()), 3)}) {
+      new GlobalVariable(M, Ty, false, GlobalValue::InternalLinkage,
+                         PoisonValue::get(Ty), "shared", nullptr,
+                         GlobalVariable::NotThreadLocal, 3);
+    }
   });
-  expectError(validate(Changed), error::ErrorCode::UNSUPPORTED,
-              "groupshared storage");
+  uint32_t Bytes = 0;
+  auto Err =
+      Manifest.validateShader(MemoryBufferRef(Changed, "shared"), &Bytes);
+  EXPECT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
+  EXPECT_EQ(Bytes, 88u);
+}
+
+TEST_F(DirectXShaderTest, BoundsStaticGroupSharedStorage) {
+  for (uint64_t Count : {8192ull, 8193ull, uint64_t{1} << 62}) {
+    auto Changed = rewriteProgram([Count](Module &M) {
+      auto *Ty = ArrayType::get(Type::getInt32Ty(M.getContext()), Count);
+      new GlobalVariable(M, Ty, false, GlobalValue::InternalLinkage,
+                         PoisonValue::get(Ty), "shared", nullptr,
+                         GlobalVariable::NotThreadLocal, 3);
+    });
+    uint32_t Bytes = 123;
+    auto Err =
+        Manifest.validateShader(MemoryBufferRef(Changed, "shared"), &Bytes);
+    if (Count == 8192) {
+      EXPECT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
+      EXPECT_EQ(Bytes, 32768u);
+    } else {
+      expectError(std::move(Err), error::ErrorCode::INVALID_BINARY, "32768");
+      EXPECT_EQ(Bytes, 123u);
+    }
+  }
+}
+
+TEST_F(DirectXShaderTest, ReflectsExternalGroupSharedStorageWithDXILLayout) {
+  auto Changed = rewriteProgram([](Module &M) {
+    M.setDataLayout("e-f16:32");
+    new GlobalVariable(M, ArrayType::get(Type::getHalfTy(M.getContext()), 3),
+                       false, GlobalValue::ExternalLinkage, nullptr, "shared",
+                       nullptr, GlobalVariable::NotThreadLocal, 3);
+  });
+  uint32_t Bytes = 0;
+  auto Err =
+      Manifest.validateShader(MemoryBufferRef(Changed, "shared"), &Bytes);
+  EXPECT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
+  EXPECT_EQ(Bytes, 12u);
 }
 
 } // namespace
