@@ -11,6 +11,7 @@
 
 offload-api
 directx-manifest
+directx-demo
 :::
 
 # Experimental DirectX plugin
@@ -36,8 +37,9 @@ the canonical root-signature 1.0 layout through the D3D12 runtime and retains a
 native root signature per program. Embedded root signatures are still rejected.
 Kernel lookup/enumeration expose the manifest's exact entry and lazily create a
 compute pipeline, owned by its program. Missing entries return `NOT_FOUND`.
-Static shared-memory reflection is deferred, so shaders using `groupshared`
-storage are currently rejected rather than reporting incorrect kernel metadata.
+Static `groupshared` scalar/array storage is reflected from executable DXIL,
+bounded to 32 KiB per group, and reported in kernel metadata. Group barriers
+execute as compiled shader instructions.
 Internal helpers prepare bounded raw-buffer descriptors, pack scalar constants,
 and record canonical root bindings, retaining the native resources and a
 shader-visible descriptor heap. They enforce 16-byte raw-view alignment and
@@ -85,8 +87,8 @@ Both use native command lists and `CopyBufferRegion`, with default-heap buffers
 returned to `COMMON` state after each copy. Same-device buffer copies are also
 supported, including copies between regions of one buffer through a temporary
 resource. Host-to-host copies on a queue wait for preceding queue work.
-Copies currently block until completion even when a queue is supplied; events
-and asynchronous staging-buffer retirement remain deferred.
+Null-queue copies block until completion. Explicit-queue copies are asynchronous;
+their staging buffers are retained until execution and host readbacks complete.
 
 Copy ranges are checked against live, requested allocation sizes, excluding pool
 capacity and alignment padding. Resource offsets include both the requested byte
@@ -134,8 +136,8 @@ Memory capacity describes shared system memory for integrated adapters and
 dedicated memory for discrete adapters, falling back to shared memory when no
 dedicated memory exists. It is not a guarantee that an allocation of that size
 will succeed.
-Shared-memory limits describe hardware, not support for `groupshared` in the
-experimental launch ABI. Unknown compute-unit counts, hardware clock rates,
+Static shared-memory usage is supported in the experimental launch ABI; dynamic
+shared memory remains unsupported. Unknown compute-unit counts, hardware clock rates,
 floating-point mode flags, variable wave widths, and the unrepresentable
 32-bit aggregate work-item limit remain explicitly unsupported rather than
 being guessed. The full generic device-information suite is therefore not yet
