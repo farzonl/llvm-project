@@ -365,7 +365,7 @@ TEST_F(DirectXShaderTest, ReflectsStaticGroupSharedStorage) {
 }
 
 TEST_F(DirectXShaderTest, BoundsStaticGroupSharedStorage) {
-  for (uint64_t Count : {8192ull, 8193ull, uint64_t{1} << 62}) {
+  for (uint64_t Count : {uint64_t{8192}, uint64_t{8193}, uint64_t{1} << 62}) {
     auto Changed = rewriteProgram([Count](Module &M) {
       auto *Ty = ArrayType::get(Type::getInt32Ty(M.getContext()), Count);
       new GlobalVariable(M, Ty, false, GlobalValue::InternalLinkage,
