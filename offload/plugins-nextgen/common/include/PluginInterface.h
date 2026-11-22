@@ -365,6 +365,8 @@ struct KernelLaunchArgsTy {
   uint32_t UserNumBlocks[3] = {0, 0, 0};
   /// User-requested number of threads (for x,y,z dimension).
   uint32_t UserThreadLimit[3] = {0, 0, 0};
+  /// Global work-item offsets in native x,y,z order.
+  uint64_t GlobalOffset[3] = {0, 0, 0};
   struct {
     uint64_t Cooperative : 1; // Was this kernel spawned as cooperative.
     uint64_t Unused : 63;
@@ -397,6 +399,7 @@ struct GenericKernelTy {
                            KernelLaunchArgsTy &LaunchArgs,
                            AsyncInfoWrapperTy &AsyncInfoWrapper,
                            GenericProfilerTy *ProfilerPtr = nullptr) const = 0;
+  virtual bool supportsGlobalOffset() const { return false; }
 
   virtual Expected<uint64_t> maxGroupSize(GenericDeviceTy &GenericDevice,
                                           uint64_t DynamicMemSize) const = 0;

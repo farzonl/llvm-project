@@ -25,14 +25,22 @@ Value *CodeGenFunction::EmitDirectXBuiltinExpr(unsigned BuiltinID,
   switch (BuiltinID) {
   case DirectX::BI__builtin_dx_thread_id:
   case DirectX::BI__builtin_dx_group_id:
+  case DirectX::BI__builtin_dx_num_groups:
+  case DirectX::BI__builtin_dx_global_offset:
   case DirectX::BI__builtin_dx_group_size: {
     Intrinsic::ID ID = Intrinsic::dx_thread_id_in_group;
     if (BuiltinID == DirectX::BI__builtin_dx_group_id)
       ID = Intrinsic::dx_group_id;
     else if (BuiltinID == DirectX::BI__builtin_dx_group_size)
       ID = Intrinsic::dx_thread_group_size;
-    return Builder.CreateIntrinsic(Builder.getInt32Ty(), ID,
-                                   {EmitScalarExpr(E->getArg(0))});
+    else if (BuiltinID == DirectX::BI__builtin_dx_num_groups)
+      ID = Intrinsic::dx_num_groups;
+    else if (BuiltinID == DirectX::BI__builtin_dx_global_offset)
+      ID = Intrinsic::dx_global_offset;
+    return Builder.CreateIntrinsic(ID == Intrinsic::dx_global_offset
+                                       ? Builder.getInt64Ty()
+                                       : Builder.getInt32Ty(),
+                                   ID, {EmitScalarExpr(E->getArg(0))});
   }
   case DirectX::BI__builtin_dx_sync_threads:
     return EmitIntrinsicCall(

@@ -196,6 +196,7 @@ struct DirectXKernelTy final : GenericKernelTy {
   }
 
   uint32_t getMaxThreads() const override { return NumThreads; }
+  bool supportsGlobalOffset() const override { return true; }
 };
 
 DirectXImageTy::~DirectXImageTy() {
@@ -1006,6 +1007,10 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
           }))
     return Err;
 
+  if (auto Err = Bindings->setDispatchGeometry(Program->Manifest,
+                                               ArrayRef(NumBlocks, 3),
+                                               ArrayRef(Args.GlobalOffset, 3)))
+    return Err;
   std::map<ID3D12Resource *, D3D12_RESOURCE_STATES> States;
   for (const auto &Buffer : Bindings->Buffers) {
     auto State =

@@ -95,6 +95,12 @@ Error GenericKernelTy::launch(GenericDeviceTy &GenericDevice,
                               AsyncInfoWrapperTy &AsyncInfoWrapper,
                               GenericProfilerTy *ProfilerPtr) const {
   GenericProfilerTy &Profiler = ProfilerPtr ? *ProfilerPtr : getNoOpProfiler();
+  if (!supportsGlobalOffset() &&
+      llvm::any_of(LaunchArgs.GlobalOffset,
+                   [](uint64_t Offset) { return Offset != 0; }))
+    return error::createOffloadError(
+        error::ErrorCode::UNSUPPORTED,
+        "kernel backend does not support global offsets");
 
   {
     std::string StackTrace;

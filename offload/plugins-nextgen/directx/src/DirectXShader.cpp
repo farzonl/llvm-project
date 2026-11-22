@@ -419,6 +419,9 @@ Error checkConstants(const Module &M, StringRef ConstantName,
   for (const auto &Arg : Manifest.Arguments)
     if (auto *Scalar = std::get_if<DirectXScalarBindingTy>(&Arg.Binding))
       Remaining.emplace(Scalar->Size, Scalar->Offset);
+  if (Manifest.DispatchOffset)
+    for (unsigned I = 0; I < offloading::directx::DispatchWords; ++I)
+      Remaining.emplace(4, *Manifest.DispatchOffset + I * 4);
   for (unsigned I = 0; I < Type->getNumElements(); ++I) {
     auto *Field = dyn_cast_or_null<MDNode>(Layout->getOperand(I + 1));
     if (!Field || Field->getNumOperands() % 2)

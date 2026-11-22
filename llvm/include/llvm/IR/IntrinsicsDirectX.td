@@ -29,6 +29,15 @@ let TargetPrefix = "dx" in {
       : Intrinsic<[llvm_i32_ty], [llvm_i32_ty],
                   [IntrNoMem, IntrWillReturn, ImmArg<ArgIndex<0>>]>;
 
+  // Runtime NDRange geometry, lowered by the resource-backed kernel ABI.
+  def int_dx_num_groups
+      : Intrinsic<[llvm_i32_ty], [llvm_i32_ty],
+                  [IntrNoMem, IntrWillReturn, ImmArg<ArgIndex<0>>]>;
+
+  def int_dx_global_offset
+      : Intrinsic<[llvm_i64_ty], [llvm_i32_ty],
+                  [IntrNoMem, IntrWillReturn, ImmArg<ArgIndex<0>>]>;
+
   def int_dx_flattened_thread_id_in_group
       : Intrinsic<[llvm_i32_ty], [], [IntrNoMem, IntrWillReturn]>;
 

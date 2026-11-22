@@ -121,7 +121,8 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
                                      *ABI);
   if (auto Err = checkKeys(*Object,
                            {"version", "entry", "shader_model", "numthreads",
-                            "features", "constants", "arguments", "capture"},
+                            "features", "constants", "arguments", "capture",
+                            "dispatch"},
                            "root"))
     return std::move(Err);
 
@@ -173,6 +174,27 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
     Manifest.Constants = Binding;
   }
 
+  if (const auto *Value = Object->get("dispatch")) {
+    const auto *Block = Value->getAsObject();
+    if (!Block)
+      return invalid("dispatch must be an object");
+    if (auto Err = checkKeys(*Block, {"version", "offset"}, "dispatch"))
+      return std::move(Err);
+    auto Version = readU32(Block->get("version"), "dispatch.version");
+    if (!Version)
+      return Version.takeError();
+    if (*Version != offloading::directx::DispatchVersion)
+      return error::createOffloadError(error::ErrorCode::UNSUPPORTED,
+                                       "unsupported DirectX dispatch version");
+    auto Offset = readU32(Block->get("offset"), "dispatch.offset");
+    if (!Offset)
+      return Offset.takeError();
+    if (*Offset % 4 || !Manifest.Constants ||
+        *Offset > Manifest.Constants->Size ||
+        offloading::directx::DispatchBytes > Manifest.Constants->Size - *Offset)
+      return invalid("dispatch block is outside the root constant block");
+    Manifest.DispatchOffset = *Offset;
+  }
   const auto *Arguments = Object->getArray("arguments");
   if (!Arguments)
     return invalid("arguments must be an array");
@@ -182,6 +204,10 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
   std::set<std::tuple<DirectXBufferBindingTy::Kind, uint32_t, uint32_t>>
       Bindings;
   SmallVector<std::pair<uint32_t, uint32_t>> ScalarRanges;
+  if (Manifest.DispatchOffset)
+    ScalarRanges.emplace_back(*Manifest.DispatchOffset,
+                              *Manifest.DispatchOffset +
+                                  offloading::directx::DispatchBytes);
   uint32_t BufferCount = 0;
   for (size_t I = 0; I < Arguments->size(); ++I) {
     std::string Where = ("arguments[" + Twine(I) + "]").str();

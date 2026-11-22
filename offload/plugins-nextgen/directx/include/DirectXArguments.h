@@ -55,6 +55,10 @@ struct DirectXArgumentBindingsTy {
       ArrayRef<int64_t> Sizes,
       function_ref<Expected<DirectXResolvedBufferTy>(const void *)> Resolve);
 
+  Error setDispatchGeometry(const DirectXManifestTy &Manifest,
+                            ArrayRef<uint32_t> NumGroups,
+                            ArrayRef<uint64_t> GlobalOffset);
+
   Error createDescriptorHeap(ID3D12Device &Device);
   Error record(ID3D12GraphicsCommandList &List,
                ID3D12RootSignature &RootSignature) const;

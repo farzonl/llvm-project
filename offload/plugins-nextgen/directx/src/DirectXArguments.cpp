@@ -146,6 +146,40 @@ Error DirectXArgumentBindingsTy::prepare(
   return Error::success();
 }
 
+Error DirectXArgumentBindingsTy::setDispatchGeometry(
+    const DirectXManifestTy &Manifest, ArrayRef<uint32_t> NumGroups,
+    ArrayRef<uint64_t> GlobalOffset) {
+  if (NumGroups.size() != 3 || GlobalOffset.size() != 3)
+    return error::createOffloadError(
+        ErrorCode::INVALID_ARGUMENT,
+        "DirectX dispatch geometry requires three axes");
+  if (!Manifest.DispatchOffset) {
+    if (llvm::any_of(GlobalOffset, [](uint64_t Value) { return Value != 0; }))
+      return error::createOffloadError(
+          ErrorCode::UNSUPPORTED, "kernel has no global-offset dispatch ABI");
+    return Error::success();
+  }
+  unsigned Base = *Manifest.DispatchOffset / 4;
+  if (Base > Constants.size() ||
+      offloading::directx::DispatchWords > Constants.size() - Base)
+    return error::createOffloadError(
+        ErrorCode::INVALID_ARGUMENT,
+        "dispatch constants have not been prepared");
+  for (unsigned I = 0; I < 3; ++I) {
+    if (GlobalOffset[I] >
+        UINT64_MAX - uint64_t(NumGroups[I]) * Manifest.NumThreads[I])
+      return error::createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                                       "global offset plus range overflows");
+  }
+  for (unsigned I = 0; I < 3; ++I) {
+    Constants[Base + I] = NumGroups[I];
+    unsigned Word = Base + offloading::directx::GlobalOffsetWord + I * 2;
+    Constants[Word] = static_cast<uint32_t>(GlobalOffset[I]);
+    Constants[Word + 1] = static_cast<uint32_t>(GlobalOffset[I] >> 32);
+  }
+  return Error::success();
+}
+
 Error DirectXArgumentBindingsTy::createDescriptorHeap(ID3D12Device &Device) {
   if (Buffers.empty()) {
     Heap.Reset();

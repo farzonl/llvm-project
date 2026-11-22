@@ -369,4 +369,23 @@ TEST(DirectXManifestTest, SyclProducerRequiresCaptureLayout) {
   EXPECT_EQ(Manifest->Capture->Size, 8u);
 }
 
+TEST(DirectXManifestTest, ValidatesImplicitDispatchBlock) {
+  auto Object = emptyManifest();
+  Object["constants"] = constants(40);
+  Object["arguments"] = json::Array{scalar(0, 4, 0)};
+  Object["dispatch"] = json::Object{{"version", 1}, {"offset", 4}};
+  auto Manifest = DirectXManifestTy::parse(encode(json::Object(Object)));
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  EXPECT_EQ(Manifest->DispatchOffset, 4u);
+  for (unsigned Offset : {0u, 2u, 8u, UINT32_MAX}) {
+    Object["dispatch"] = json::Object{{"version", 1}, {"offset", Offset}};
+    auto Result = DirectXManifestTy::parse(encode(json::Object(Object)));
+    ASSERT_FALSE(static_cast<bool>(Result));
+    consumeError(Result.takeError());
+  }
+  Object["dispatch"] = json::Object{{"version", 2}, {"offset", 4}};
+  expectError(DirectXManifestTy::parse(encode(std::move(Object))),
+              error::ErrorCode::UNSUPPORTED, "dispatch version");
+}
+
 } // namespace

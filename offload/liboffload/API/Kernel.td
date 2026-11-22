@@ -25,12 +25,23 @@ def OL_KERNEL_LAUNCH_PROP_END : Macro {
   let value = "{OL_KERNEL_LAUNCH_PROP_TYPE_NONE, NULL}";
 }
 
+def ol_kernel_global_offset_t : Struct {
+  let desc = "Global work-item offsets in native x, y, z axis order.";
+  let members = [
+    StructMember<"uint64_t", "x", "Global offset in the x dimension">,
+    StructMember<"uint64_t", "y", "Global offset in the y dimension">,
+    StructMember<"uint64_t", "z", "Global offset in the z dimension">
+  ];
+}
+
 def ol_kernel_launch_prop_type_t : Enum {
   let desc = "Defines structure type";
   let is_typed = 1;
   let etors =
       [TaggedEtor<"none", "void *", "Used for null terminating property array">,
-       TaggedEtor<"is_cooperative ", "bool *", "Cooperative kernel launch">];
+       TaggedEtor<"is_cooperative ", "bool *", "Cooperative kernel launch">,
+       TaggedEtor<"global_offset", "ol_kernel_global_offset_t *",
+                  "Global work-item offsets; unsupported backends reject nonzero offsets">];
 }
 
 def ol_kernel_launch_prop_t : Struct {
@@ -48,7 +59,10 @@ def olLaunchKernel : Function {
         "Each element of ArgPtrs points to the value of the corresponding kernel argument",
         "Each element of ArgSizes specifies the size in bytes of the corresponding argument",
         "NumArgs must match the number of arguments expected by the kernel",
-        "ArgPtrs and ArgSizes must both be NULL (when NumArgs == 0) or both be non-NULL"
+        "ArgPtrs and ArgSizes must both be NULL (when NumArgs == 0) or both be non-NULL",
+        "Global offsets default to zero; a GLOBAL_OFFSET property supplies uint64_t values in native x/y/z order",
+        "Property values are copied during submission and need not remain alive after this call returns",
+        "Global offsets for inactive dimensions must be zero"
     ];
     let params = [
         Param<"ol_queue_handle_t", "Queue", "handle of the queue", PARAM_IN_OPTIONAL>,
@@ -65,9 +79,12 @@ def olLaunchKernel : Function {
             "`(ArgPtrs == NULL) != (ArgSizes == NULL)`",
             "`NumArgs > 0 && (ArgPtrs == NULL || ArgSizes == NULL)`",
             "NumArgs does not match the number of arguments expected by the kernel",
+            "A recognized property has NULL data, GLOBAL_OFFSET is duplicated, or an inactive dimension has a nonzero offset",
+            "A supported global offset plus its work-item range overflows",
         ]>,
         Return<"OL_ERRC_INVALID_DEVICE", ["If Queue is non-null but does not belong to Device"]>,
         Return<"OL_ERRC_SYMBOL_KIND", ["The provided symbol is not a kernel"]>,
+        Return<"OL_ERRC_UNSUPPORTED", ["Nonzero global offsets are not supported by the kernel backend or its launch ABI"]>,
     ];
 }
 

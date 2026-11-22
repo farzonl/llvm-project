@@ -12,6 +12,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Frontend/Offloading/DirectX.h"
 #include "llvm/Support/Error.h"
 
 #include <array>
@@ -72,6 +73,8 @@ struct DirectXManifestTy {
   // Canonicalized into argument-index order, independent of JSON array order.
   SmallVector<DirectXArgumentTy> Arguments;
   std::optional<DirectXCaptureLayoutTy> Capture;
+  // Byte offset of the versioned implicit dispatch block in root constants.
+  std::optional<uint32_t> DispatchOffset;
 
   size_t getNumLaunchArguments() const {
     return Capture ? 1 : Arguments.size();

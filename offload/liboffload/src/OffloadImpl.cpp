@@ -1425,12 +1425,34 @@ Error olLaunchKernel_impl(ol_queue_handle_t Queue, ol_device_handle_t Device,
       LaunchSizeArgs->Dimensions == 3 ? LaunchSizeArgs->GroupSize.z : 1;
   LaunchArgs.DynCGroupMem = LaunchSizeArgs->DynSharedMemory;
 
+  bool HasGlobalOffset = false;
   while (Properties && Properties->type != OL_KERNEL_LAUNCH_PROP_TYPE_NONE) {
+    if (!Properties->data &&
+        (Properties->type == OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE ||
+         Properties->type == OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET))
+      return createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                                "kernel launch property has no data");
     switch (Properties->type) {
     case OL_KERNEL_LAUNCH_PROP_TYPE_IS_COOPERATIVE:
       LaunchArgs.Flags.Cooperative =
           *reinterpret_cast<const bool *>(Properties->data);
       break;
+    case OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET: {
+      if (std::exchange(HasGlobalOffset, true))
+        return createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                                  "duplicate global-offset launch property");
+      const auto &Offset =
+          *static_cast<const ol_kernel_global_offset_t *>(Properties->data);
+      LaunchArgs.GlobalOffset[0] = Offset.x;
+      LaunchArgs.GlobalOffset[1] = Offset.y;
+      LaunchArgs.GlobalOffset[2] = Offset.z;
+      for (unsigned I = LaunchSizeArgs->Dimensions; I < 3; ++I)
+        if (LaunchArgs.GlobalOffset[I])
+          return createOffloadError(
+              ErrorCode::INVALID_ARGUMENT,
+              "inactive work dimensions require zero global offsets");
+      break;
+    }
     default:
       return createOffloadError(ErrorCode::INVALID_ENUMERATION,
                                 "olLaunchKernel property enum '%i' is invalid",

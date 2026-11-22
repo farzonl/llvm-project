@@ -22,6 +22,8 @@ bool SemaDirectX::CheckDirectXBuiltinFunctionCall(unsigned BuiltinID,
   case DirectX::BI__builtin_dx_thread_id:
   case DirectX::BI__builtin_dx_group_id:
   case DirectX::BI__builtin_dx_group_size:
+  case DirectX::BI__builtin_dx_num_groups:
+  case DirectX::BI__builtin_dx_global_offset:
     return SemaRef.BuiltinConstantArgRange(TheCall, 0, 0, 2);
   default:
     break;

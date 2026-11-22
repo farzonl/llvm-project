@@ -89,6 +89,41 @@ TEST(DirectXArgumentsTest, PacksScalarBitsAndZeroFillsPadding) {
   EXPECT_EQ(Bindings.Heap.Get(), nullptr);
 }
 
+TEST(DirectXArgumentsTest, SnapshotsDispatchGeometryAnd64BitOffsets) {
+  DirectXManifestTy Manifest;
+  Manifest.Constants = DirectXConstantBindingTy{0, 0, 40};
+  Manifest.Arguments = {{0, DirectXScalarBindingTy{4, 0}}};
+  Manifest.NumThreads = {4, 2, 2};
+  Manifest.DispatchOffset = 4;
+  uint32_t Scalar = 123;
+  void *Args[] = {&Scalar};
+  int64_t Sizes[] = {4};
+  DirectXArgumentBindingsTy Bindings;
+  ASSERT_FALSE(
+      static_cast<bool>(Bindings.prepare(Manifest, Args, Sizes, noBuffers)));
+  uint32_t Groups[] = {3, 5, 7};
+  uint64_t Offsets[] = {0x123456789abcdef0ULL, 11, 13};
+  ASSERT_FALSE(static_cast<bool>(
+      Bindings.setDispatchGeometry(Manifest, Groups, Offsets)));
+  EXPECT_EQ(
+      ArrayRef(Bindings.Constants),
+      (ArrayRef<uint32_t>{123, 3, 5, 7, 0x9abcdef0, 0x12345678, 11, 0, 13, 0}));
+  auto Previous = Bindings.Constants;
+  Offsets[2] = UINT64_MAX;
+  expectError(Bindings.setDispatchGeometry(Manifest, Groups, Offsets),
+              error::ErrorCode::INVALID_ARGUMENT, "overflows");
+  EXPECT_EQ(Bindings.Constants, Previous);
+  Offsets[2] = 0;
+  Groups[0] = 9;
+  ASSERT_FALSE(static_cast<bool>(
+      Bindings.setDispatchGeometry(Manifest, Groups, Offsets)));
+  EXPECT_EQ(Previous[1], 3u);
+  EXPECT_EQ(Bindings.Constants[1], 9u);
+  Manifest.DispatchOffset.reset();
+  expectError(Bindings.setDispatchGeometry(Manifest, Groups, Offsets),
+              error::ErrorCode::UNSUPPORTED, "no global-offset");
+}
+
 TEST(DirectXArgumentsTest,
      RequiresExactArgumentShapesAndPreservesPreviousData) {
   DirectXManifestTy Manifest;

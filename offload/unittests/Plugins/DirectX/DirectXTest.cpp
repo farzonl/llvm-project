@@ -2140,6 +2140,100 @@ TEST_F(DirectXDispatchTest, ExecutesCompilerGeneratedSyclCaptureBlock) {
     }
 }
 
+TEST_F(DirectXDispatchTest, ExecutesMultidimensionalDispatchGeometry) {
+  using llvm::omp::target::plugin::directx::DirectXManifestTy;
+  constexpr unsigned RecordWords = 24;
+  constexpr unsigned Capacity = 256 * RecordWords + 4;
+  std::vector<uint32_t> Actual(Capacity), Expected(Capacity);
+  ASSERT_TRUE(succeeded(olMemFree(Context, Output)));
+  Output = nullptr;
+  ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                   Capacity * sizeof(uint32_t), &Output)));
+  for (unsigned Dims = 1; Dims <= 3; ++Dims) {
+    std::string Path = std::string(DIRECTX_TEST_INPUTS_DIR) + "/cpp-dispatch-" +
+                       std::to_string(Dims) + ".bin";
+    auto Image = llvm::MemoryBuffer::getFile(Path, false);
+    ASSERT_TRUE(static_cast<bool>(Image)) << Image.getError().message();
+    auto Entries =
+        llvm::object::OffloadBinary::create((*Image)->getMemBufferRef());
+    ASSERT_TRUE(static_cast<bool>(Entries))
+        << llvm::toString(Entries.takeError());
+    auto Manifest = DirectXManifestTy::parse(*Entries->front());
+    ASSERT_TRUE(static_cast<bool>(Manifest))
+        << llvm::toString(Manifest.takeError());
+    ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+    Program = nullptr;
+    ASSERT_TRUE(
+        succeeded(olCreateProgram(Context, Device, (*Image)->getBufferStart(),
+                                  (*Image)->getBufferSize(), &Program)));
+    ASSERT_TRUE(succeeded(olGetSymbol(Program, Manifest->Entry.c_str(),
+                                      OL_SYMBOL_KIND_KERNEL, &Kernel)));
+    Launch.Dimensions = Dims;
+    Launch.GroupSize = {4, Dims > 1 ? 2u : 1u, Dims > 2 ? 2u : 1u};
+    for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)})
+      for (unsigned Iteration = 0; Iteration < 3; ++Iteration) {
+        SCOPED_TRACE(Dims);
+        SCOPED_TRACE(Iteration);
+        Launch.NumGroups = {Iteration + 1, Dims > 1 ? 2u : 1u,
+                            Dims > 2 ? 2u : 1u};
+        ol_kernel_global_offset_t Offset{
+            Iteration ? (uint64_t{1} << 32) + Iteration : 0,
+            Dims > 1 ? uint64_t{7} : 0,
+            Dims > 2 ? (uint64_t{3} << 32) + 11 : 0};
+        uint64_t Offsets[] = {Offset.x, Offset.y, Offset.z};
+        uint32_t Local[] = {Launch.GroupSize.x, Launch.GroupSize.y,
+                            Launch.GroupSize.z};
+        uint32_t Groups[] = {Launch.NumGroups.x, Launch.NumGroups.y,
+                             Launch.NumGroups.z};
+        uint32_t Global[] = {Groups[0] * Local[0], Groups[1] * Local[1],
+                             Groups[2] * Local[2]};
+        Expected.assign(Capacity, 0xfefefefe);
+        ASSERT_TRUE(succeeded(olMemcpy(Q, Output, Device, Expected.data(),
+                                       nullptr, Capacity * sizeof(uint32_t))));
+        void *Args[] = {&Output};
+        size_t Sizes[] = {sizeof(Output)};
+        ol_kernel_launch_prop_t Properties[] = {
+            {OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET, &Offset},
+            OL_KERNEL_LAUNCH_PROP_END};
+        ASSERT_TRUE(succeeded(olLaunchKernel(Q, Device, Kernel, &Launch,
+                                             Properties, 1, Args, Sizes)));
+        Offset = {};
+        for (unsigned Z = 0; Z < Global[2]; ++Z)
+          for (unsigned Y = 0; Y < Global[1]; ++Y)
+            for (unsigned X = 0; X < Global[0]; ++X) {
+              unsigned Index = (Z * Global[1] + Y) * Global[0] + X;
+              uint32_t *Record = Expected.data() + Index * RecordWords;
+              unsigned IDs[] = {X, Y, Z};
+              for (unsigned I = 0; I < 3; ++I) {
+                uint64_t ID = Offsets[I] + IDs[I];
+                Record[I * 2] = static_cast<uint32_t>(ID);
+                Record[I * 2 + 1] = static_cast<uint32_t>(ID >> 32);
+                Record[6 + I] = IDs[I] % Local[I];
+                Record[9 + I] = IDs[I] / Local[I];
+                Record[12 + I] = Groups[I];
+                Record[15 + I] = Global[I];
+                Record[18 + I * 2] = static_cast<uint32_t>(Offsets[I]);
+                Record[19 + I * 2] = static_cast<uint32_t>(Offsets[I] >> 32);
+              }
+            }
+        ASSERT_TRUE(succeeded(olMemcpy(Q, Actual.data(), nullptr, Output,
+                                       Device, Capacity * sizeof(uint32_t))));
+        if (Q)
+          ASSERT_TRUE(succeeded(olSyncQueue(Q)));
+        EXPECT_EQ(Actual, Expected);
+      }
+    ol_kernel_global_offset_t Overflow{UINT64_MAX, 0, 0};
+    ol_kernel_launch_prop_t OverflowProps[] = {
+        {OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET, &Overflow},
+        OL_KERNEL_LAUNCH_PROP_END};
+    void *Args[] = {&Output};
+    size_t Sizes[] = {sizeof(Output)};
+    EXPECT_TRUE(failedWith(olLaunchKernel(Queue, Device, Kernel, &Launch,
+                                          OverflowProps, 1, Args, Sizes),
+                           OL_ERRC_INVALID_ARGUMENT));
+  }
+}
+
 TEST_F(DirectXDispatchTest, RejectsInvalidGeometryArgumentsAndAliasing) {
   void *Args[] = {&Input, &Output};
   size_t Sizes[] = {sizeof(Input), sizeof(Output)};
@@ -2179,6 +2273,36 @@ TEST_F(DirectXDispatchTest, RejectsInvalidGeometryArgumentsAndAliasing) {
   EXPECT_TRUE(failedWith(olLaunchKernel(Queue, Device, Kernel, &Launch, Props,
                                         std::size(Args), Args, Sizes),
                          OL_ERRC_UNSUPPORTED));
+  ol_kernel_global_offset_t GlobalOffset{1, 0, 0};
+  ol_kernel_launch_prop_t OffsetProps[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET, &GlobalOffset},
+      OL_KERNEL_LAUNCH_PROP_END};
+  auto LaunchWithOffsets = [&] {
+    return olLaunchKernel(Queue, Device, Kernel, &Launch, OffsetProps,
+                          std::size(Args), Args, Sizes);
+  };
+  EXPECT_TRUE(failedWith(LaunchWithOffsets(), OL_ERRC_UNSUPPORTED));
+  OffsetProps[0].data = nullptr;
+  EXPECT_TRUE(failedWith(LaunchWithOffsets(), OL_ERRC_INVALID_ARGUMENT));
+  OffsetProps[0].data = &GlobalOffset;
+  ol_kernel_launch_prop_t Duplicates[] = {OffsetProps[0], OffsetProps[0],
+                                          OL_KERNEL_LAUNCH_PROP_END};
+  EXPECT_TRUE(
+      failedWith(olLaunchKernel(Queue, Device, Kernel, &Launch, Duplicates,
+                                std::size(Args), Args, Sizes),
+                 OL_ERRC_INVALID_ARGUMENT));
+  OffsetProps[1] = OL_KERNEL_LAUNCH_PROP_END;
+  Launch.Dimensions = 1;
+  GlobalOffset.y = 1;
+  EXPECT_TRUE(failedWith(LaunchWithOffsets(), OL_ERRC_INVALID_ARGUMENT));
+  Launch.Dimensions = 3;
+  ol_kernel_launch_prop_t InvalidProps[] = {
+      {static_cast<ol_kernel_launch_prop_type_t>(99), nullptr},
+      OL_KERNEL_LAUNCH_PROP_END};
+  EXPECT_TRUE(
+      failedWith(olLaunchKernel(Queue, Device, Kernel, &Launch, InvalidProps,
+                                std::size(Args), Args, Sizes),
+                 OL_ERRC_INVALID_ENUMERATION));
   EXPECT_TRUE(failedWith(launch(Queue, Input, Input), OL_ERRC_UNSUPPORTED));
   EXPECT_TRUE(failedWith(launch(Queue, offset(Input, 4), Output),
                          OL_ERRC_INVALID_ARGUMENT));

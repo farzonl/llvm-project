@@ -10,6 +10,7 @@
 #include "DirectX.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Frontend/Offloading/DirectX.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -323,6 +324,23 @@ bool lowerKernel(Module &M) {
     if (!checkPointer(Arg, Arg.hasAttribute("dx.readonly")))
       return false;
   }
+  using namespace offloading::directx;
+  SmallVector<CallInst *> DispatchQueries;
+  for (BasicBlock &BB : *Kernel)
+    for (Instruction &I : BB)
+      if (auto *Call = dyn_cast<CallInst>(&I);
+          Call && (Call->getIntrinsicID() == Intrinsic::dx_num_groups ||
+                   Call->getIntrinsicID() == Intrinsic::dx_global_offset)) {
+        auto *Dim = dyn_cast<ConstantInt>(Call->getArgOperand(0));
+        if (!Dim || Dim->getZExtValue() > 2) {
+          fail("dispatch dimension must be between 0 and 2");
+          return false;
+        }
+        DispatchQueries.push_back(Call);
+      }
+  unsigned DispatchOffset = ScalarTypes.size() * 4;
+  if (!DispatchQueries.empty())
+    ScalarTypes.append(DispatchWords, Type::getInt32Ty(M.getContext()));
   if (ScalarTypes.size() > 63) {
     fail("scalar arguments exceed the 252-byte root constant limit");
     return false;
@@ -441,6 +459,29 @@ bool lowerKernel(Module &M) {
                                      {"space", 0},
                                      {"min_size", 4}});
   }
+  for (CallInst *Call : DispatchQueries) {
+    IRBuilder<> QueryBuilder(Call);
+    unsigned Dim = cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue();
+    bool IsOffset = Call->getIntrinsicID() == Intrinsic::dx_global_offset;
+    unsigned Word = IsOffset ? GlobalOffsetWord + Dim * 2 : Dim;
+    auto LoadWord = [&](unsigned Index) {
+      Value *Pointer = QueryBuilder.CreateIntrinsic(
+          Intrinsic::dx_resource_getpointer,
+          {Builder.getPtrTy(2), ConstantHandleTy, Builder.getInt32Ty()},
+          {ConstantHandle, Builder.getInt32(DispatchOffset + Index * 4)}, {},
+          "", PointerBundles);
+      return QueryBuilder.CreateLoad(Builder.getInt32Ty(), Pointer);
+    };
+    Value *Result = LoadWord(Word);
+    if (IsOffset)
+      Result = QueryBuilder.CreateOr(
+          QueryBuilder.CreateZExt(Result, Builder.getInt64Ty()),
+          QueryBuilder.CreateShl(
+              QueryBuilder.CreateZExt(LoadWord(Word + 1), Builder.getInt64Ty()),
+              32));
+    Call->replaceAllUsesWith(Result);
+    Call->eraseFromParent();
+  }
   std::string Manifest;
   raw_string_ostream OS(Manifest);
   VersionTuple Model = M.getTargetTriple().getOSVersion();
@@ -455,12 +496,18 @@ bool lowerKernel(Module &M) {
       {"arguments", std::move(Arguments)}};
   if (Capture)
     ManifestObject["capture"] = std::move(*Capture);
+  if (!DispatchQueries.empty())
+    ManifestObject["dispatch"] =
+        json::Object{{"version", DispatchVersion}, {"offset", DispatchOffset}};
   OS << json::Value(std::move(ManifestObject));
   M.getOrInsertNamedMetadata("llvm.offload.manifest")
       ->addOperand(
           MDNode::get(M.getContext(), MDString::get(M.getContext(), Manifest)));
   Kernel->eraseFromParent();
 
+  for (StringRef Name : {"llvm.dx.num.groups", "llvm.dx.global.offset"})
+    if (Function *Query = M.getFunction(Name); Query && Query->use_empty())
+      Query->eraseFromParent();
   if (Function *Size = M.getFunction("llvm.dx.thread.group.size")) {
     for (User *U : make_early_inc_range(Size->users())) {
       auto *Call = dyn_cast<CallInst>(U);

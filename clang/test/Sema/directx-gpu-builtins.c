@@ -4,5 +4,9 @@ unsigned test(int dimension) {
   __builtin_dx_thread_id(3); // expected-error {{outside the valid range}}
   __builtin_dx_group_id(-1); // expected-error {{outside the valid range}}
   __builtin_dx_group_size(dimension); // expected-error {{must be a constant integer}}
+  __builtin_dx_num_groups(3); // expected-error {{outside the valid range}}
+  __builtin_dx_global_offset(-1); // expected-error {{outside the valid range}}
+  __builtin_dx_num_groups(dimension); // expected-error {{must be a constant integer}}
+  __builtin_dx_global_offset(dimension); // expected-error {{must be a constant integer}}
   return __builtin_dx_thread_id(2);
 }
