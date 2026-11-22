@@ -28,6 +28,9 @@ class ModulePass;
 class PassRegistry;
 class raw_ostream;
 
+void initializeDXILKernelABILegacyPass(PassRegistry &);
+ModulePass *createDXILKernelABILegacyPass();
+
 /// Initializer for dxil writer pass
 void initializeDXILWriterLegacyPass(PassRegistry &);
 

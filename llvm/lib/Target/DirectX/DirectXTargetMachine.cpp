@@ -49,6 +49,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void
 LLVMInitializeDirectXTarget() {
   RegisterTargetMachine<DirectXTargetMachine> X(getTheDirectXTarget());
   auto *PR = PassRegistry::getPassRegistry();
+  initializeDXILKernelABILegacyPass(*PR);
   initializeDXILDebugInfoLegacyPass(*PR);
   initializeDXILIntrinsicExpansionLegacyPass(*PR);
   initializeDXILMemIntrinsicsLegacyPass(*PR);
@@ -108,6 +109,7 @@ public:
   void addCodeGenPrepare() override {
     CodeGenOptLevel OptLevel = getDirectXTargetMachine().getOptLevel();
 
+    addPass(createDXILKernelABILegacyPass());
     addPass(createStripConvergenceIntrinsicsPass());
     addPass(createDXILFinalizeLinkageLegacyPass());
     if (OptLevel != CodeGenOptLevel::None) {

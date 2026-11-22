@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/SemaDirectX.h"
+#include "clang/Basic/TargetBuiltins.h"
 #include "clang/Sema/Sema.h"
 
 namespace clang {
@@ -17,6 +18,14 @@ SemaDirectX::SemaDirectX(Sema &S) : SemaBase(S) {}
 
 bool SemaDirectX::CheckDirectXBuiltinFunctionCall(unsigned BuiltinID,
                                                   CallExpr *TheCall) {
+  switch (BuiltinID) {
+  case DirectX::BI__builtin_dx_thread_id:
+  case DirectX::BI__builtin_dx_group_id:
+  case DirectX::BI__builtin_dx_group_size:
+    return SemaRef.BuiltinConstantArgRange(TheCall, 0, 0, 2);
+  default:
+    break;
+  }
   return false;
 }
 } // namespace clang

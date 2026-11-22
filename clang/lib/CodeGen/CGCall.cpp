@@ -1147,7 +1147,8 @@ CGFunctionInfo *CodeGenTypes::findOrInsertCGFunctionInfo(
 
   // Compute ABI information.
   if (info.getCC() == CC_DeviceKernel &&
-      (CC == llvm::CallingConv::SPIR_KERNEL || CC == llvm::CallingConv::C)) {
+      (CC == llvm::CallingConv::SPIR_KERNEL || CC == llvm::CallingConv::C) &&
+      !CGM.getTriple().isDXIL()) {
     // Force target independent argument handling for the host visible
     // kernel functions.
     //
@@ -2584,6 +2585,8 @@ void CodeGenModule::getTrivialDefaultFunctionAttributes(
   ::getTrivialDefaultFunctionAttributes(Name, HasOptnone, getCodeGenOpts(),
                                         getLangOpts(), AttrOnCallSite,
                                         FuncAttrs);
+  if (getTriple().isDXIL())
+    FuncAttrs.addAttribute(llvm::Attribute::Convergent);
 }
 
 void CodeGenModule::getDefaultFunctionAttributes(StringRef Name,

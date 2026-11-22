@@ -8,6 +8,20 @@
 
 include "clang/Basic/BuiltinsBase.td"
 
+foreach Name = ["thread_id", "group_id", "group_size"] in {
+  def : Builtin {
+    let Spellings = ["__builtin_dx_" # Name];
+    let Attributes = [NoThrow, Const];
+    let Prototype = "unsigned int(_Constant int)";
+  }
+}
+
+def DxSyncThreads : Builtin {
+  let Spellings = ["__builtin_dx_sync_threads"];
+  let Attributes = [NoThrow];
+  let Prototype = "void()";
+}
+
 def DxDot2Add : Builtin { 
   let Spellings = ["__builtin_dx_dot2add"];
   let Attributes = [NoThrow, Const];

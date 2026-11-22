@@ -10,9 +10,11 @@
 #include "CodeGenModule.h"
 #include "HLSLBufferLayoutBuilder.h"
 #include "TargetInfo.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/Type.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Type.h"
 
 using namespace clang;
@@ -28,6 +30,35 @@ class DirectXTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
   DirectXTargetCodeGenInfo(CodeGen::CodeGenTypes &CGT)
       : TargetCodeGenInfo(std::make_unique<DefaultABIInfo>(CGT)) {}
+
+  unsigned getDeviceKernelCallingConv() const override {
+    return llvm::CallingConv::C;
+  }
+
+  void setTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
+                           CodeGenModule &CGM) const override {
+    const auto *FD = dyn_cast_or_null<FunctionDecl>(D);
+    if (!FD || !FD->hasAttr<DeviceKernelAttr>() || GV->isDeclaration() ||
+        CGM.getLangOpts().HLSL)
+      return;
+    auto *F = cast<llvm::Function>(GV);
+    F->addFnAttr("dx.kernel");
+    if (const auto *WG = FD->getAttr<ReqdWorkGroupSizeAttr>()) {
+      std::string Threads;
+      for (const Expr *Dim : {WG->getXDim(), WG->getYDim(), WG->getZDim()}) {
+        if (!Threads.empty())
+          Threads += ',';
+        Threads += std::to_string(
+            Dim->getIntegerConstantExpr(CGM.getContext())->getZExtValue());
+      }
+      F->addFnAttr("hlsl.numthreads", Threads);
+    }
+    for (auto [Index, Param] : llvm::enumerate(FD->parameters()))
+      if (Param->getType()->isPointerType() &&
+          Param->getType()->getPointeeType().isConstQualified())
+        F->addParamAttr(Index,
+                        llvm::Attribute::get(F->getContext(), "dx.readonly"));
+  }
 
   llvm::Type *getHLSLType(CodeGenModule &CGM, const Type *T,
                           const CGHLSLOffsetInfo &OffsetInfo) const override;

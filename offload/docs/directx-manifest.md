@@ -13,6 +13,14 @@ and kernel objects with compute pipelines are implemented. `olLaunchKernel`
 supports compute execution with bounded raw buffers and scalar root
 constants. The prototype ABI is experimental.
 
+The restricted C++ compiler path generates argument bindings and this manifest
+in `llvm.offload.manifest` intermediate bitcode metadata. The standalone demo's
+packager reads that metadata and adds feature declarations from the final DXIL
+container. The metadata is not embedded in executable DXIL: validation rejects
+unknown named metadata. This path currently accepts only indexed buffer-pointer
+arguments with 32-bit accesses, no scalar arguments, and fixed workgroup sizes.
+See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
+
 ## Program loading
 
 `olCreateProgram` accepts exactly one entry in one current-version (version 3),

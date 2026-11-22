@@ -24,6 +24,11 @@ let TargetPrefix = "dx" in {
       : Intrinsic<[llvm_i32_ty], [llvm_i32_ty /*Index*/],
                   [IntrNoMem, IntrWillReturn, ImmArg<ArgIndex<0>>]>;
 
+  // Fixed workgroup dimensions of a C++ compute kernel.
+  def int_dx_thread_group_size
+      : Intrinsic<[llvm_i32_ty], [llvm_i32_ty],
+                  [IntrNoMem, IntrWillReturn, ImmArg<ArgIndex<0>>]>;
+
   def int_dx_flattened_thread_id_in_group
       : Intrinsic<[llvm_i32_ty], [], [IntrNoMem, IntrWillReturn]>;
 

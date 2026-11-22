@@ -310,6 +310,7 @@ set(x86_files
 set(gpu_files
   amdhsa_abi.h
   gpuintrin.h
+  directxintrin.h
   nvptxintrin.h
   amdgpuintrin.h
   spirvintrin.h

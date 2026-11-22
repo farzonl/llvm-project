@@ -38,6 +38,8 @@ _Pragma("push_macro(\"bool\")");
 #include <amdgpuintrin.h>
 #elif defined(__SPIRV__)
 #include <spirvintrin.h>
+#elif defined(__DIRECTX__)
+#include <directxintrin.h>
 #elif !defined(_OPENMP)
 #error "This header is only meant to be used on GPU architectures."
 #endif

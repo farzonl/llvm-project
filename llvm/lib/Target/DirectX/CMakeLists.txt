@@ -27,6 +27,7 @@ add_llvm_target(DirectXCodeGen
   DXILForwardHandleAccesses.cpp
   DXILFlattenArrays.cpp
   DXILIntrinsicExpansion.cpp
+  DXILKernelABI.cpp
   DXILMemIntrinsics.cpp
   DXILOpBuilder.cpp
   DXILOpLowering.cpp
