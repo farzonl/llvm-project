@@ -15,7 +15,7 @@
 #ifndef _LIBSYCL___SPIRV_VARS_HPP
 #define _LIBSYCL___SPIRV_VARS_HPP
 
-#ifdef __SYCL_DEVICE_ONLY__
+#if defined(__SYCL_DEVICE_ONLY__) && !defined(__DIRECTX__)
 #  include <__clang_spirv_builtins.h>
 #endif
 
@@ -27,7 +27,14 @@ namespace __spirv {
 // The __builtin_spirv_* aliases exist for SPIR-V targets only. An
 // external-linkage kernel body is still emitted for the host and must link, so
 // the host branch returns values that are never read. Keep the include guarded.
-#ifdef __SYCL_DEVICE_ONLY__
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
+std::size_t unsupportedDirectXIndex(int) __attribute__((
+    error("DirectX SYCL index/range builtins are not supported yet")));
+std::uint32_t unsupportedDirectXSubgroup() __attribute__((
+    error("DirectX SYCL subgroup builtins are not supported yet")));
+#  define __SPIRV_INDEXED_BUILTIN(POSTFIX, ID) unsupportedDirectXIndex(ID)
+#  define __SPIRV_SCALAR_BUILTIN(POSTFIX) unsupportedDirectXSubgroup()
+#elif defined(__SYCL_DEVICE_ONLY__)
 #  define __SPIRV_INDEXED_BUILTIN(POSTFIX, ID) __spirv_##POSTFIX(ID)
 #  define __SPIRV_SCALAR_BUILTIN(POSTFIX) __spirv_##POSTFIX()
 #else

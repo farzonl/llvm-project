@@ -26,6 +26,7 @@ _LIBSYCL_BEGIN_NAMESPACE_SYCL
 enum class backend : unsigned char {
   opencl = 0,
   level_zero,
+  ext_llvm_directx,
 };
 
 namespace detail {

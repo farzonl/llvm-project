@@ -84,7 +84,19 @@ private:
 class DeviceImageManager {
 public:
   explicit DeviceImageManager(std::unique_ptr<llvm::object::OffloadBinary> Bin)
-      : MBin(std::move(Bin)), MTargetArch(MBin->getTriple().split('-').first) {}
+      : MBin(std::move(Bin)), MTargetArch(MBin->getTriple().split('-').first) {
+    if (MBin->getImageKind() == llvm::object::IMG_DXIL) {
+      llvm::object::OffloadBinary::OffloadingImage Image;
+      Image.TheImageKind = MBin->getImageKind();
+      Image.TheOffloadKind = MBin->getOffloadKind();
+      Image.Flags = MBin->getFlags();
+      for (const auto &[Key, Value] : MBin->strings())
+        Image.StringData[Key] = Value;
+      Image.Image = llvm::MemoryBuffer::getMemBufferCopy(MBin->getImage());
+      MProgramImage =
+          llvm::object::OffloadBinary::write(llvm::ArrayRef(&Image, 1));
+    }
+  }
   // Explicitly delete copy constructor/operator= to avoid unintentional copies.
   DeviceImageManager(const DeviceImageManager &) = delete;
   DeviceImageManager &operator=(const DeviceImageManager &) = delete;
@@ -100,12 +112,20 @@ public:
   /// \return the architecture component of this image's target triple.
   std::string_view getTargetArch() const { return MTargetArch; }
 
+  /// DirectX needs the launch manifest, not just the executable payload.
+  llvm::StringRef getProgramImage() const {
+    return MBin->getImageKind() == llvm::object::IMG_DXIL
+               ? llvm::StringRef(MProgramImage)
+               : MBin->getImage();
+  }
+
 private:
   std::unique_ptr<llvm::object::OffloadBinary> MBin;
 
   // Points into the image's triple string, so it stays valid exactly as long as
   // the fat binary this image was parsed from is registered.
   std::string_view MTargetArch;
+  llvm::SmallString<0> MProgramImage;
 };
 
 } // namespace detail

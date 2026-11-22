@@ -52,8 +52,7 @@ getOffloadTopologies();
 /// \return std::vector of implementation objects for all platforms.
 std::vector<std::unique_ptr<PlatformImpl>> &getPlatformCache();
 
-// This initializes a function-local variable whose destructor is invoked as
-// the SYCL shared library is first being unloaded.
+// Registers runtime shutdown before the SYCL shared library is unloaded.
 void registerStaticVarShutdownHandler();
 
 using AsyncExceptionKey =

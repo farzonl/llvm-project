@@ -55,6 +55,8 @@ backend convertBackend(ol_platform_backend_t Backend) {
   switch (Backend) {
   case OL_PLATFORM_BACKEND_LEVEL_ZERO:
     return backend::level_zero;
+  case OL_PLATFORM_BACKEND_DIRECTX:
+    return backend::ext_llvm_directx;
   default:
     throw exception(make_error_code(errc::runtime), "Unsupported backend");
   }
@@ -63,6 +65,7 @@ backend convertBackend(ol_platform_backend_t Backend) {
 bool isBackendSupported(ol_platform_backend_t Backend) {
   switch (Backend) {
   case OL_PLATFORM_BACKEND_LEVEL_ZERO:
+  case OL_PLATFORM_BACKEND_DIRECTX:
   case OL_PLATFORM_BACKEND_HOST:
     return true;
   default:

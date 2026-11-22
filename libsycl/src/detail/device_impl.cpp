@@ -26,11 +26,12 @@ bool DeviceImpl::has(aspect Aspect) const {
   case (aspect::host_debuggable):
     return false;
   case (aspect::usm_device_allocations):
+    return true;
   case (aspect::usm_host_allocations):
   case (aspect::usm_shared_allocations):
     // liboffload works with USM only and has no query to check support. We
     // assume that USM is always supported.
-    return true;
+    return getBackend() != backend::ext_llvm_directx;
   default:
     // Other aspects are not implemented yet
     return false;

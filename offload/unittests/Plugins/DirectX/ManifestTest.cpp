@@ -348,4 +348,25 @@ TEST(DirectXManifestTest, RejectsInvalidPackageEntries) {
   expectError(parseImage(Image), error::ErrorCode::INVALID_BINARY, "nonempty");
 }
 
+TEST(DirectXManifestTest, SyclProducerRequiresCaptureLayout) {
+  OffloadBinary::OffloadingImage Image;
+  Image.TheImageKind = IMG_DXIL;
+  Image.TheOffloadKind = OFK_SYCL;
+  Image.Image = MemoryBuffer::getMemBufferCopy("DXBC");
+  auto Object = emptyManifest();
+  Object["arguments"] = json::Array{buffer(0, "uav")};
+  std::string JSON = encode(json::Object(Object));
+  Image.StringData[DirectXManifestTy::MetadataKey] = JSON;
+  expectError(parseImage(Image), error::ErrorCode::INVALID_BINARY,
+              "capture-record launch layout");
+  Object["capture"] = json::Object{
+      {"size", 8}, {"pointer_size", 8}, {"offsets", json::Array{0}}};
+  JSON = encode(std::move(Object));
+  Image.StringData[DirectXManifestTy::MetadataKey] = JSON;
+  auto Manifest = parseImage(Image);
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  ASSERT_TRUE(Manifest->Capture);
+  EXPECT_EQ(Manifest->Capture->Size, 8u);
+}
+
 } // namespace

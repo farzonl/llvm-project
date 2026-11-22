@@ -302,14 +302,20 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
 Expected<DirectXManifestTy>
 DirectXManifestTy::parse(const object::OffloadBinary &Image) {
   if (Image.getImageKind() != object::IMG_DXIL ||
-      Image.getOffloadKind() != object::OFK_None || Image.getFlags() != 0 ||
-      Image.getImage().empty())
-    return invalid(
-        "expected a nonempty DXIL entry with no producer kind or flags");
+      (Image.getOffloadKind() != object::OFK_None &&
+       Image.getOffloadKind() != object::OFK_SYCL) ||
+      Image.getFlags() != 0 || Image.getImage().empty())
+    return invalid("expected a nonempty DXIL entry with no producer kind or "
+                   "SYCL and no flags");
   auto JSON = Image.getString(MetadataKey);
   if (JSON.empty())
     return invalid("missing directx.manifest metadata");
-  return parse(JSON);
+  auto Manifest = parse(JSON);
+  if (!Manifest)
+    return Manifest.takeError();
+  if (Image.getOffloadKind() == object::OFK_SYCL && !Manifest->Capture)
+    return invalid("SYCL DXIL images require a capture-record launch layout");
+  return Manifest;
 }
 
 } // namespace llvm::omp::target::plugin::directx

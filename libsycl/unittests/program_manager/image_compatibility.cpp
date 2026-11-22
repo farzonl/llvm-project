@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include <common/scoped_binary_registration.hpp>
+#include <common/unittests_helper.hpp>
 #include <mock/helpers.hpp>
 
 #include <detail/context_impl.hpp>
@@ -97,4 +98,65 @@ TEST(ImageCompatibility, ImageForAnotherArchitectureIsRejected) {
                   Property(&sycl::exception::what,
                            HasSubstr("No compatible image for " + KernelName)),
                   Property(&sycl::exception::code, Eq(sycl::errc::runtime)))));
+}
+
+TEST(ImageCompatibility, DirectXValidationAndLoadingReceivePackagedImage) {
+  unittests::UnittestsHelper Helper;
+  auto &Mock = Helper.Mock;
+  allowContextAndProgramLifetimeCalls(Mock.get());
+  ON_CALL(Mock.get(), olGetPlatformInfo(_, OL_PLATFORM_INFO_BACKEND, _, _))
+      .WillByDefault([](ol_platform_handle_t, ol_platform_info_t, size_t,
+                        void *Value) -> ol_result_t {
+        *static_cast<ol_platform_backend_t *>(Value) =
+            OL_PLATFORM_BACKEND_DIRECTX;
+        return OL_SUCCESS;
+      });
+  std::array<llvm::StringRef, 1> Names = {"kernel"};
+  llvm::SmallString<0> Symbols;
+  llvm::offloading::sycl::writeSymbolTable(Names, Symbols);
+  auto Image = sycl::unittests::createSYCLImage(
+      Symbols, llvm::object::IMG_DXIL, llvm::object::OFK_SYCL,
+      "dxil-pc-shadermodel6.0-compute");
+  llvm::StringRef Manifest =
+      R"({"entry":"kernel","capture":{"size":8,"pointer_size":8,"offsets":[0]}})";
+  Image.StringData["directx.manifest"] = Manifest;
+  auto Binary = llvm::object::OffloadBinary::write(Image);
+  struct TestManager : detail::ProgramAndKernelManager {
+  } Manager;
+  Manager.registerFatBin(Binary.data(), Binary.size());
+  const device Device;
+  auto Context = createContext(Device);
+  auto CheckPackage = [&](const void *Data, size_t Size) {
+    auto Entries = llvm::object::OffloadBinary::create(llvm::MemoryBufferRef(
+        llvm::StringRef(static_cast<const char *>(Data), Size), ""));
+    ASSERT_TRUE(static_cast<bool>(Entries))
+        << llvm::toString(Entries.takeError());
+    ASSERT_EQ(Entries->size(), 1u);
+    EXPECT_EQ(Entries->front()->getImage(), Image.Image->getBuffer());
+    EXPECT_EQ(Entries->front()->getString("directx.manifest"), Manifest);
+  };
+  bool Valid = false;
+  EXPECT_CALL(Mock.get(), olIsValidBinary(_, _, _, _))
+      .Times(2)
+      .WillRepeatedly([&](ol_device_handle_t, const void *Data, size_t Size,
+                          bool *Result) -> ol_result_t {
+        CheckPackage(Data, Size);
+        *Result = Valid;
+        return OL_SUCCESS;
+      });
+  auto Lookup = [&] {
+    return Manager.getOrCreateKernel(Manager.getDeviceKernelInfo("kernel"),
+                                     Context, *detail::getSyclObjImpl(Device));
+  };
+  EXPECT_THROW(Lookup(), sycl::exception);
+  Valid = true;
+  EXPECT_CALL(Mock.get(), olCreateProgram(_, _, _, _, _))
+      .WillOnce([&](ol_context_handle_t, ol_device_handle_t, const void *Data,
+                    size_t Size, ol_program_handle_t *Program) -> ol_result_t {
+        CheckPackage(Data, Size);
+        *Program = mock::createDummyHandle<ol_program_handle_t>();
+        return OL_SUCCESS;
+      });
+  EXPECT_NE(Lookup(), nullptr);
+  Manager.unregisterFatBin(Binary.data(), Binary.size());
 }

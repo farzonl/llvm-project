@@ -17,10 +17,25 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#  include <corecrt_startup.h>
+#endif
+
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
 namespace detail {
 
 namespace {
+#ifdef _WIN32
+void shutdownRuntime() {
+  static bool Complete = false;
+  if (std::exchange(Complete, true))
+    return;
+  ProgramAndKernelManager::getInstance().releaseResources();
+  getPlatformCache().clear();
+  std::ignore = olShutDown();
+}
+#endif
+
 // libsycl follows SYCL 2020 specification that doesn't declare any
 // init/shutdown methods that can help to avoid usage of static variables.
 // liboffload uses static variables too. In the first call of get_platforms
@@ -35,9 +50,13 @@ struct StaticVarShutdownHandler {
   StaticVarShutdownHandler &
   operator=(const StaticVarShutdownHandler &) = delete;
   ~StaticVarShutdownHandler() {
+#ifdef _WIN32
+    shutdownRuntime();
+#else
     ProgramAndKernelManager::getInstance().releaseResources();
     // No error reporting in shutdown
     std::ignore = olShutDown();
+#endif
   }
 };
 
@@ -48,6 +67,18 @@ void registerStaticVarShutdownHandler() {
   // reverse order of construction, so this guarantees it is still alive when
   // ~StaticVarShutdownHandler() calls releaseResources() on it.
   std::ignore = ProgramAndKernelManager::getInstance();
+#ifdef _WIN32
+  // DLL-local destructors run under the loader lock. Release DirectX devices
+  // before DLL detachment, while driver DLLs and the CRT are still available.
+  std::ignore = getPlatformCache();
+  [[maybe_unused]] static const bool Registered = [] {
+    if (_crt_atexit(shutdownRuntime) != 0)
+      throw sycl::exception(sycl::make_error_code(sycl::errc::runtime),
+                            "Failed to register SYCL runtime shutdown");
+    return true;
+  }();
+#endif
+  // Statically linked runtimes can run their own destructors first.
   static StaticVarShutdownHandler ShutdownHandler{};
 }
 

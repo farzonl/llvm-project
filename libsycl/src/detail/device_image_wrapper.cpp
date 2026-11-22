@@ -23,7 +23,7 @@ ProgramWrapper::ProgramWrapper(ContextImpl &Context, ol_device_handle_t Device,
   assert(MContext.getOLHandleRef() && "Context handle can't be nullptr");
   assert(Device && "Device handle can't be nullptr");
 
-  llvm::StringRef Image = DevImage.getOffloadBinary().getImage();
+  llvm::StringRef Image = DevImage.getProgramImage();
   callAndThrow(MContext, olCreateProgram, MContext.getOLHandleRef(), Device,
                Image.data(), Image.size(), &MProgram);
 }

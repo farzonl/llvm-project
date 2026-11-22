@@ -50,6 +50,27 @@ TEST(PlatformTest, APIGetPlatformsDefaultMock) {
 #endif
 }
 
+TEST(PlatformTest, DirectXBackendReportsDeviceOnlyUsm) {
+  unittests::UnittestsHelper Helper;
+  ON_CALL(Helper.Mock.get(),
+          olGetPlatformInfo(_, OL_PLATFORM_INFO_BACKEND, _, _))
+      .WillByDefault([](ol_platform_handle_t, ol_platform_info_t, size_t Size,
+                        void *Value) -> ol_result_t {
+        EXPECT_EQ(Size, sizeof(ol_platform_backend_t));
+        *static_cast<ol_platform_backend_t *>(Value) =
+            OL_PLATFORM_BACKEND_DIRECTX;
+        return OL_SUCCESS;
+      });
+  auto Devices = sycl::device::get_devices();
+  ASSERT_FALSE(Devices.empty());
+  for (const auto &Device : Devices) {
+    EXPECT_EQ(Device.get_backend(), backend::ext_llvm_directx);
+    EXPECT_TRUE(Device.has(aspect::usm_device_allocations));
+    EXPECT_FALSE(Device.has(aspect::usm_host_allocations));
+    EXPECT_FALSE(Device.has(aspect::usm_shared_allocations));
+  }
+}
+
 TEST(PlatformTest, APIGetPlatformsSkipsUnsupportedBackends) {
   unittests::UnittestsHelper Helper;
 

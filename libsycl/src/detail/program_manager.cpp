@@ -83,7 +83,10 @@ void ProgramAndKernelManager::trackContext(
 static inline bool
 checkDeviceImageValidity(const llvm::object::OffloadBinary &OB) {
   return (OB.getOffloadKind() == llvm::object::OFK_SYCL) &&
-         (OB.getImageKind() == llvm::object::IMG_SPIRV);
+         (OB.getImageKind() == llvm::object::IMG_SPIRV ||
+          (OB.getImageKind() == llvm::object::IMG_DXIL &&
+           OB.getTriple().starts_with("dxil-") &&
+           !OB.getString("directx.manifest").empty()));
 }
 
 void ProgramAndKernelManager::registerFatBin(const void *BinaryStart,
@@ -173,12 +176,17 @@ void ProgramAndKernelManager::unregisterFatBin(const void *BinaryStart,
 
 static bool isImageCompatible(const DeviceImageManager &Image,
                               const DeviceImpl &Device) {
-  if (!(Image.getTargetArch() == DeviceBinaryArchSPIRV64 &&
-        Device.getBackend() == sycl::backend::level_zero))
+  bool IsSPIRV = Image.getTargetArch() == DeviceBinaryArchSPIRV64 &&
+                 Device.getBackend() == sycl::backend::level_zero;
+  bool IsDirectX =
+      Image.getTargetArch() == "dxil" &&
+      Image.getOffloadBinary().getImageKind() == llvm::object::IMG_DXIL &&
+      Device.getBackend() == sycl::backend::ext_llvm_directx;
+  if (!IsSPIRV && !IsDirectX)
     return false;
 
   bool IsValid{};
-  llvm::StringRef ImageBytes = Image.getOffloadBinary().getImage();
+  llvm::StringRef ImageBytes = Image.getProgramImage();
   callAndThrow(olIsValidBinary, Device.getOLHandle(), ImageBytes.data(),
                ImageBytes.size(), &IsValid);
   return IsValid;

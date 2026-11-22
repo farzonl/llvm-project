@@ -147,3 +147,60 @@ TEST(ProgramAndKernelManager, CheckUnknownKernelName) {
 
   EXPECT_NO_THROW(Manager.unregisterFatBin(Binary.data(), Binary.size()));
 }
+
+TEST(ProgramAndKernelManager, DirectXRegistrationRequiresTripleAndManifest) {
+  std::array<llvm::StringRef, 1> Names = {"kernel"};
+  llvm::SmallString<0> Symbols;
+  llvm::offloading::sycl::writeSymbolTable(Names, Symbols);
+  auto Image = sycl::unittests::createSYCLImage(
+      Symbols, llvm::object::IMG_DXIL, llvm::object::OFK_SYCL,
+      "dxil-pc-shadermodel6.0-compute");
+  MockProgramAndKernelManager Manager;
+  auto CheckRejected = [&] {
+    auto Binary = llvm::object::OffloadBinary::write(Image);
+    EXPECT_THAT(
+        [&] { Manager.registerFatBin(Binary.data(), Binary.size()); },
+        Throws<sycl::exception>(Property(
+            &sycl::exception::what, HasSubstr("Incompatible device image"))));
+  };
+  CheckRejected();
+  Image.StringData["directx.manifest"] = "{}";
+  Image.StringData["triple"] = "spirv64-unknown-unknown";
+  CheckRejected();
+}
+
+TEST(ProgramAndKernelManager, DirectXImagesAreRepackagedIndependently) {
+  std::array<llvm::StringRef, 2> Names = {"first", "second"};
+  std::array<llvm::StringRef, 2> Manifests = {
+      R"({"entry":"first","capture":{"size":8,"pointer_size":8,"offsets":[0]}})",
+      R"({"entry":"second","capture":{"size":8,"pointer_size":8,"offsets":[0]}})"};
+  std::array<llvm::SmallString<0>, 2> Symbols;
+  llvm::SmallVector<llvm::object::OffloadBinary::OffloadingImage, 2> Images;
+  for (unsigned I = 0; I < 2; ++I) {
+    llvm::offloading::sycl::writeSymbolTable(llvm::ArrayRef(&Names[I], 1),
+                                             Symbols[I]);
+    auto Image = sycl::unittests::createSYCLImage(
+        Symbols[I], llvm::object::IMG_DXIL, llvm::object::OFK_SYCL,
+        "dxil-pc-shadermodel6.0-compute");
+    Image.StringData["directx.manifest"] = Manifests[I];
+    Image.Image = llvm::MemoryBuffer::getMemBufferCopy(Names[I]);
+    Images.push_back(std::move(Image));
+  }
+  auto Binary = llvm::object::OffloadBinary::write(Images);
+  MockProgramAndKernelManager Manager;
+  ASSERT_NO_THROW(Manager.registerFatBin(Binary.data(), Binary.size()));
+  for (unsigned I = 0; I < 2; ++I) {
+    const auto &Image = Manager.getDeviceKernelInfo(std::string_view(Names[I]))
+                            .getDeviceImage();
+    auto Entries = llvm::object::OffloadBinary::create(
+        llvm::MemoryBufferRef(Image.getProgramImage(), ""));
+    ASSERT_TRUE(static_cast<bool>(Entries))
+        << llvm::toString(Entries.takeError());
+    ASSERT_EQ(Entries->size(), 1u);
+    EXPECT_EQ(Entries->front()->getImage(), Names[I]);
+    EXPECT_EQ(Entries->front()->getString("directx.manifest"), Manifests[I]);
+    EXPECT_EQ(Entries->front()->getString("symbols"), Symbols[I]);
+    EXPECT_EQ(Entries->front()->getOffloadKind(), llvm::object::OFK_SYCL);
+  }
+  EXPECT_NO_THROW(Manager.unregisterFatBin(Binary.data(), Binary.size()));
+}

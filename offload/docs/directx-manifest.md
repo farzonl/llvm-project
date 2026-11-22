@@ -4,8 +4,9 @@ The DirectX prototype uses a versioned JSON launch manifest stored under the
 `directx.manifest` string-data key of an LLVM OffloadBinary entry. Each entry
 contains one executable compute DXIL shader and the manifest for its one entry
 point. Multiple entries keep independent payload/manifest associations.
-The image kind is `IMG_DXIL`, the producer kind is `OFK_None`, and entry flags
-are zero. The DXIL payload must be nonempty.
+The image kind is `IMG_DXIL`, the producer kind is `OFK_None` or `OFK_SYCL`,
+and entry flags are zero. SYCL images require a capture-record layout.
+The DXIL payload must be nonempty.
 
 Manifest decoding, LLVM-native DXIL/manifest validation, and single-entry program
 loading with device-capability checks, canonical native root-signature creation,
@@ -50,9 +51,12 @@ Flat captures of buffer pointers and 32-bit integers/floats are supported;
 aggregates, unused fields, dynamic field indexing, and pointer escapes are
 rejected. Buffer access instructions determine SRV versus UAV bindings.
 
-This proves a SYCL-generated capture ABI through liboffload, not `libsycl`
-integration: the SYCL runtime still rejects DXIL images, device index/range
-helpers still require adaptation, and driver/linker registration is not wired.
+The experimental libsycl DirectX backend accepts packaged SYCL DXIL images.
+`llvm-offload-binary` generates their binary SYCL symbol tables from the
+captured entry name; Clang's host embedding registers them automatically.
+libsycl loads each image as a separate one-entry package so its manifest is
+preserved. See the [SYCL single-task demo](directx-sycl.md). Device index/range
+helpers and automatic driver/linker compilation still require integration.
 
 ## Program loading
 
