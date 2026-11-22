@@ -1,0 +1,28 @@
+# REQUIRES: directx-registered-target
+# RUN: split-file %s %t
+# RUN: llvm-as %t/kernel.ll -o %t/input.bc
+# RUN: opt -dxil-kernel-abi %t/input.bc -o %t/kernel.bc
+# RUN: llc -filetype=obj %t/kernel.bc -o %t/kernel.dxil
+# RUN: llvm-offload-binary -o %t/image.bin --image=file=%t/kernel.dxil,directx-metadata=%t/kernel.bc
+# RUN: obj2yaml %t/image.bin | FileCheck %s --check-prefix=MANIFEST
+# RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.dxil,directx-metadata=%t/input.bc 2>&1 | FileCheck %s --check-prefix=MISSING
+# RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.bc,directx-metadata=%t/kernel.bc 2>&1 | FileCheck %s --check-prefix=KIND
+# RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.dxil,directx-metadata=%t/kernel.bc,directx.manifest=other 2>&1 | FileCheck %s --check-prefix=CONFLICT
+
+# MANIFEST: ImageKind: IMG_DXIL
+# MANIFEST: directx.manifest
+# MANIFEST: "features":["Doubles"]
+# MISSING: missing compiler-generated DirectX launch manifest
+# KIND: 'directx-metadata' requires a DXIL image
+# CONFLICT: 'directx-metadata' cannot be combined with 'directx.manifest'
+
+#--- kernel.ll
+target triple = "dxil-pc-shadermodel6.0-compute"
+define void @kernel(ptr %out, float %value) #0 {
+  %wide = fpext float %value to double
+  %sum = fadd double %wide, 1.0
+  %narrow = fptrunc double %sum to float
+  store float %narrow, ptr %out
+  ret void
+}
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="1,1,1" }

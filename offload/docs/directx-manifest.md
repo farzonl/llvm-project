@@ -15,10 +15,12 @@ constants. The prototype ABI is experimental.
 
 The restricted C++ compiler path generates argument bindings and this manifest
 in `llvm.offload.manifest` intermediate bitcode metadata. The standalone demo's
-packager reads that metadata and adds feature declarations from the final DXIL
+`llvm-offload-binary` reads that metadata with the `directx-metadata` image key
+and adds feature declarations from the final DXIL
 container. The metadata is not embedded in executable DXIL: validation rejects
 unknown named metadata. This path currently accepts only indexed buffer-pointer
-arguments with 32-bit accesses, no scalar arguments, and fixed workgroup sizes.
+arguments with 32-bit accesses, 32-bit integer/float scalar arguments packed
+into `b0, space0` root constants, and fixed workgroup sizes.
 See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
 
 ## Program loading
@@ -245,15 +247,16 @@ There is no DXC compiler/reflection library dependency. Validation checks:
   feature requirements covered by SFI0. Overdeclaring manifest features is
   permitted; omitting actual requirements is not.
 
-Scalar shaders currently require retained `STAT` reflection data and a named
-`cbuffer` declaration with a matching named struct annotation. Reflection-stripped
+Scalar shaders require a named `cbuffer` declaration with a matching named struct
+annotation, retained either in executable DXIL or in `STAT` reflection data.
+When both are present, both layouts are checked. Completely reflection-stripped
 scalar shaders, non-scalar constant fields, and other constant-buffer annotation
 forms are explicitly unsupported. Buffer-only shaders do not require `STAT`.
-The buffer-only test fixture is compiled with upstream Clang; the scalar
-reflection fixture currently uses DXC because upstream Clang does not emit the
-required `STAT`/`dx.typeAnnotations` reflection. This is a loader limitation, not
-an inability to compile scalar HLSL with Clang. Fixture-generation commands are
-documented in their HLSL source; no compiler or DXC library is needed at runtime.
+The C++ kernel ABI emits executable `dx.typeAnnotations` for scalar arguments;
+the `cpp-scalar.cpp` fixture validates that path without `STAT`. The older HLSL
+scalar-reflection fixture still uses DXC, because upstream Clang's HLSL path
+does not emit the required reflection. Fixture-generation commands are documented
+in the accompanying source; no compiler or DXC library is needed at runtime.
 Legacy DXIL's data layout is overridden only for LLVM bitcode decoding; HLSL
 offsets come from reflection, not LLVM's replacement layout.
 Shared-memory reflection preserves the original scalar layout, including legacy

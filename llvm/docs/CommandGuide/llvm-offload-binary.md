@@ -43,6 +43,10 @@ $ llvm-offload-binary -o out.bin \
 $ llvm-offload-binary -o shader.bin \
       --image=file=shader.dxil,triple=dxil-pc-shadermodel6.0-compute
 
+# Package a DirectX C++ kernel with compiler-generated launch metadata:
+$ llvm-offload-binary -o kernel.bin \
+      --image=file=kernel.dxil,triple=dxil-pc-shadermodel6.0-compute,directx-metadata=kernel.bc
+
 # Extract all offload images from an executable (no filters):
 $ llvm-offload-binary in.bin
 # Output:
@@ -87,6 +91,12 @@ Commonly used optional keys include `arch` (e.g. `sm_70` for CUDA) and
 `triple` (e.g. nvptx64-nvidia-cuda).
 
 When bundling, this option specifies images to include in the output binary.
+For a DXIL image, `directx-metadata=<bitcode>` reads the
+`llvm.offload.manifest` named metadata emitted by the DirectX C++ kernel ABI.
+It adds feature declarations from the final container's shader feature flags and
+stores the result under `directx.manifest`. It cannot be combined with an explicit
+`directx.manifest` key. This reads container metadata; it does not validate or sign
+the DXIL image, or perform the runtime's launch-ABI validation.
 When extracting, this option acts as a filter: only images matching the
 specified keys are extracted. If no {option}`--image` options are provided
 during extraction, all images are automatically extracted with descriptive

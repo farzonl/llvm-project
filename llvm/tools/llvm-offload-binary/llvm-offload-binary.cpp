@@ -15,11 +15,17 @@
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/Magic.h"
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Object/ArchiveWriter.h"
+#include "llvm/Object/DXContainer.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compression.h"
 #include "llvm/Support/FileOutputBuffer.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Signals.h"
@@ -43,7 +49,9 @@ static cl::opt<std::string> InputFile(cl::Positional,
 static cl::list<std::string>
     DeviceImages("image",
                  cl::desc("List of key and value arguments. Required keywords "
-                          "are 'file' and 'triple'."),
+                          "are 'file' and 'triple'. 'directx-metadata' reads "
+                          "compiler-generated launch metadata from bitcode "
+                          "for a DXIL image."),
                  cl::value_desc("<key>=<value>,..."),
                  cl::cat(OffloadBinaryCategory));
 
@@ -124,6 +132,56 @@ static Error writeFile(StringRef Filename, StringRef Data) {
   return Error::success();
 }
 
+static Expected<std::string> readDirectXManifest(MemoryBufferRef Shader,
+                                                 StringRef MetadataFile) {
+  auto Buffer = MemoryBuffer::getFile(MetadataFile);
+  if (!Buffer)
+    return createFileError(MetadataFile, Buffer.getError());
+  LLVMContext Context;
+  auto M = parseBitcodeFile((*Buffer)->getMemBufferRef(), Context);
+  if (!M)
+    return createFileError(MetadataFile, M.takeError());
+  auto *Named = (*M)->getNamedMetadata("llvm.offload.manifest");
+  auto *MD = Named && Named->getNumOperands() == 1 &&
+                     Named->getOperand(0)->getNumOperands() == 1
+                 ? dyn_cast<MDString>(Named->getOperand(0)->getOperand(0))
+                 : nullptr;
+  if (!MD)
+    return createStringError(
+        "missing compiler-generated DirectX launch manifest");
+  auto Manifest = json::parse(MD->getString());
+  if (!Manifest)
+    return Manifest.takeError();
+  auto *Object = Manifest->getAsObject();
+  if (!Object)
+    return createStringError("DirectX launch manifest must be an object");
+  auto Container = DXContainer::create(Shader);
+  if (!Container)
+    return createFileError(Shader.getBufferIdentifier(), Container.takeError());
+  auto Flags = Container->getShaderFeatureFlags();
+  if (!Container->getDXIL(false) || !Flags)
+    return createStringError("DirectX image requires executable DXIL and "
+                             "shader feature flags");
+  json::Array Features;
+  uint64_t Remaining = *Flags;
+#define SHADER_FEATURE_FLAG(Num, ModuleNum, Name, Description)                 \
+  if (StringRef(#Name) != "RESERVED" && StringRef(#Name) != "NextUnusedBit") { \
+    uint64_t Flag = static_cast<uint64_t>(dxbc::FeatureFlags::Name);           \
+    if (Remaining & Flag) {                                                    \
+      Features.push_back(#Name);                                               \
+      Remaining &= ~Flag;                                                      \
+    }                                                                          \
+  }
+#include "llvm/BinaryFormat/DXContainerConstants.def"
+  if (Remaining)
+    return createStringError("unsupported DirectX shader feature flags");
+  (*Object)["features"] = std::move(Features);
+  std::string Result;
+  raw_string_ostream OS(Result);
+  OS << *Manifest;
+  return Result;
+}
+
 static Error bundleImages() {
   SmallVector<OffloadBinary::OffloadingImage> AllImages;
   BumpPtrAllocator Alloc;
@@ -156,9 +214,22 @@ static Error bundleImages() {
       for (const auto &[Key, Value] : Args) {
         if (Key == "kind") {
           ImageBinary.TheOffloadKind = getOffloadKind(Value);
-        } else if (Key != "file") {
+        } else if (Key != "file" && Key != "directx-metadata") {
           ImageBinary.StringData[Key] = Value;
         }
+      }
+      if (auto Metadata = Args.find("directx-metadata");
+          Metadata != Args.end()) {
+        if (ImageBinary.TheImageKind != IMG_DXIL)
+          return createStringError("'directx-metadata' requires a DXIL image");
+        if (Args.count("directx.manifest"))
+          return createStringError("'directx-metadata' cannot be combined with "
+                                   "'directx.manifest'");
+        auto Manifest = readDirectXManifest(
+            ImageBinary.Image->getMemBufferRef(), Metadata->second);
+        if (!Manifest)
+          return Manifest.takeError();
+        ImageBinary.StringData["directx.manifest"] = Saver.save(*Manifest);
       }
       AllImages.emplace_back(std::move(ImageBinary));
     }
