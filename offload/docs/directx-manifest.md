@@ -23,6 +23,37 @@ arguments with 32-bit accesses, 32-bit integer/float scalar arguments packed
 into `b0, space0` root constants, and fixed workgroup sizes.
 See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
 
+## Restricted capture-record ABI
+
+An optional `capture` object describes one host kernel argument block:
+
+```json
+"capture": {"size": 32, "pointer_size": 8, "offsets": [0, 8, 16, 24]}
+```
+
+Its offsets correspond to the dense indices in `arguments`, not their order
+in the JSON array. Each offset identifies the source bytes for that binding;
+scalar `offset` fields still describe destinations in root constants.
+Fields must be aligned, ordered, nonoverlapping, and entirely inside the
+record. Pointer fields carry native 64-bit allocation tokens, not shader
+addresses. With `capture`, a launch supplies exactly one argument whose size
+matches the record, rather than one argument per binding. The runtime copies
+its scalar values and resolves its buffer tokens during submission.
+Existing manifests without `capture` retain the separate-argument ABI.
+
+The experimental Clang `-cc1 -fsycl-is-device` compute path records the actual
+AST capture-field offsets and sizes in `dx.capture.layout` function metadata.
+It requires an x64 auxiliary host target for captured pointers. The DirectX
+kernel ABI lowers a single by-value record into resources and root constants,
+and removes this metadata and the capture record before executable emission.
+Flat captures of buffer pointers and 32-bit integers/floats are supported;
+aggregates, unused fields, dynamic field indexing, and pointer escapes are
+rejected. Buffer access instructions determine SRV versus UAV bindings.
+
+This proves a SYCL-generated capture ABI through liboffload, not `libsycl`
+integration: the SYCL runtime still rejects DXIL images, device index/range
+helpers still require adaptation, and driver/linker registration is not wired.
+
 ## Program loading
 
 `olCreateProgram` accepts exactly one entry in one current-version (version 3),

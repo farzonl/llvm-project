@@ -122,6 +122,31 @@ TEST(DirectXManifestTest, DecodesAndCanonicalizesBindings) {
   EXPECT_EQ(Scalar->Offset, 8u);
 }
 
+TEST(DirectXManifestTest, ValidatesCapturedArgumentLayouts) {
+  auto Object = emptyManifest();
+  Object["constants"] = constants(4);
+  Object["arguments"] =
+      json::Array{buffer(2, "uav"), scalar(0, 4, 0), buffer(1, "srv")};
+  Object["capture"] = json::Object{
+      {"size", 24}, {"pointer_size", 8}, {"offsets", json::Array{0, 8, 16}}};
+  auto Manifest = DirectXManifestTy::parse(encode(Object));
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  ASSERT_TRUE(Manifest->Capture);
+  EXPECT_EQ(Manifest->Capture->Offsets, (SmallVector<uint32_t>{0, 8, 16}));
+  for (auto Offsets :
+       {json::Array{0, 0, 16}, json::Array{0, 8, 20}, json::Array{0, 8, 24}}) {
+    (*Object.getObject("capture"))["offsets"] = std::move(Offsets);
+    expectError(DirectXManifestTy::parse(encode(Object)),
+                error::ErrorCode::INVALID_BINARY, "capture fields");
+  }
+  (*Object.getObject("capture"))["offsets"] = json::Array{0, 8};
+  expectError(DirectXManifestTy::parse(encode(Object)),
+              error::ErrorCode::INVALID_BINARY, "one offset");
+  (*Object.getObject("capture"))["pointer_size"] = 4;
+  expectError(DirectXManifestTy::parse(encode(Object)),
+              error::ErrorCode::UNSUPPORTED, "64-bit pointer");
+}
+
 TEST(DirectXManifestTest, AcceptsEmptyKernelsAndFullRootBudget) {
   auto Empty = DirectXManifestTy::parse(encode(emptyManifest()));
   ASSERT_TRUE(static_cast<bool>(Empty)) << toString(Empty.takeError());

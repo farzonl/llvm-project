@@ -9,6 +9,7 @@
 
 #include "DirectX.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -28,7 +29,7 @@ void fail(const Twine &Message) {
   reportFatalUsageError("DirectX C++ kernel ABI: " + Message);
 }
 
-bool checkPointer(Argument &Arg, bool ReadOnly) {
+bool checkPointer(Value &Arg, bool ReadOnly) {
   SmallVector<Value *> Worklist{&Arg};
   SmallPtrSet<Value *, 16> Seen;
   bool Accessed = false;
@@ -73,6 +74,187 @@ bool checkPointer(Argument &Arg, bool ReadOnly) {
   return true;
 }
 
+void replaceBufferPointer(Value *Old, Value *Pointer) {
+  for (User *U : make_early_inc_range(Old->users())) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
+      IRBuilder<> Builder(GEP);
+      SmallVector<Value *> Indices(GEP->indices());
+      Value *New = Builder.CreateGEP(GEP->getSourceElementType(), Pointer,
+                                     Indices, "", GEP->getNoWrapFlags());
+      if (auto *I = dyn_cast<Instruction>(New))
+        I->copyMetadata(*GEP);
+      replaceBufferPointer(GEP, New);
+      GEP->eraseFromParent();
+    } else if (auto *Load = dyn_cast<LoadInst>(U)) {
+      Load->setOperand(0, Pointer);
+    } else {
+      cast<StoreInst>(U)->setOperand(1, Pointer);
+    }
+  }
+}
+
+Function *flattenCapture(Function &Kernel, json::Object &Capture) {
+  auto *MD = Kernel.getMetadata("dx.capture.layout");
+  if (!MD || MD->getNumOperands() < 3 || Kernel.arg_size() != 1 ||
+      !Kernel.getArg(0)->hasByValAttr()) {
+    fail("capture kernels require one by-value record and a capture layout");
+    return nullptr;
+  }
+  const DataLayout &Layout = Kernel.getParent()->getDataLayout();
+  auto Integer = [](Metadata *Value) -> std::optional<uint32_t> {
+    auto *CAM = dyn_cast<ConstantAsMetadata>(Value);
+    auto *CI = CAM ? dyn_cast<ConstantInt>(CAM->getValue()) : nullptr;
+    if (!CI || !CI->getType()->isIntegerTy(32))
+      return std::nullopt;
+    return CI->getZExtValue();
+  };
+  auto *Record = dyn_cast<StructType>(Kernel.getArg(0)->getParamByValType());
+  if (!Record || Record->isOpaque() || Record->getNumElements() == 0) {
+    fail("capture argument must be a nonempty flat record");
+    return nullptr;
+  }
+  auto *RecordLayout = Layout.getStructLayout(Record);
+  auto Bytes = Integer(MD->getOperand(0));
+  auto PointerSize = Integer(MD->getOperand(1));
+  if (!Bytes || !*Bytes || !PointerSize || *PointerSize != 8 ||
+      *Bytes != RecordLayout->getSizeInBytes()) {
+    fail("capture ABI requires a 64-bit pointer layout and a bounded record");
+    return nullptr;
+  }
+  SmallVector<Type *> Types;
+  unsigned NumFields = MD->getNumOperands() - 2;
+  SmallVector<SmallVector<LoadInst *>> Loads(NumFields);
+  SmallVector<bool> ReadOnly(NumFields, true);
+  SmallVector<uint32_t> FieldOffsets;
+  SmallVector<Type *> FieldTypes;
+  json::Array Offsets;
+  uint32_t End = 0;
+  for (unsigned I = 0; I < NumFields; ++I) {
+    auto *Field = dyn_cast<MDNode>(MD->getOperand(I + 2));
+    auto Offset = Field && Field->getNumOperands() == 2
+                      ? Integer(Field->getOperand(0))
+                      : std::nullopt;
+    auto Size = Field && Field->getNumOperands() == 2
+                    ? Integer(Field->getOperand(1))
+                    : std::nullopt;
+    if (!Offset || !Size || *Offset < End || *Offset >= *Bytes ||
+        *Size > *Bytes - *Offset) {
+      fail("capture fields must be ordered, nonoverlapping, and in bounds");
+      return nullptr;
+    }
+    unsigned Element = RecordLayout->getElementContainingOffset(*Offset);
+    Type *Ty = Record->getElementType(Element);
+    if (RecordLayout->getElementOffset(Element) != *Offset) {
+      fail("capture layout does not match record field offsets");
+      return nullptr;
+    }
+    if (Ty->isPointerTy()) {
+      unsigned AS = Ty->getPointerAddressSpace();
+      if ((AS != 0 && AS != 4) || *Size != 8 || *Offset % 8) {
+        fail("captured buffers require 64-bit default or generic pointers");
+        return nullptr;
+      }
+      Types.push_back(PointerType::get(Kernel.getContext(), 0));
+    } else if ((Ty->isIntegerTy(32) || Ty->isFloatTy()) && *Size == 4 &&
+               *Offset % 4 == 0) {
+      Types.push_back(Ty);
+    } else {
+      fail("captures must be buffer pointers or 32-bit integer/float values");
+      return nullptr;
+    }
+    FieldOffsets.push_back(*Offset);
+    FieldTypes.push_back(Ty);
+    Offsets.push_back(*Offset);
+    End = *Offset + *Size;
+  }
+  SmallVector<Value *> Worklist{Kernel.getArg(0)};
+  SmallVector<Instruction *> Addresses;
+  SmallPtrSet<Value *, 16> Seen;
+  while (!Worklist.empty()) {
+    Value *Address = Worklist.pop_back_val();
+    if (!Seen.insert(Address).second)
+      continue;
+    for (User *U : Address->users()) {
+      if (isa<GetElementPtrInst, AddrSpaceCastInst>(U)) {
+        auto *I = cast<Instruction>(U);
+        Worklist.push_back(I);
+        Addresses.push_back(I);
+        continue;
+      }
+      auto *Load = dyn_cast<LoadInst>(U);
+      int64_t Offset = 0;
+      if (!Load || Load->isAtomic() || Load->isVolatile() ||
+          GetPointerBaseWithConstantOffset(Address, Offset, Layout) !=
+              Kernel.getArg(0) ||
+          Offset < 0 || uint64_t(Offset) >= *Bytes) {
+        fail("capture records may only be read at constant field offsets");
+        return nullptr;
+      }
+      auto It = llvm::find(FieldOffsets, uint64_t(Offset));
+      unsigned Field = It - FieldOffsets.begin();
+      if (It == FieldOffsets.end() || Load->getType() != FieldTypes[Field]) {
+        fail("capture load does not match a complete record field");
+        return nullptr;
+      }
+      Loads[Field].push_back(Load);
+      if (Load->getType()->isPointerTy()) {
+        if (!checkPointer(*Load, false))
+          return nullptr;
+        SmallVector<Value *> Pointers{Load};
+        SmallPtrSet<Value *, 16> Visited;
+        while (!Pointers.empty()) {
+          Value *Pointer = Pointers.pop_back_val();
+          if (!Visited.insert(Pointer).second)
+            continue;
+          for (User *Use : Pointer->users())
+            if (isa<StoreInst>(Use))
+              ReadOnly[Field] = false;
+            else if (isa<GetElementPtrInst>(Use))
+              Pointers.push_back(Use);
+        }
+      }
+    }
+  }
+  if (llvm::any_of(Loads, [](const auto &Field) { return Field.empty(); })) {
+    fail("unused captured fields are not supported");
+    return nullptr;
+  }
+  auto *Flat =
+      Function::Create(FunctionType::get(Kernel.getReturnType(), Types, false),
+                       Kernel.getLinkage(), "", Kernel.getParent());
+  Flat->takeName(&Kernel);
+  Flat->setAttributes(AttributeList::get(
+      Kernel.getContext(), Kernel.getAttributes().getFnAttrs(), {}, {}));
+  Flat->copyMetadata(&Kernel, 0);
+  Flat->setMetadata("dx.capture.layout", nullptr);
+  Flat->setVisibility(Kernel.getVisibility());
+  Flat->setDSOLocal(Kernel.isDSOLocal());
+  Flat->splice(Flat->begin(), &Kernel);
+  for (auto [Index, Arg] : enumerate(Flat->args())) {
+    if (Arg.getType()->isPointerTy() && ReadOnly[Index])
+      Arg.addAttr(Attribute::get(Kernel.getContext(), "dx.readonly"));
+    for (LoadInst *Load : Loads[Index]) {
+      if (Load->getType()->isPointerTy())
+        replaceBufferPointer(Load, &Arg);
+      else
+        Load->replaceAllUsesWith(&Arg);
+      Load->eraseFromParent();
+    }
+  }
+  // Children can be reached in different orders through shared address chains.
+  while (!Addresses.empty()) {
+    auto It =
+        llvm::find_if(Addresses, [](Instruction *I) { return I->use_empty(); });
+    assert(It != Addresses.end() && "validated capture address escaped");
+    (*It)->eraseFromParent();
+    Addresses.erase(It);
+  }
+  Capture = json::Object{
+      {"size", *Bytes}, {"pointer_size", 8}, {"offsets", std::move(Offsets)}};
+  Kernel.eraseFromParent();
+  return Flat;
+}
+
 bool lowerKernel(Module &M) {
   Function *Kernel = nullptr;
   for (Function &F : M) {
@@ -114,6 +296,13 @@ bool lowerKernel(Module &M) {
   if (Product > 1024) {
     fail("workgroup exceeds 1024 threads");
     return false;
+  }
+  std::optional<json::Object> Capture;
+  if (Kernel->getMetadata("dx.capture.layout")) {
+    Capture.emplace();
+    Kernel = flattenCapture(*Kernel, *Capture);
+    if (!Kernel)
+      return false;
   }
   SmallVector<Type *> ScalarTypes;
   for (Argument &Arg : Kernel->args()) {
@@ -255,7 +444,7 @@ bool lowerKernel(Module &M) {
   std::string Manifest;
   raw_string_ostream OS(Manifest);
   VersionTuple Model = M.getTargetTriple().getOSVersion();
-  OS << json::Value(json::Object{
+  json::Object ManifestObject{
       {"version", 1},
       {"entry", Entry->getName().str()},
       {"shader_model",
@@ -263,7 +452,10 @@ bool lowerKernel(Module &M) {
       {"numthreads", json::Array{Threads[0], Threads[1], Threads[2]}},
       {"features", json::Array{}},
       {"constants", std::move(Constants)},
-      {"arguments", std::move(Arguments)}});
+      {"arguments", std::move(Arguments)}};
+  if (Capture)
+    ManifestObject["capture"] = std::move(*Capture);
+  OS << json::Value(std::move(ManifestObject));
   M.getOrInsertNamedMetadata("llvm.offload.manifest")
       ->addOperand(
           MDNode::get(M.getContext(), MDString::get(M.getContext(), Manifest)));

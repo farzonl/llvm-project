@@ -1,0 +1,61 @@
+# RUN: split-file %s %t
+# RUN: not opt -S -dxil-kernel-abi %t/escape.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
+# RUN: not opt -S -dxil-kernel-abi %t/dynamic.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=DYNAMIC
+# RUN: not opt -S -dxil-kernel-abi %t/wide.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=WIDE
+# RUN: not opt -S -dxil-kernel-abi %t/overlap.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OVERLAP
+# ESCAPE: buffer pointers may only be indexed, loaded, or stored
+# DYNAMIC: capture records may only be read at constant field offsets
+# WIDE: captures must be buffer pointers or 32-bit integer/float values
+# OVERLAP: capture fields must be ordered, nonoverlapping, and in bounds
+
+#--- escape.ll
+target datalayout = "e-p:32:32"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { ptr, [4 x i8] }
+define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  %pointer = load ptr, ptr %args
+  call void @escape(ptr %pointer)
+  ret void
+}
+declare void @escape(ptr)
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
+!0 = !{i32 8, i32 8, !1}
+!1 = !{i32 0, i32 8}
+
+#--- dynamic.ll
+target datalayout = "e-p:32:32"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { i32, i32 }
+define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  %index = load i32, ptr %args
+  %address = getelementptr i8, ptr %args, i32 %index
+  %value = load i32, ptr %address
+  ret void
+}
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
+!0 = !{i32 8, i32 8, !1, !2}
+!1 = !{i32 0, i32 4}
+!2 = !{i32 4, i32 4}
+
+#--- wide.ll
+target datalayout = "e-p:32:32-i64:64"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { i64 }
+define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  %value = load i64, ptr %args
+  ret void
+}
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
+!0 = !{i32 8, i32 8, !1}
+!1 = !{i32 0, i32 8}
+
+#--- overlap.ll
+target datalayout = "e-p:32:32"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { i32, i32 }
+define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  ret void
+}
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
+!0 = !{i32 8, i32 8, !1, !1}
+!1 = !{i32 0, i32 4}

@@ -54,6 +54,11 @@ struct DirectXConstantBindingTy {
   uint32_t Size = 0;
 };
 
+struct DirectXCaptureLayoutTy {
+  uint32_t Size = 0;
+  SmallVector<uint32_t> Offsets;
+};
+
 struct DirectXManifestTy {
   static constexpr StringLiteral MetadataKey = "directx.manifest";
   static constexpr uint32_t Version = 1;
@@ -66,6 +71,11 @@ struct DirectXManifestTy {
   std::optional<DirectXConstantBindingTy> Constants;
   // Canonicalized into argument-index order, independent of JSON array order.
   SmallVector<DirectXArgumentTy> Arguments;
+  std::optional<DirectXCaptureLayoutTy> Capture;
+
+  size_t getNumLaunchArguments() const {
+    return Capture ? 1 : Arguments.size();
+  }
 
   static Expected<DirectXManifestTy> parse(StringRef JSON);
   static Expected<DirectXManifestTy> parse(const object::OffloadBinary &Image);

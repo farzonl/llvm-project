@@ -13,7 +13,10 @@
 
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
+#include "TargetInfo.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/Basic/DiagnosticFrontend.h"
+#include "clang/Basic/TargetInfo.h"
 #include "llvm/Frontend/Offloading/OffloadWrapper.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/VirtualFileSystem.h"
@@ -87,6 +90,34 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
   setDSOLocal(Fn);
   SetLLVMFunctionAttributesForDefinition(cast<Decl>(OutlinedFnDecl), Fn);
   CGF.FinishFunction();
+  if (getTriple().isDXIL()) {
+    getTargetCodeGenInfo().setTargetAttributes(KernelEntryPointFn, Fn, *this);
+    llvm::SmallVector<llvm::Metadata *> Layout;
+    if (Args.size() == 1) {
+      QualType CaptureType = Args[0]->getType().getNonReferenceType();
+      if (CaptureType->isPointerType())
+        CaptureType = CaptureType->getPointeeType();
+      if (const auto *Record = CaptureType->getAs<RecordType>()) {
+        const RecordDecl *RD = Record->getDecl();
+        const ASTRecordLayout &RL = Ctx.getASTRecordLayout(RD);
+        auto Integer = [&](uint64_t Value) {
+          return llvm::ConstantAsMetadata::get(
+              llvm::ConstantInt::get(Int32Ty, Value));
+        };
+        Layout.push_back(Integer(RL.getSize().getQuantity()));
+        Layout.push_back(
+            Integer(Ctx.getTargetInfo().getPointerWidth(LangAS::Default) / 8));
+        for (const FieldDecl *Field : RD->fields())
+          Layout.push_back(llvm::MDNode::get(
+              getLLVMContext(),
+              {Integer(RL.getFieldOffset(Field->getFieldIndex()) / 8),
+               Integer(
+                   Ctx.getTypeSizeInChars(Field->getType()).getQuantity())}));
+      }
+    }
+    Fn->setMetadata("dx.capture.layout",
+                    llvm::MDNode::get(getLLVMContext(), Layout));
+  }
 }
 
 llvm::Function *CodeGenModule::embedSYCLDeviceBinary() {

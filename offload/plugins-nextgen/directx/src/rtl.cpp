@@ -974,7 +974,7 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
       return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                            "DirectX dispatch group count exceeds 65535");
   }
-  if (Args.NumArgs != Program->Manifest.Arguments.size() ||
+  if (Args.NumArgs != Program->Manifest.getNumLaunchArguments() ||
       (Args.NumArgs && (!Args.Args || !Args.ArgSizes)))
     return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                          "DirectX launch argument count or arrays mismatch");

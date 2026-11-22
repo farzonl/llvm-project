@@ -38,6 +38,11 @@ build-system single-source compilation; automatic driver/linker integration,
 compiler-generated host registration, general pointers, SYCL integration, and
 OpenMP DeviceRTL integration remain future work.
 
+A restricted SYCL capture-record proof also generates field-layout metadata
+from Clang and executes captured buffer/scalar arguments through liboffload.
+It preserves the separate-argument ABI but does not yet enable DXIL in libsycl.
+See the [capture validation test](directx-demo.md#validate-sycl-generated-captures-separately).
+
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
 validation helper are implemented, including explicit scalar field layouts and

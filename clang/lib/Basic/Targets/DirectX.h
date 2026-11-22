@@ -77,6 +77,13 @@ public:
   void adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
               const TargetInfo *Aux) override {
     TargetInfo::adjust(Diags, Opts, Aux);
+    if (Opts.SYCLIsDevice && Aux) {
+      // Capture pointers carry host allocation tokens. ABI lowering removes
+      // these fields before executable DXIL uses its resource pointer layout.
+      PointerWidth = Aux->getPointerWidth(LangAS::Default);
+      PointerAlign = Aux->getPointerAlign(LangAS::Default);
+      resetDataLayout();
+    }
     // The static values this addresses do not apply outside of the same thread
     // This protection is neither available nor needed
     Opts.ThreadsafeStatics = false;

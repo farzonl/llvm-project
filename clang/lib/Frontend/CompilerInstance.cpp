@@ -122,7 +122,9 @@ bool CompilerInstance::createTarget() {
   if (!hasTarget())
     return false;
 
-  if (getLangOpts().SYCLIsDevice && !getTarget().getTriple().isGPU()) {
+  if (getLangOpts().SYCLIsDevice && !getTarget().getTriple().isGPU() &&
+      !(getTarget().getTriple().isDXIL() &&
+        getTarget().getTriple().getEnvironment() == llvm::Triple::Compute)) {
     getDiagnostics().Report(diag::err_sycl_device_invalid_target)
         << getTarget().getTriple().str();
     return false;

@@ -38,8 +38,10 @@ public:
   void setTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
                            CodeGenModule &CGM) const override {
     const auto *FD = dyn_cast_or_null<FunctionDecl>(D);
-    if (!FD || !FD->hasAttr<DeviceKernelAttr>() || GV->isDeclaration() ||
-        CGM.getLangOpts().HLSL)
+    if (!FD ||
+        !(FD->hasAttr<DeviceKernelAttr>() ||
+          FD->hasAttr<SYCLKernelEntryPointAttr>()) ||
+        GV->isDeclaration() || CGM.getLangOpts().HLSL)
       return;
     auto *F = cast<llvm::Function>(GV);
     F->addFnAttr("dx.kernel");

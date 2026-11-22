@@ -131,3 +131,18 @@ with `OFFLOAD_DIRECTX_TEST_DEVICE`, and run `directx.unittests` as described in
 the native Windows instructions. The debug-layer tests also fail on stored
 D3D12 warnings or errors. Reflection tests separately check the exact 32 KiB
 boundary, oversized storage, legacy scalar padding, and kernel metadata.
+
+## Validate SYCL-generated captures separately
+
+`DirectXDispatchTest.ExecutesCompilerGeneratedSyclCaptureBlock` loads a signed,
+compiler-packaged kernel generated from a real `sycl_kernel_entry_point` lambda.
+The host creates the same C++ lambda and submits its complete capture record
+as one liboffload argument. Compiler-generated metadata supplies the offsets;
+the test does not author a manifest or reconstruct the closure's layout.
+
+Counts `1`, `63`, `64`, `65`, and `79` exercise complete and partial groups with
+blocking and asynchronous queues. The test verifies every output and trailing
+guards, rejects truncated records, and overwrites the host capture after
+submission to verify that queued work retains independent bindings.
+Run it with the same adapter-selection and GPU-validation environment above.
+This is an ABI proof, not a `sycl::queue::parallel_for` application.

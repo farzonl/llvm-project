@@ -121,7 +121,7 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
                                      *ABI);
   if (auto Err = checkKeys(*Object,
                            {"version", "entry", "shader_model", "numthreads",
-                            "features", "constants", "arguments"},
+                            "features", "constants", "arguments", "capture"},
                            "root"))
     return std::move(Err);
 
@@ -255,6 +255,47 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
   for (size_t I = 1; I < ScalarRanges.size(); ++I)
     if (ScalarRanges[I].first < ScalarRanges[I - 1].second)
       return invalid("scalar arguments overlap in the root constant block");
+  if (const auto *Value = Object->get("capture")) {
+    const auto *Block = Value->getAsObject();
+    if (!Block)
+      return invalid("capture must be an object");
+    if (auto Err =
+            checkKeys(*Block, {"size", "pointer_size", "offsets"}, "capture"))
+      return std::move(Err);
+    auto Size = readU32(Block->get("size"), "capture.size");
+    if (!Size)
+      return Size.takeError();
+    auto PointerSize =
+        readU32(Block->get("pointer_size"), "capture.pointer_size");
+    if (!PointerSize)
+      return PointerSize.takeError();
+    if (*PointerSize != 8 || *PointerSize != sizeof(void *))
+      return error::createOffloadError(
+          error::ErrorCode::UNSUPPORTED,
+          "DirectX capture layout requires native 64-bit pointer values");
+    const auto *Offsets = Block->getArray("offsets");
+    if (!*Size || !Offsets || Offsets->empty() ||
+        Offsets->size() != Manifest.Arguments.size())
+      return invalid(
+          "capture requires a nonempty record and one offset per binding");
+    DirectXCaptureLayoutTy Layout;
+    Layout.Size = *Size;
+    uint32_t End = 0;
+    for (const auto &Arg : Manifest.Arguments) {
+      auto Offset = readU32(&(*Offsets)[Arg.Index], "capture.offsets");
+      if (!Offset)
+        return Offset.takeError();
+      const auto *Scalar = std::get_if<DirectXScalarBindingTy>(&Arg.Binding);
+      uint32_t Width = Scalar ? Scalar->Size : *PointerSize;
+      if (*Offset % Width || *Offset < End || *Offset > *Size ||
+          Width > *Size - *Offset)
+        return invalid("capture fields must be aligned, ordered, "
+                       "nonoverlapping, and in bounds");
+      End = *Offset + Width;
+      Layout.Offsets.push_back(*Offset);
+    }
+    Manifest.Capture = std::move(Layout);
+  }
   return Manifest;
 }
 

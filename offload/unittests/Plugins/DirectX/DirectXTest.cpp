@@ -13,6 +13,7 @@
 #include "DirectXArguments.h"
 #include "DirectXQueue.h"
 #include "DirectXRootSignature.h"
+#include "Inputs/cpp-capture.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -2060,6 +2061,83 @@ TEST_F(DirectXDispatchTest, ExecutesClangCppIntegerAndFloatScalars) {
     Count = 5;
     Scale = 0.5f;
   }
+}
+
+TEST_F(DirectXDispatchTest, ExecutesCompilerGeneratedSyclCaptureBlock) {
+  using llvm::omp::target::plugin::directx::DirectXManifestTy;
+  auto Image = llvm::MemoryBuffer::getFile(
+      DIRECTX_TEST_INPUTS_DIR "/cpp-capture.bin", false);
+  ASSERT_TRUE(static_cast<bool>(Image)) << Image.getError().message();
+  auto Entries =
+      llvm::object::OffloadBinary::create((*Image)->getMemBufferRef());
+  ASSERT_TRUE(static_cast<bool>(Entries))
+      << llvm::toString(Entries.takeError());
+  ASSERT_EQ(Entries->size(), 1u);
+  auto Manifest = DirectXManifestTy::parse(*Entries->front());
+  ASSERT_TRUE(static_cast<bool>(Manifest))
+      << llvm::toString(Manifest.takeError());
+  ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
+  Program = nullptr;
+  ASSERT_TRUE(
+      succeeded(olCreateProgram(Context, Device, (*Image)->getBufferStart(),
+                                (*Image)->getBufferSize(), &Program)));
+  ASSERT_TRUE(succeeded(olGetSymbol(Program, Manifest->Entry.c_str(),
+                                    OL_SYMBOL_KIND_KERNEL, &Kernel)));
+  Launch.GroupSize = {64, 1, 1};
+  ASSERT_TRUE(succeeded(olMemFree(Context, Input)));
+  Input = nullptr;
+  ASSERT_TRUE(succeeded(olMemFree(Context, Output)));
+  Output = nullptr;
+  std::array<float, 80> A{}, B{}, Expected{}, Actual{};
+  for (unsigned I = 0; I < A.size(); ++I) {
+    A[I] = I * 0.5f;
+    B[I] = I * 0.25f + 1.0f;
+  }
+  void *Second = nullptr;
+  auto Cleanup = llvm::scope_exit([&] {
+    EXPECT_TRUE(succeeded(olSyncQueue(Queue)));
+    if (Second)
+      EXPECT_TRUE(succeeded(olMemFree(Context, Second)));
+  });
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE, sizeof(A), &Input)));
+  ASSERT_TRUE(succeeded(
+      olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE, sizeof(B), &Second)));
+  ASSERT_TRUE(succeeded(olMemAlloc(Context, Device, OL_ALLOC_TYPE_DEVICE,
+                                   sizeof(Actual), &Output)));
+  ASSERT_TRUE(
+      succeeded(olMemcpy(Queue, Input, Device, A.data(), nullptr, sizeof(A))));
+  ASSERT_TRUE(
+      succeeded(olMemcpy(Queue, Second, Device, B.data(), nullptr, sizeof(B))));
+  ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+  for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)})
+    for (unsigned Count : {1, 63, 64, 65, 79}) {
+      SCOPED_TRACE(Count);
+      SCOPED_TRACE(Q != nullptr);
+      Launch.NumGroups = {(Count + 63) / 64, 1, 1};
+      auto Capture = makeVectorAddCapture(static_cast<const float *>(Input),
+                                          static_cast<const float *>(Second),
+                                          static_cast<float *>(Output), Count);
+      void *Args[] = {&Capture};
+      size_t Sizes[] = {sizeof(Capture) - 1};
+      ASSERT_TRUE(failedWith(
+          olLaunchKernel(Q, Device, Kernel, &Launch, nullptr, 1, Args, Sizes),
+          OL_ERRC_INVALID_SIZE));
+      Sizes[0] = sizeof(Capture);
+      Expected.fill(-123.5f);
+      ASSERT_TRUE(succeeded(olMemcpy(Q, Output, Device, Expected.data(),
+                                     nullptr, sizeof(Expected))));
+      ASSERT_TRUE(succeeded(
+          olLaunchKernel(Q, Device, Kernel, &Launch, nullptr, 1, Args, Sizes)));
+      std::memset(&Capture, 0, sizeof(Capture));
+      for (unsigned I = 0; I < Count; ++I)
+        Expected[I] = A[I] + B[I];
+      ASSERT_TRUE(succeeded(
+          olMemcpy(Q, Actual.data(), nullptr, Output, Device, sizeof(Actual))));
+      if (Q)
+        ASSERT_TRUE(succeeded(olSyncQueue(Q)));
+      EXPECT_EQ(Actual, Expected);
+    }
 }
 
 TEST_F(DirectXDispatchTest, RejectsInvalidGeometryArgumentsAndAliasing) {

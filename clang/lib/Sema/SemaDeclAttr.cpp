@@ -8637,6 +8637,8 @@ void Sema::ProcessDeclAttributeList(
   // for these. Additionally, it would be good to have a way to specify "these
   // attribute must never appear as a group" for attributes like cold and hot.
   if (!(D->hasAttr<DeviceKernelAttr>() ||
+        (D->hasAttr<SYCLKernelEntryPointAttr>() &&
+         Context.getTargetInfo().getTriple().isDXIL()) ||
         (D->hasAttr<CUDAGlobalAttr>() &&
          Context.getTargetInfo().getTriple().isSPIRV()))) {
     // These attributes cannot be applied to a non-kernel function.

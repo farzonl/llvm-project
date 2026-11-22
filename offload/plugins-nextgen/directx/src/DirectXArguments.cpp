@@ -44,39 +44,53 @@ Error DirectXArgumentBindingsTy::prepare(
     const DirectXManifestTy &Manifest, ArrayRef<void *> Args,
     ArrayRef<int64_t> Sizes,
     function_ref<Expected<DirectXResolvedBufferTy>(const void *)> Resolve) {
-  if (Args.size() != Manifest.Arguments.size() || Sizes.size() != Args.size())
+  if (Args.size() != Manifest.getNumLaunchArguments() ||
+      Sizes.size() != Args.size())
     return error::createOffloadError(
         ErrorCode::INVALID_ARGUMENT,
         "DirectX requires one argument value and size per manifest argument");
+  if (Manifest.Capture && !Args[0])
+    return error::createOffloadError(ErrorCode::INVALID_ARGUMENT,
+                                     "DirectX capture argument has no value");
+  if (Manifest.Capture && Sizes[0] != Manifest.Capture->Size)
+    return error::createOffloadError(
+        ErrorCode::INVALID_SIZE,
+        "DirectX capture argument requires a complete capture record");
 
   DirectXArgumentBindingsTy Result;
   if (Manifest.Constants)
     Result.Constants.resize(Manifest.Constants->Size / 4, 0);
   for (const auto &Arg : Manifest.Arguments) {
-    if (!Args[Arg.Index])
+    const auto *Scalar = std::get_if<DirectXScalarBindingTy>(&Arg.Binding);
+    uint32_t Width = Scalar ? Scalar->Size : sizeof(void *);
+    const void *Value = Manifest.Capture
+                            ? static_cast<const char *>(Args[0]) +
+                                  Manifest.Capture->Offsets[Arg.Index]
+                            : Args[Arg.Index];
+    int64_t Size = Manifest.Capture ? Width : Sizes[Arg.Index];
+    if (!Value)
       return error::createOffloadError(ErrorCode::INVALID_ARGUMENT,
                                        "DirectX argument %u has no value",
                                        Arg.Index);
-    if (const auto *Scalar =
-            std::get_if<DirectXScalarBindingTy>(&Arg.Binding)) {
-      if (Sizes[Arg.Index] != Scalar->Size)
+    if (Scalar) {
+      if (Size != Scalar->Size)
         return error::createOffloadError(
             ErrorCode::INVALID_SIZE, "DirectX scalar argument %u size mismatch",
             Arg.Index);
-      auto *Bytes = static_cast<const char *>(Args[Arg.Index]);
+      auto *Bytes = static_cast<const char *>(Value);
       for (uint32_t I = 0; I < Scalar->Size / 4; ++I)
         Result.Constants[Scalar->Offset / 4 + I] =
             support::endian::read32le(Bytes + I * 4);
       continue;
     }
 
-    if (Sizes[Arg.Index] != static_cast<int64_t>(sizeof(void *)))
+    if (Size != static_cast<int64_t>(sizeof(void *)))
       return error::createOffloadError(
           ErrorCode::INVALID_SIZE,
           "DirectX buffer argument %u requires a pointer-sized value",
           Arg.Index);
     const void *Pointer = nullptr;
-    std::memcpy(&Pointer, Args[Arg.Index], sizeof(Pointer));
+    std::memcpy(&Pointer, Value, sizeof(Pointer));
     if (!Pointer)
       return error::createOffloadError(ErrorCode::INVALID_ARGUMENT,
                                        "DirectX buffer argument %u is null",
