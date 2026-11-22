@@ -27,6 +27,15 @@ Clang-driver splitting, compiler-generated host registration, or a C++ AMP,
 CUDA, SYCL, or OpenMP frontend. Program creation and submission still use
 liboffload.
 
+The host uses the backend-neutral `offload/examples/OffloadExample.h` helper
+for session ownership, typed allocation/copies, kernel lookup/launch, and event
+timing. The session drains its queue before releasing resources and reports
+cleanup failures through the executable's exit status. Its typed buffer views
+borrow session-owned allocations; host transfer arrays must outlive the
+session or completion of their queued transfers. Input generation, command-line
+handling, and CPU verification remain in the example. This helper is example
+support, not a new public programming API or a replacement for SYCL.
+
 Kernels require a fixed `reqd_work_group_size`, return `void`, and accept buffer
 pointers with 32-bit integer/float accesses and 32-bit integer/float scalars.
 Scalar arguments are packed consecutively into root constants at `b0, space0`,
