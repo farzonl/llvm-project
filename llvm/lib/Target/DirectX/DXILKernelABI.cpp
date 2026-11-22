@@ -115,14 +115,28 @@ bool lowerKernel(Module &M) {
     fail("workgroup exceeds 1024 threads");
     return false;
   }
+  SmallVector<Type *> ScalarTypes;
   for (Argument &Arg : Kernel->args()) {
-    if (!Arg.getType()->isPointerTy() ||
-        Arg.getType()->getPointerAddressSpace() != 0) {
-      fail("only default-address-space buffer pointer arguments are supported");
+    Type *Ty = Arg.getType();
+    if (Ty->isIntegerTy(32) || Ty->isFloatTy()) {
+      if (Arg.use_empty()) {
+        fail("unused scalar arguments are not supported");
+        return false;
+      }
+      ScalarTypes.push_back(Ty);
+      continue;
+    }
+    if (!Ty->isPointerTy() || Ty->getPointerAddressSpace() != 0) {
+      fail("arguments must be default-address-space buffer pointers or "
+           "32-bit integer/float scalars");
       return false;
     }
     if (!checkPointer(Arg, Arg.hasAttribute("dx.readonly")))
       return false;
+  }
+  if (ScalarTypes.size() > 63) {
+    fail("scalar arguments exceed the 252-byte root constant limit");
+    return false;
   }
   for (BasicBlock &BB : *Kernel)
     for (Instruction &I : BB)
@@ -172,7 +186,52 @@ bool lowerKernel(Module &M) {
                              ConstantAsMetadata::get(Builder.getInt32(8))}));
   unsigned SRV = 0, UAV = 0;
   json::Array Arguments;
+  json::Value Constants = nullptr;
+  Value *ConstantHandle = nullptr;
+  TargetExtType *ConstantHandleTy = nullptr;
+  if (!ScalarTypes.empty()) {
+    auto *Layout = StructType::create(M.getContext(), ScalarTypes,
+                                      "__dx_kernel_args", true);
+    ConstantHandleTy =
+        TargetExtType::get(M.getContext(), "dx.CBuffer", {Layout});
+    ConstantHandle = Builder.CreateIntrinsic(
+        ConstantHandleTy, Intrinsic::dx_resource_handlefrombinding,
+        {Builder.getInt32(0), Builder.getInt32(0), Builder.getInt32(1),
+         Builder.getInt32(0), Builder.CreateGlobalString(Layout->getName())});
+    unsigned Bytes = ScalarTypes.size() * 4;
+    SmallVector<Metadata *> Fields{
+        ConstantAsMetadata::get(Builder.getInt32(Bytes))};
+    for (auto [Index, Ty] : enumerate(ScalarTypes))
+      Fields.push_back(MDNode::get(
+          M.getContext(), {ConstantAsMetadata::get(Builder.getInt32(3)),
+                           ConstantAsMetadata::get(Builder.getInt32(Index * 4)),
+                           ConstantAsMetadata::get(Builder.getInt32(7)),
+                           ConstantAsMetadata::get(
+                               Builder.getInt32(Ty->isFloatTy() ? 9 : 4))}));
+    M.getOrInsertNamedMetadata("dx.typeAnnotations")
+        ->addOperand(MDNode::get(
+            M.getContext(),
+            {ConstantAsMetadata::get(Builder.getInt32(0)),
+             ConstantAsMetadata::get(ConstantAggregateZero::get(Layout)),
+             MDNode::get(M.getContext(), Fields)}));
+    Constants = json::Object{{"register", 0}, {"space", 0}, {"size", Bytes}};
+  }
+  unsigned ScalarOffset = 0;
   for (Argument &Arg : Kernel->args()) {
+    if (!Arg.getType()->isPointerTy()) {
+      auto *Pointer = Builder.CreateIntrinsic(
+          Intrinsic::dx_resource_getpointer,
+          {Builder.getPtrTy(2), ConstantHandleTy, Builder.getInt32Ty()},
+          {ConstantHandle, Builder.getInt32(ScalarOffset)}, {}, "",
+          PointerBundles);
+      Arg.replaceAllUsesWith(Builder.CreateLoad(Arg.getType(), Pointer));
+      Arguments.push_back(json::Object{{"index", Arg.getArgNo()},
+                                       {"kind", "scalar"},
+                                       {"size", 4},
+                                       {"offset", ScalarOffset}});
+      ScalarOffset += 4;
+      continue;
+    }
     bool ReadOnly = Arg.hasAttribute("dx.readonly");
     unsigned Register = ReadOnly ? SRV++ : UAV++;
     auto *HandleTy =
@@ -203,7 +262,7 @@ bool lowerKernel(Module &M) {
        json::Array{Model.getMajor(), Model.getMinor().value_or(0)}},
       {"numthreads", json::Array{Threads[0], Threads[1], Threads[2]}},
       {"features", json::Array{}},
-      {"constants", nullptr},
+      {"constants", std::move(Constants)},
       {"arguments", std::move(Arguments)}});
   M.getOrInsertNamedMetadata("llvm.offload.manifest")
       ->addOperand(

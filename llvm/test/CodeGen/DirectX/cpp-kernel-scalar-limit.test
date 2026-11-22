@@ -1,0 +1,22 @@
+# RUN: split-file %s %t
+# RUN: %python %t/generate.py 63 > %t/max.ll
+# RUN: opt -S -dxil-kernel-abi %t/max.ll | FileCheck %s --check-prefix=MAX
+# RUN: llc -filetype=obj %t/max.ll -o %t/max.dxil
+# RUN: %python %t/generate.py 64 > %t/over.ll
+# RUN: not opt -S -dxil-kernel-abi %t/over.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OVER
+
+# MAX: !dx.typeAnnotations
+# MAX: !{{[0-9]+}} = !{i32 252,
+# OVER: scalar arguments exceed the 252-byte root constant limit
+
+#--- generate.py
+import sys
+
+count = int(sys.argv[1])
+params = ", ".join(f"i32 %a{i}" for i in range(count))
+body = "\n".join(f"  store i32 %a{i}, ptr %out" for i in range(count))
+print(
+    'target triple = "dxil-pc-shadermodel6.0-compute"\n'
+    f"define void @limit(ptr %out, {params}) #0 {{\n{body}\n  ret void\n}}\n"
+    'attributes #0 = { convergent "dx.kernel" "hlsl.numthreads"="1,1,1" }'
+)

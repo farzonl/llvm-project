@@ -1841,6 +1841,7 @@ protected:
   ol_kernel_launch_size_args_t Launch{};
 
   void loadProgram(llvm::json::Object Object = manifest()) {
+    std::string Entry = Object.getString("entry")->str();
     if (Program) {
       ASSERT_TRUE(succeeded(olDestroyProgram(Program)));
       Program = nullptr;
@@ -1849,7 +1850,7 @@ protected:
     ASSERT_TRUE(succeeded(olCreateProgram(Context, Device, Bytes.data(),
                                           Bytes.size(), &Program)));
     ASSERT_TRUE(succeeded(
-        olGetSymbol(Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel)));
+        olGetSymbol(Program, Entry.c_str(), OL_SYMBOL_KIND_KERNEL, &Kernel)));
   }
 
   void SetUp() override {
@@ -1999,6 +2000,65 @@ TEST_F(DirectXDispatchTest, ExecutesScalarConstantsAndUpdatesEachLaunch) {
     EXPECT_EQ(Actual, Expected);
     Count = 5;
     Bias += 91;
+  }
+}
+
+TEST_F(DirectXDispatchTest, ExecutesClangCppIntegerAndFloatScalars) {
+  auto Buffer = llvm::MemoryBuffer::getFile(
+      DIRECTX_TEST_INPUTS_DIR "/cpp-scalar.dxil", false);
+  ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+  Shader = (*Buffer)->getBuffer().str();
+  auto Object = manifest();
+  Object["entry"] = "scalar";
+  Object["numthreads"] = llvm::json::Array{64, 1, 1};
+  Object["constants"] =
+      llvm::json::Object{{"register", 0}, {"space", 0}, {"size", 8}};
+  Object["arguments"] = llvm::json::Array{
+      llvm::json::Object{{"index", 0},
+                         {"kind", "srv"},
+                         {"register", 0},
+                         {"space", 0},
+                         {"min_size", 4}},
+      llvm::json::Object{{"index", 1},
+                         {"kind", "uav"},
+                         {"register", 0},
+                         {"space", 0},
+                         {"min_size", 4}},
+      llvm::json::Object{
+          {"index", 2}, {"kind", "scalar"}, {"size", 4}, {"offset", 0}},
+      llvm::json::Object{
+          {"index", 3}, {"kind", "scalar"}, {"size", 4}, {"offset", 4}}};
+  loadProgram(std::move(Object));
+  if (HasFatalFailure())
+    return;
+  Launch.NumGroups = {1, 1, 1};
+  Launch.GroupSize = {64, 1, 1};
+  std::array<float, 16> Source{}, Expected{}, Actual{};
+  for (unsigned I = 0; I < Source.size(); ++I)
+    Source[I] = I * 0.5f + 1.0f;
+  ASSERT_TRUE(succeeded(
+      olMemcpy(Queue, Input, Device, Source.data(), nullptr, sizeof(Source))));
+  ASSERT_TRUE(succeeded(olSyncQueue(Queue)));
+  uint32_t Count = 13;
+  float Scale = 0.25f;
+  void *Args[] = {&Input, &Output, &Count, &Scale};
+  size_t Sizes[] = {sizeof(Input), sizeof(Output), sizeof(Count),
+                    sizeof(Scale)};
+  for (auto Q : {Queue, static_cast<ol_queue_handle_t>(nullptr)}) {
+    Expected.fill(-123.5f);
+    ASSERT_TRUE(succeeded(olMemcpy(Q, Output, Device, Expected.data(), nullptr,
+                                   sizeof(Expected))));
+    ASSERT_TRUE(succeeded(olLaunchKernel(Q, Device, Kernel, &Launch, nullptr,
+                                         std::size(Args), Args, Sizes)));
+    for (unsigned I = 0; I < Count; ++I)
+      Expected[I] = Source[I] * Scale;
+    ASSERT_TRUE(succeeded(
+        olMemcpy(Q, Actual.data(), nullptr, Output, Device, sizeof(Actual))));
+    if (Q)
+      ASSERT_TRUE(succeeded(olSyncQueue(Q)));
+    EXPECT_EQ(Actual, Expected);
+    Count = 5;
+    Scale = 0.5f;
   }
 }
 

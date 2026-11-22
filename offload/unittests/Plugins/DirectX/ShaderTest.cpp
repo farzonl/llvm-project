@@ -153,6 +153,35 @@ TEST_F(DirectXShaderTest, BufferOnlyShaderDoesNotRequireReflection) {
   EXPECT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
 }
 
+TEST_F(DirectXShaderTest, ValidatesExecutableScalarAnnotationsWithoutSTAT) {
+  auto Buffer =
+      MemoryBuffer::getFile(DIRECTX_TEST_INPUTS_DIR "/cpp-scalar.dxil", false);
+  ASSERT_TRUE(static_cast<bool>(Buffer)) << Buffer.getError().message();
+  Bytes = (*Buffer)->getBuffer().str();
+  auto Parsed = DirectXManifestTy::parse(R"({
+    "version": 1, "entry": "scalar", "shader_model": [6, 0],
+    "numthreads": [64, 1, 1], "features": [],
+    "constants": {"register": 0, "space": 0, "size": 8},
+    "arguments": [
+      {"index": 0, "kind": "srv", "register": 0, "space": 0, "min_size": 4},
+      {"index": 1, "kind": "uav", "register": 0, "space": 0, "min_size": 4},
+      {"index": 2, "kind": "scalar", "size": 4, "offset": 0},
+      {"index": 3, "kind": "scalar", "size": 4, "offset": 4}
+    ]})");
+  ASSERT_TRUE(static_cast<bool>(Parsed)) << toString(Parsed.takeError());
+  Manifest = std::move(*Parsed);
+  auto Container =
+      object::DXContainer::create(MemoryBufferRef(Bytes, "scalar"));
+  ASSERT_TRUE(static_cast<bool>(Container)) << toString(Container.takeError());
+  for (const auto &Part : *Container)
+    EXPECT_NE(Part.Part.getName(), "STAT");
+  auto Err = validate(Bytes);
+  EXPECT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
+  std::get<DirectXScalarBindingTy>(Manifest.Arguments[2].Binding).Offset = 8;
+  expectError(validate(Bytes), error::ErrorCode::INVALID_BINARY,
+              "constant field layout");
+}
+
 TEST_F(DirectXShaderTest, RejectsEntryModelAndThreadMismatch) {
   auto Original = Manifest;
   Manifest.Entry = "other";

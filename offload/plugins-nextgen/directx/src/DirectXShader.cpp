@@ -497,8 +497,19 @@ Error DirectXManifestTy::validateShader(MemoryBufferRef Shader,
       *StaticSharedMemory = *SharedBytes;
     return Error::success();
   }
-  if (Reflection->empty())
-    return unsupported("scalar arguments require a STAT reflection part");
+  bool ExecutableAnnotations =
+      (*M)->getNamedMetadata("dx.typeAnnotations") != nullptr;
+  if (ExecutableAnnotations)
+    if (auto Err = checkConstants(**M, *Constant, *this))
+      return Err;
+  if (Reflection->empty()) {
+    if (!ExecutableAnnotations)
+      return unsupported("scalar arguments require a STAT reflection part "
+                         "or retained executable cbuffer annotations");
+    if (StaticSharedMemory)
+      *StaticSharedMemory = *SharedBytes;
+    return Error::success();
+  }
   LLVMContext ReflectionContext;
   auto RM = readModule(*Reflection, ReflectionContext);
   if (!RM)
