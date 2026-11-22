@@ -12,6 +12,7 @@
 offload-api
 directx-manifest
 directx-demo
+directx-sycl
 :::
 
 # Experimental DirectX plugin
@@ -35,13 +36,17 @@ launch metadata. It supports indexed 32-bit buffer accesses and a subset of
 or manifests. Its build compiles host and device code from one source, packages
 with `llvm-offload-binary`, and embeds the image with Clang's `#embed`. This is
 build-system single-source compilation; automatic driver/linker integration,
-compiler-generated host registration, general pointers, SYCL integration, and
-OpenMP DeviceRTL integration remain future work.
+general pointers, and OpenMP DeviceRTL integration remain future work.
 
 A restricted SYCL capture-record proof also generates field-layout metadata
 from Clang and executes captured buffer/scalar arguments through liboffload.
-It preserves the separate-argument ABI but does not yet enable DXIL in libsycl.
+It preserves the separate-argument ABI.
 See the [capture validation test](directx-demo.md#validate-sycl-generated-captures-separately).
+
+The [SYCL single-task demo](directx-sycl.md) now uses the in-tree libsycl with
+DirectX device USM and compiler-generated image registration. It executes a
+captured C++ lambda through `sycl::queue::single_task`; `parallel_for`,
+OpenCL, and automatic DirectX driver splitting are not supported yet.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI

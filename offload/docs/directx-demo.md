@@ -155,3 +155,8 @@ guards, rejects truncated records, and overwrites the host capture after
 submission to verify that queued work retains independent bindings.
 Run it with the same adapter-selection and GPU-validation environment above.
 This is an ABI proof, not a `sycl::queue::parallel_for` application.
+
+For a real libsycl application using device USM and
+`sycl::queue::single_task`, see the [standalone SYCL demo](directx-sycl.md).
+That milestone executes a serial GPU loop; it does not replace this example's
+parallel dispatch and timing demonstration.
