@@ -1,24 +1,46 @@
 # Standalone DirectX vector-add demo
 
 This example demonstrates the experimental **liboffload** DirectX plugin,
-not OpenMP `target` integration. It compiles HLSL with upstream Clang, signs
-the DXIL with `dxv`, and packages the shader and launch manifest using LLVM's
-`OffloadBinary` writer. The host executable links only to `LLVMOffload`, not
+not OpenMP `target` integration. The device computation is written in C++ using
+`gpuintrin.h`. Clang generates resource bindings and launch metadata, emits
+DXIL, and the build signs it with `dxv` and packages it using LLVM's
+`OffloadBinary` writer. No application-authored HLSL or JSON is required.
+The host executable links only to `LLVMOffload`, not
 LLVM or DXC. Neither Clang nor a DXC library is needed to run the built demo.
 
 The demo selects a DirectX adapter, uploads two float arrays on an explicit
 queue, dispatches vector addition asynchronously, and enqueues readback.
 A completion event makes the host output visible before CPU verification.
-Profiling events bracket dispatch, excluding uploads and readback. The shader
-uses its bounded raw-buffer view to determine the element count, avoiding scalar
-reflection and correctly handling a partially filled final thread group.
+Profiling events bracket dispatch, excluding uploads and readback. The host pads
+the arrays to complete 64-thread groups, initializes padding to zero, and verifies
+the padded outputs too. This handles arbitrary requested element counts without
+a scalar kernel argument.
+
+This is the first restricted C++ device ABI, not yet a single-source C++ AMP,
+CUDA, SYCL, or OpenMP frontend. Host and device sources remain separate, and a
+build-time packager remains necessary. Kernels require a fixed
+`reqd_work_group_size`, return `void`, and accept only buffer pointers with
+32-bit integer/float loads and stores. Const pointees use SRVs; writable pointees
+use UAVs. Pointer indexing is supported, but pointer escapes, general pointer
+chasing, scalar arguments, atomic/volatile buffer accesses, and non-inlined
+helper calls are rejected. The supported GPU intrinsics expose thread/group IDs,
+fixed group dimensions, and group barriers; grid-size, wave, and pointer-query
+operations are not supported yet.
+
+Launch metadata is retained in intermediate kernel bitcode for the packager.
+It is deliberately removed before final DXIL emission, since the DXIL validator
+rejects unknown named metadata. The packager adds required feature declarations
+from the final container's compiler-generated shader feature flags.
+The build runs Clang, `opt -dxil-kernel-abi`,
+`llc`, `dxv`, and the packager; this is not yet driver/linker-wrapper integration.
 
 ## Build on Windows
 
 Use an x64 Visual Studio developer command prompt with CMake and Ninja.
 First build the DirectX runtime as described in the
 [native Windows instructions](index.md#native-windows-build-and-validation).
-Also provide an upstream Clang build with the DirectX target enabled:
+Also provide an upstream LLVM/Clang build with the DirectX target enabled,
+including the `clang`, `opt`, `llc`, and `clang-resource-headers` targets:
 `-DLLVM_TARGETS_TO_BUILD="Native;DirectX" -DLLVM_ENABLE_PROJECTS=clang`.
 The runtime-only LLVM build shown in those instructions does not build Clang
 or the DirectX target.
@@ -26,7 +48,7 @@ or the DirectX target.
 Set these paths to your existing builds, then run from the repository root:
 
 ```bat
-set LLVM_BUILD=D:\builds\llvm-hlsl
+set LLVM_BUILD=D:\builds\llvm-directx-cpp
 set RUNTIME_BUILD=D:\builds\llvm-directx\runtimes\runtimes-bins
 set DXV=D:\tools\dxc\bin\dxv.exe
 
@@ -35,17 +57,19 @@ cmake -S offload\examples\directx-vector-add -B build-directx-demo -G Ninja ^
   -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl ^
   "-DLLVM_DIR=%LLVM_BUILD%\lib\cmake\llvm" ^
   "-DOFFLOAD_RUNTIME_BUILD=%RUNTIME_BUILD%" ^
-  "-DHLSL_CLANG=%LLVM_BUILD%\bin\clang.exe" ^
+  "-DDEVICE_CLANG=%LLVM_BUILD%\bin\clang.exe" ^
   "-DDXIL_VALIDATOR=%DXV%"
 cmake --build build-directx-demo
 ```
 
 `OFFLOAD_RUNTIME_BUILD` must contain the generated
 `offload\liboffload\API\OffloadAPI.h` and `lib\LLVMOffload.lib` / `LLVMOffload.dll`.
-Use a compatible x64 LLVM build for the small build-time packager.
+Use a compatible x64 LLVM build for the small build-time packager, with matching
+`CMAKE_BUILD_TYPE` (use `Debug` instead of `Release` when LLVM was built in Debug).
 The build copies the runtime DLL beside the demo executable.
 `dxv` requires its matching DXC validator DLLs beside it when signing; this is
-a build-time dependency only. Use a validator that supports shader model 6.0.
+a build-time dependency only. Use validator version 1.8 or newer, supporting
+shader model 6.0.
 
 Build outputs include `directx-vector-add.exe`, `LLVMOffload.dll`, and
 `vector-add.bin`. Those three files suffice to run on another compatible Windows

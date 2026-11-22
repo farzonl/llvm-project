@@ -28,6 +28,14 @@ and native `ID3D12Device` handles are available. Compute-only adapters and
 host/managed allocations are not supported yet.
 This is not an OpenMP target.
 
+The [standalone C++ vector-add demo](directx-demo.md) uses an experimental
+resource-backed DirectX C++ kernel ABI with compiler-generated bindings and
+launch metadata. It supports indexed 32-bit buffer accesses and a subset of
+`gpuintrin.h`, without application-authored HLSL or manifests. Separate device
+compilation, DXIL signing, and a build-time packager are still required.
+Single-source compilation, scalar/general-pointer arguments, SYCL integration,
+and OpenMP DeviceRTL integration remain future work.
+
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
 validation helper are implemented, including explicit scalar field layouts and

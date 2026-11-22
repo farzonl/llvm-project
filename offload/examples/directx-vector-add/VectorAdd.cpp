@@ -148,16 +148,17 @@ void run(int Argc, char **Argv, Resources &R) {
   check(olCreateProgram(R.Context, Device, Package.data(), Package.size(),
                         &R.Program));
   ol_symbol_handle_t Kernel = nullptr;
-  check(olGetSymbol(R.Program, "main", OL_SYMBOL_KIND_KERNEL, &Kernel));
+  check(olGetSymbol(R.Program, "vector_add", OL_SYMBOL_KIND_KERNEL, &Kernel));
 
-  R.A.resize(Count);
-  R.B.resize(Count);
-  R.C.assign(Count, std::numeric_limits<float>::quiet_NaN());
+  size_t PaddedCount = (Count + GroupSize - 1) / GroupSize * GroupSize;
+  R.A.resize(PaddedCount);
+  R.B.resize(PaddedCount);
+  R.C.assign(PaddedCount, std::numeric_limits<float>::quiet_NaN());
   for (size_t I = 0; I < Count; ++I) {
     R.A[I] = static_cast<float>(I % 1024) * 0.25f;
     R.B[I] = static_cast<float>(I % 127) * 0.5f;
   }
-  size_t Bytes = Count * sizeof(float);
+  size_t Bytes = PaddedCount * sizeof(float);
   for (auto *Pointer : {&R.DeviceA, &R.DeviceB, &R.DeviceC})
     check(olMemAlloc(R.Context, Device, OL_ALLOC_TYPE_DEVICE, Bytes, Pointer));
   check(olMemcpy(R.Queue, R.DeviceA, Device, R.A.data(), nullptr, Bytes));
@@ -183,7 +184,7 @@ void run(int Argc, char **Argv, Resources &R) {
   check(olGetEventElapsedTime(R.Start, R.Stop, &Milliseconds));
   if (!std::isfinite(Milliseconds) || Milliseconds < 0)
     throw std::runtime_error("invalid GPU event timing");
-  for (size_t I = 0; I < Count; ++I) {
+  for (size_t I = 0; I < PaddedCount; ++I) {
     float Expected = R.A[I] + R.B[I];
     if (R.C[I] != Expected)
       throw std::runtime_error("verification failed at element " +
