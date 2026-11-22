@@ -118,21 +118,22 @@ ol_alloc_type_t getOlAllocType(usm::alloc USMKind) {
 }
 
 ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range) {
-  assert(Range.MDims < 4 && "Invalid dimensions.");
+  if (Range.MDims < 1 || Range.MDims > 3)
+    throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                          "Work dimension must be 1, 2, or 3.");
 
-  uint32_t GlobalSize[3] = {1, 1, 1};
-  if (Range.MGlobalSize) {
-    for (size_t I = 0; I < Range.MDims; ++I) {
-      assert(Range.MGlobalSize[I] <= std::numeric_limits<uint32_t>::max());
-      GlobalSize[I] = static_cast<uint32_t>(Range.MGlobalSize[I]);
-    }
-  }
+  uint64_t GlobalSize[3] = {1, 1, 1};
+  if (Range.MGlobalSize)
+    for (size_t I = 0; I < Range.MDims; ++I)
+      GlobalSize[I] = Range.MGlobalSize[I];
 
   uint32_t GroupSize[3] = {1, 1, 1};
   if (Range.MLocalSize) {
     for (size_t I = 0; I < Range.MDims; ++I) {
-      assert(Range.MLocalSize[I] <= std::numeric_limits<uint32_t>::max() &&
-             Range.MLocalSize[I] != 0);
+      if (!Range.MLocalSize[I] ||
+          Range.MLocalSize[I] > std::numeric_limits<uint32_t>::max())
+        throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                              "Local range exceeds the liboffload limit.");
       GroupSize[I] = static_cast<uint32_t>(Range.MLocalSize[I]);
     }
   }
@@ -144,21 +145,48 @@ ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range) {
   // So in order to ensure the correctness we update all the kernel
   // parameters accordingly.
   if (Range.MDims > 1) {
-    // TODO: Offset is not yet supported in liboffload, so ignore it for now.
     std::swap(GlobalSize[0], GlobalSize[Range.MDims - 1]);
     std::swap(GroupSize[0], GroupSize[Range.MDims - 1]);
+  }
+  uint32_t NumGroups[3];
+  for (unsigned I = 0; I < 3; ++I) {
+    if (GlobalSize[I] % GroupSize[I])
+      throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                            "Global range must be divisible by local range.");
+    uint64_t Count = GlobalSize[I] / GroupSize[I];
+    if (Count > std::numeric_limits<uint32_t>::max())
+      throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                            "Group count exceeds the liboffload limit.");
+    NumGroups[I] = static_cast<uint32_t>(Count);
   }
 
   ol_kernel_launch_size_args_t olRange = {};
   olRange.Dimensions = Range.MDims;
-  olRange.NumGroups.x = GlobalSize[0] / GroupSize[0];
-  olRange.NumGroups.y = GlobalSize[1] / GroupSize[1];
-  olRange.NumGroups.z = GlobalSize[2] / GroupSize[2];
+  olRange.NumGroups.x = NumGroups[0];
+  olRange.NumGroups.y = NumGroups[1];
+  olRange.NumGroups.z = NumGroups[2];
   olRange.GroupSize.x = GroupSize[0];
   olRange.GroupSize.y = GroupSize[1];
   olRange.GroupSize.z = GroupSize[2];
   olRange.DynSharedMemory = 0;
   return olRange;
+}
+
+ol_kernel_global_offset_t convertToOlOffset(const UnifiedRangeView &Range) {
+  if (Range.MDims < 1 || Range.MDims > 3)
+    throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                          "Work dimension must be 1, 2, or 3.");
+  uint64_t Offset[3]{};
+  if (Range.MOffset)
+    for (size_t I = 0; I < Range.MDims; ++I) {
+      if (Range.MGlobalSize &&
+          Range.MOffset[I] > UINT64_MAX - Range.MGlobalSize[I])
+        throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
+                              "Global offset plus range overflows.");
+      Offset[I] = Range.MOffset[I];
+    }
+  std::swap(Offset[0], Offset[Range.MDims - 1]);
+  return {Offset[0], Offset[1], Offset[2]};
 }
 
 } // namespace detail

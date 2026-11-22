@@ -191,6 +191,7 @@ private:
 
     EventImplPtr LastEvent;
     ol_kernel_launch_size_args_t Range;
+    ol_kernel_global_offset_t GlobalOffset{};
     std::vector<EventImplPtr> DepEvents;
   };
   inline static thread_local KernelSubmitInfo MCurrentSubmitInfo = {};

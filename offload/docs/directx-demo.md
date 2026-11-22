@@ -157,6 +157,6 @@ Run it with the same adapter-selection and GPU-validation environment above.
 This is an ABI proof, not a `sycl::queue::parallel_for` application.
 
 For a real libsycl application using device USM and
-`sycl::queue::single_task`, see the [standalone SYCL demo](directx-sycl.md).
-That milestone executes a serial GPU loop; it does not replace this example's
-parallel dispatch and timing demonstration.
+`sycl::queue::parallel_for`, see the [standalone SYCL demo](directx-sycl.md).
+It uses fixed-workgroup parallel dispatch; this C++/liboffload example also
+provides GPU timing.

@@ -1,4 +1,4 @@
-//===- vector-add.cpp - Experimental SYCL DirectX single_task demo
+//===- vector-add.cpp - Experimental SYCL DirectX parallel demo
 //---------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -11,10 +11,15 @@
 
 void submitVectorAdd(sycl::queue &Queue, const float *A, const float *B,
                      float *C, unsigned Count) {
-  Queue.single_task<class DirectXVectorAdd>([=] {
-    for (unsigned I = 0; I < Count; ++I)
-      C[I] = A[I] + B[I];
-  });
+  size_t Global = (size_t(Count) + 63) / 64 * 64;
+  Queue.parallel_for<class DirectXVectorAdd>(
+      sycl::nd_range<1>{sycl::range<1>{Global}, sycl::range<1>{64}},
+      [=](sycl::nd_item<1> Item)
+          __attribute__((reqd_work_group_size(64, 1, 1))) {
+            size_t I = Item.get_global_linear_id();
+            if (I < Count)
+              C[I] = A[I] + B[I];
+          });
 }
 
 #ifndef __SYCL_DEVICE_ONLY__
@@ -113,7 +118,7 @@ void run(int Argc, char **Argv, int &ExitCode) {
       throw std::runtime_error("verification failed at element " +
                                std::to_string(I));
   std::cout << "PASS: " << Count
-            << " elements verified through sycl::queue::single_task\n";
+            << " elements verified through sycl::queue::parallel_for\n";
   ExitCode = 0;
 }
 

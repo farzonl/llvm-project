@@ -45,6 +45,23 @@ static void SetSYCLKernelAttributes(llvm::Function *Fn, CodeGenFunction &CGF) {
     Fn->addFnAttr(llvm::Attribute::MustProgress);
 }
 
+static void collectSYCLWorkGroupSizes(
+    const Stmt *Body, const CXXRecordDecl *Capture,
+    llvm::SmallVectorImpl<const ReqdWorkGroupSizeAttr *> &Sizes) {
+  if (!Body)
+    return;
+  if (const auto *Call = dyn_cast<CXXOperatorCallExpr>(Body))
+    if (const auto *Method =
+            dyn_cast_or_null<CXXMethodDecl>(Call->getDirectCallee()))
+      if (Method->getOverloadedOperator() == OO_Call &&
+          Method->getParent()->getCanonicalDecl() ==
+              Capture->getCanonicalDecl())
+        if (const auto *WG = Method->getAttr<ReqdWorkGroupSizeAttr>())
+          Sizes.push_back(WG);
+  for (const Stmt *Child : Body->children())
+    collectSYCLWorkGroupSizes(Child, Capture, Sizes);
+}
+
 void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
                                          ASTContext &Ctx) {
   assert(Ctx.getLangOpts().SYCLIsDevice &&
@@ -101,6 +118,30 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
         CaptureType = CaptureType->getPointeeType();
       if (const auto *Record = CaptureType->getAs<RecordType>()) {
         const RecordDecl *RD = Record->getDecl();
+        if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
+          llvm::SmallVector<const ReqdWorkGroupSizeAttr *> Sizes;
+          collectSYCLWorkGroupSizes(OutlinedFnDecl->getBody(), CXXRD, Sizes);
+          std::string Threads;
+          for (const auto *WG : Sizes) {
+            std::string Shape;
+            for (const Expr *Dim :
+                 {WG->getXDim(), WG->getYDim(), WG->getZDim()}) {
+              if (!Shape.empty())
+                Shape += ',';
+              Shape += std::to_string(
+                  Dim->getIntegerConstantExpr(Ctx)->getZExtValue());
+            }
+            if (!Threads.empty() && Threads != Shape) {
+              getDiags().Report(diag::err_fe_error_backend)
+                  << "DirectX kernel calls have conflicting required "
+                     "workgroup sizes";
+              return;
+            }
+            Threads = std::move(Shape);
+          }
+          if (!Threads.empty())
+            Fn->addFnAttr("hlsl.numthreads", Threads);
+        }
         const ASTRecordLayout &RL = Ctx.getASTRecordLayout(RD);
         auto Integer = [&](uint64_t Value) {
           return llvm::ConstantAsMetadata::get(

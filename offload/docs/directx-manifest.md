@@ -55,8 +55,48 @@ The experimental libsycl DirectX backend accepts packaged SYCL DXIL images.
 `llvm-offload-binary` generates their binary SYCL symbol tables from the
 captured entry name; Clang's host embedding registers them automatically.
 libsycl loads each image as a separate one-entry package so its manifest is
-preserved. See the [SYCL single-task demo](directx-sycl.md). Device index/range
-helpers and automatic driver/linker compilation still require integration.
+preserved. See the [parallel SYCL demo](directx-sycl.md). Device index/range
+helpers now expose work-item, group, and range queries through the NDRange
+dispatch ABI below. Automatic driver/linker compilation remains future work.
+
+## NDRange dispatch ABI
+
+An optional versioned `dispatch` object reserves an implicit region in the
+existing root-constant block:
+
+```json
+"dispatch": {"version": 1, "offset": 4}
+```
+
+Version 1 occupies 36 bytes: three 32-bit group counts in native x/y/z order,
+followed by three 64-bit global offsets, each stored low word first.
+The region must be dword-aligned, in bounds, and disjoint from user scalar
+arguments. It counts against the 252-byte root-constant budget; kernels using
+dispatch data can therefore carry at most 54 additional 32-bit scalar values.
+Executable cbuffer annotations must account for every dispatch field.
+
+The compiler lowers `llvm.dx.num.groups` and `llvm.dx.global.offset` queries
+to this block. Local sizes remain the compiled `numthreads`; global sizes
+are group counts multiplied by local sizes. The ABI is independent of
+SYCL captures and also applies to flat C++ kernel arguments, so a future
+OpenCL frontend can use the same geometry transport and target intrinsics.
+Version 1 covers uniform workgroups. Non-uniform OpenCL workgroups and
+runtime workgroup specialization require further compiler/runtime support;
+the version field allows their ABI requirements to evolve without changing
+existing packages.
+
+`olLaunchKernel` accepts an optional `OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET`
+property pointing to `ol_kernel_global_offset_t`. The three 64-bit values use
+native axis order. Inactive axes require zero offsets; duplicates, null data,
+and offset-plus-range overflow are errors. Backends without offset support,
+and DirectX kernels without a dispatch block, reject nonzero offsets rather
+than ignoring them. Omitting the property supplies zero offsets.
+
+The runtime snapshots group counts and offsets into submission-owned constants.
+Changing the host property or launching another range cannot alter pending
+work. SYCL reverses its dimension order when converting ranges and offsets:
+the last SYCL dimension maps to native x. No application-authored capture
+fields, manifest, or scalar argument is needed for launch geometry.
 
 ## Program loading
 

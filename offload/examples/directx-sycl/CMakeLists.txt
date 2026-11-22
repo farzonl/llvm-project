@@ -32,51 +32,79 @@ foreach(INCLUDE_DIR IN LISTS HOST_INCLUDES)
   list(APPEND DEVICE_INCLUDES -isystem "${INCLUDE_DIR}")
 endforeach()
 
-add_custom_command(
-  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bin"
-  BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bc"
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.kernel.bc"
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.unsigned.dxil"
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.dxil"
-  COMMAND "${DEVICE_CLANG}" --target=dxil-pc-shadermodel6.0-compute
-    -x c++ -std=c++17 -O1 -fno-exceptions -fms-extensions
-    "-fms-compatibility-version=${CMAKE_CXX_SIMULATE_VERSION}"
-    -D_WIN32 -D_WIN64 -D_MT -D_DLL -D_CRT_USE_BUILTIN_OFFSETOF
-    -Xclang -fsycl-is-device -Xclang -aux-triple
-    -Xclang x86_64-pc-windows-msvc
-    "-I${SYCL_INCLUDE_DIR}" ${DEVICE_INCLUDES}
-    -emit-llvm -c "${CMAKE_CURRENT_SOURCE_DIR}/vector-add.cpp"
-    -o "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bc"
-  COMMAND "${DEVICE_OPT}" -dxil-kernel-abi
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bc"
-    -o "${CMAKE_CURRENT_BINARY_DIR}/vector-add.kernel.bc"
-  COMMAND "${DEVICE_LLC}" -filetype=obj
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.kernel.bc"
-    -o "${CMAKE_CURRENT_BINARY_DIR}/vector-add.unsigned.dxil"
-  COMMAND "${DXIL_VALIDATOR}" "-o=${CMAKE_CURRENT_BINARY_DIR}/vector-add.dxil"
-    "${CMAKE_CURRENT_BINARY_DIR}/vector-add.unsigned.dxil"
-  COMMAND "${OFFLOAD_PACKAGER}" -o "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bin"
-    "--image=file=${CMAKE_CURRENT_BINARY_DIR}/vector-add.dxil,kind=sycl,triple=dxil-pc-shadermodel6.0-compute,directx-metadata=${CMAKE_CURRENT_BINARY_DIR}/vector-add.kernel.bc"
-  DEPENDS vector-add.cpp "${DEVICE_CLANG}" "${DEVICE_OPT}" "${DEVICE_LLC}"
-    "${OFFLOAD_PACKAGER}" "${DXIL_VALIDATOR}"
-  VERBATIM)
-add_custom_target(sycl-device-image
-  DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bin")
-
-add_executable(directx-sycl-vector-add vector-add.cpp)
-add_dependencies(directx-sycl-vector-add sycl-device-image)
-target_include_directories(directx-sycl-vector-add PRIVATE "${SYCL_INCLUDE_DIR}")
-target_link_libraries(directx-sycl-vector-add PRIVATE "${SYCL_LIBRARY}")
-set_property(TARGET directx-sycl-vector-add PROPERTY
-  MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
-target_compile_options(directx-sycl-vector-add PRIVATE /EHsc
-  "SHELL:/clang:-Xclang /clang:-fsycl-is-host"
-  "SHELL:/clang:-Xclang /clang:-foffload-include-binary"
-  "SHELL:/clang:-Xclang \"/clang:${CMAKE_CURRENT_BINARY_DIR}/vector-add.bin\"")
-set_property(SOURCE vector-add.cpp APPEND PROPERTY OBJECT_DEPENDS
-  "${CMAKE_CURRENT_BINARY_DIR}/vector-add.bin")
-add_custom_command(TARGET directx-sycl-vector-add POST_BUILD
+add_custom_target(sycl-runtime-dlls
+  COMMAND "${CMAKE_COMMAND}" -E make_directory
+    "$<TARGET_FILE_DIR:directx-sycl-vector-add>"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${SYCL_RUNTIME_DLL}" "${OFFLOAD_RUNTIME_BUILD}/lib/LLVMOffload.dll"
     "$<TARGET_FILE_DIR:directx-sycl-vector-add>"
   VERBATIM)
+
+function(add_directx_sycl_executable TARGET SOURCE)
+  set(IMAGE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.bin")
+  set(DEVICE_DEFINITIONS)
+  foreach(DEFINITION IN LISTS ARGN)
+    list(APPEND DEVICE_DEFINITIONS "-D${DEFINITION}")
+  endforeach()
+  add_custom_command(
+    OUTPUT "${IMAGE}"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.bc"
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.kernel.bc"
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.unsigned.dxil"
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.dxil"
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.d"
+    COMMAND "${DEVICE_CLANG}" --target=dxil-pc-shadermodel6.0-compute
+      -x c++ -std=c++17 -O2 -fno-exceptions -fms-extensions
+      "-fms-compatibility-version=${CMAKE_CXX_SIMULATE_VERSION}"
+      -D_WIN32 -D_WIN64 -D_MT -D_DLL -D_CRT_USE_BUILTIN_OFFSETOF
+      -Xclang -fsycl-is-device -Xclang -aux-triple
+      -Xclang x86_64-pc-windows-msvc
+      "-I${SYCL_INCLUDE_DIR}" ${DEVICE_INCLUDES} ${DEVICE_DEFINITIONS}
+      -MD -MF "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.d" -MT "${IMAGE}"
+      -emit-llvm -c "${SOURCE}"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.bc"
+    COMMAND "${DEVICE_OPT}" -dxil-kernel-abi
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.bc"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.kernel.bc"
+    COMMAND "${DEVICE_LLC}" -filetype=obj
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.kernel.bc"
+      -o "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.unsigned.dxil"
+    COMMAND "${DXIL_VALIDATOR}" "-o=${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.dxil"
+      "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.unsigned.dxil"
+    COMMAND "${OFFLOAD_PACKAGER}" -o "${IMAGE}"
+      "--image=file=${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.dxil,kind=sycl,triple=dxil-pc-shadermodel6.0-compute,directx-metadata=${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.kernel.bc"
+    DEPENDS "${SOURCE}" "${DEVICE_CLANG}" "${DEVICE_OPT}" "${DEVICE_LLC}"
+      "${OFFLOAD_PACKAGER}" "${DXIL_VALIDATOR}"
+    DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.d"
+    VERBATIM)
+  add_custom_target(${TARGET}-device-image DEPENDS "${IMAGE}")
+
+  add_executable(${TARGET} "${SOURCE}")
+  add_dependencies(${TARGET} ${TARGET}-device-image sycl-runtime-dlls)
+  target_include_directories(${TARGET} PRIVATE "${SYCL_INCLUDE_DIR}")
+  target_link_libraries(${TARGET} PRIVATE "${SYCL_LIBRARY}")
+  target_compile_definitions(${TARGET} PRIVATE ${ARGN})
+  set_property(TARGET ${TARGET} PROPERTY
+    MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
+  target_compile_options(${TARGET} PRIVATE /EHsc
+    "SHELL:/clang:-Xclang /clang:-fsycl-is-host"
+    "SHELL:/clang:-Xclang /clang:-foffload-include-binary"
+    "SHELL:/clang:-Xclang \"/clang:${IMAGE}\"")
+endfunction()
+
+add_directx_sycl_executable(directx-sycl-vector-add
+  "${CMAKE_CURRENT_SOURCE_DIR}/vector-add.cpp")
+add_custom_target(sycl-device-image)
+add_dependencies(sycl-device-image directx-sycl-vector-add-device-image)
+
+option(DIRECTX_SYCL_BUILD_TESTS "Build real 1D/2D/3D SYCL geometry probes" OFF)
+if(DIRECTX_SYCL_BUILD_TESTS)
+  enable_testing()
+  foreach(DIMS RANGE 1 3)
+    add_directx_sycl_executable(directx-sycl-ndrange-${DIMS}
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../unittests/Plugins/DirectX/Inputs/sycl-ndrange.cpp"
+      TEST_DIMS=${DIMS})
+    add_test(NAME directx-sycl-ndrange-${DIMS}
+      COMMAND directx-sycl-ndrange-${DIMS})
+  endforeach()
+endif()

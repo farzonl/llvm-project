@@ -143,6 +143,7 @@ static void checkEventsPlatformMatch(const std::vector<EventImplPtr> &Events,
 void QueueImpl::setKernelLaunchParams(std::vector<EventImplPtr> &&Events,
                                       const detail::UnifiedRangeView &Range) {
   setKernelLaunchParams(std::move(Events), convertToOlRange(Range));
+  MCurrentSubmitInfo.GlobalOffset = convertToOlOffset(Range);
 }
 
 void QueueImpl::setKernelLaunchParams(
@@ -153,6 +154,7 @@ void QueueImpl::setKernelLaunchParams(
   checkEventsPlatformMatch(Events, *MContext);
   MCurrentSubmitInfo.DepEvents = std::move(Events);
   MCurrentSubmitInfo.Range = Range;
+  MCurrentSubmitInfo.GlobalOffset = {};
 }
 
 void QueueImpl::submitKernelImpl(DeviceKernelInfo &KernelInfo, void *ArgData,
@@ -170,9 +172,13 @@ void QueueImpl::submitKernelImpl(DeviceKernelInfo &KernelInfo, void *ArgData,
 
   void *ArgPtrs[] = {ArgData};
   size_t ArgSizes[] = {ArgSize};
-  auto Result =
-      olLaunchKernel(MOffloadQueue, MDevice.getOLHandle(), Kernel,
-                     &MCurrentSubmitInfo.Range, nullptr, 1, ArgPtrs, ArgSizes);
+  ol_kernel_launch_prop_t Properties[] = {
+      {OL_KERNEL_LAUNCH_PROP_TYPE_GLOBAL_OFFSET,
+       &MCurrentSubmitInfo.GlobalOffset},
+      OL_KERNEL_LAUNCH_PROP_END};
+  auto Result = olLaunchKernel(MOffloadQueue, MDevice.getOLHandle(), Kernel,
+                               &MCurrentSubmitInfo.Range, Properties, 1,
+                               ArgPtrs, ArgSizes);
 
   if (isFailed(Result))
     throw sycl::exception(createSyclObjFromImpl<context>(*MContext),

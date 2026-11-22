@@ -8642,7 +8642,14 @@ void Sema::ProcessDeclAttributeList(
         (D->hasAttr<CUDAGlobalAttr>() &&
          Context.getTargetInfo().getTriple().isSPIRV()))) {
     // These attributes cannot be applied to a non-kernel function.
-    if (const auto *A = D->getAttr<ReqdWorkGroupSizeAttr>()) {
+    const auto *Method = dyn_cast<CXXMethodDecl>(D);
+    bool IsDirectXSYCLCallable =
+        Method && Method->getOverloadedOperator() == OO_Call &&
+        (getLangOpts().SYCLIsHost ||
+         (getLangOpts().SYCLIsDevice &&
+          Context.getTargetInfo().getTriple().isDXIL()));
+    if (const auto *A = D->getAttr<ReqdWorkGroupSizeAttr>();
+        A && !IsDirectXSYCLCallable) {
       // FIXME: This emits a different error message than
       // diag::err_attribute_wrong_decl_type + ExpectedKernelFunction.
       Diag(D->getLocation(), diag::err_opencl_kernel_attr) << A;

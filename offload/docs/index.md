@@ -43,10 +43,12 @@ from Clang and executes captured buffer/scalar arguments through liboffload.
 It preserves the separate-argument ABI.
 See the [capture validation test](directx-demo.md#validate-sycl-generated-captures-separately).
 
-The [SYCL single-task demo](directx-sycl.md) now uses the in-tree libsycl with
+The [parallel SYCL demo](directx-sycl.md) uses the in-tree libsycl with
 DirectX device USM and compiler-generated image registration. It executes a
-captured C++ lambda through `sycl::queue::single_task`; `parallel_for`,
-OpenCL, and automatic DirectX driver splitting are not supported yet.
+captured C++ lambda through fixed-workgroup `sycl::queue::parallel_for`.
+Its reusable NDRange ABI supports multidimensional IDs/ranges and 64-bit
+global offsets. OpenCL, dynamic workgroup specialization, and automatic
+DirectX driver splitting are not supported yet.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI

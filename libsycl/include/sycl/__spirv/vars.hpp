@@ -28,11 +28,33 @@ namespace __spirv {
 // external-linkage kernel body is still emitted for the host and must link, so
 // the host branch returns values that are never read. Keep the include guarded.
 #if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
-std::size_t unsupportedDirectXIndex(int) __attribute__((
-    error("DirectX SYCL index/range builtins are not supported yet")));
 std::uint32_t unsupportedDirectXSubgroup() __attribute__((
     error("DirectX SYCL subgroup builtins are not supported yet")));
-#  define __SPIRV_INDEXED_BUILTIN(POSTFIX, ID) unsupportedDirectXIndex(ID)
+template <int Axis> inline std::size_t directXBuiltInGlobalSize() {
+  return std::size_t(__builtin_dx_num_groups(Axis)) *
+         __builtin_dx_group_size(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInGlobalInvocationId() {
+  return std::size_t(__builtin_dx_group_id(Axis)) *
+             __builtin_dx_group_size(Axis) +
+         __builtin_dx_thread_id(Axis) + __builtin_dx_global_offset(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInGlobalOffset() {
+  return __builtin_dx_global_offset(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInWorkgroupId() {
+  return __builtin_dx_group_id(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInLocalInvocationId() {
+  return __builtin_dx_thread_id(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInWorkgroupSize() {
+  return __builtin_dx_group_size(Axis);
+}
+template <int Axis> inline std::size_t directXBuiltInNumWorkgroups() {
+  return __builtin_dx_num_groups(Axis);
+}
+#  define __SPIRV_INDEXED_BUILTIN(POSTFIX, ID) directX##POSTFIX<ID>()
 #  define __SPIRV_SCALAR_BUILTIN(POSTFIX) unsupportedDirectXSubgroup()
 #elif defined(__SYCL_DEVICE_ONLY__)
 #  define __SPIRV_INDEXED_BUILTIN(POSTFIX, ID) __spirv_##POSTFIX(ID)
