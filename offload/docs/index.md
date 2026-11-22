@@ -31,10 +31,12 @@ This is not an OpenMP target.
 The [standalone C++ vector-add demo](directx-demo.md) uses an experimental
 resource-backed DirectX C++ kernel ABI with compiler-generated bindings and
 launch metadata. It supports indexed 32-bit buffer accesses and a subset of
-`gpuintrin.h`, without application-authored HLSL or manifests. Separate device
-compilation, DXIL signing, and a build-time packager are still required.
-Single-source compilation, scalar/general-pointer arguments, SYCL integration,
-and OpenMP DeviceRTL integration remain future work.
+`gpuintrin.h` and 32-bit scalar arguments, without application-authored HLSL
+or manifests. Its build compiles host and device code from one source, packages
+with `llvm-offload-binary`, and embeds the image with Clang's `#embed`. This is
+build-system single-source compilation; automatic driver/linker integration,
+compiler-generated host registration, general pointers, SYCL integration, and
+OpenMP DeviceRTL integration remain future work.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI
