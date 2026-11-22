@@ -97,6 +97,9 @@ It adds feature declarations from the final container's shader feature flags and
 stores the result under `directx.manifest`. It cannot be combined with an explicit
 `directx.manifest` key. This reads container metadata; it does not validate or sign
 the DXIL image, or perform the runtime's launch-ABI validation.
+With `kind=sycl`, `directx-metadata` also requires a captured kernel entry
+and generates the binary `symbols` table used by libsycl. An explicit
+`symbols` key cannot be supplied in that mode.
 When extracting, this option acts as a filter: only images matching the
 specified keys are extracted. If no {option}`--image` options are provided
 during extraction, all images are automatically extracted with descriptive

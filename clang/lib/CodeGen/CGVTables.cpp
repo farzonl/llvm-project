@@ -843,9 +843,13 @@ void CodeGenVTables::addVTableComponent(ConstantArrayBuilder &builder,
       if (!F->empty())
         return F;
 
-      // For device compilation, provide a weak definition that
-      // traps, otherwise linking ends up with unresolved references.
-      if (CGM.getLangOpts().isTargetDevice()) {
+      // DirectX cannot lower traps. Other device targets need a weak
+      // definition to avoid unresolved references during linking.
+      if (CGM.getLangOpts().isTargetDevice() && CGM.getTriple().isDXIL()) {
+        F->addFnAttr(
+            "dontcall-error",
+            "DirectX kernels do not support pure or deleted virtual calls");
+      } else if (CGM.getLangOpts().isTargetDevice()) {
         F->setLinkage(llvm::GlobalValue::WeakAnyLinkage);
         CodeGenFunction CGF(CGM);
         const CGFunctionInfo &FI = CGM.getTypes().arrangeNullaryFunction();

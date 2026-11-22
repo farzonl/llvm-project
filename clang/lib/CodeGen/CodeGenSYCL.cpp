@@ -92,6 +92,8 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
   CGF.FinishFunction();
   if (getTriple().isDXIL()) {
     getTargetCodeGenInfo().setTargetAttributes(KernelEntryPointFn, Fn, *this);
+    if (!Fn->hasFnAttribute("hlsl.numthreads"))
+      Fn->addFnAttr("hlsl.numthreads", "1,1,1");
     llvm::SmallVector<llvm::Metadata *> Layout;
     if (Args.size() == 1) {
       QualType CaptureType = Args[0]->getType().getNonReferenceType();

@@ -8,6 +8,13 @@
 # RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.dxil,directx-metadata=%t/input.bc 2>&1 | FileCheck %s --check-prefix=MISSING
 # RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.bc,directx-metadata=%t/kernel.bc 2>&1 | FileCheck %s --check-prefix=KIND
 # RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.dxil,directx-metadata=%t/kernel.bc,directx.manifest=other 2>&1 | FileCheck %s --check-prefix=CONFLICT
+# RUN: llvm-as %t/capture.ll -o %t/capture-input.bc
+# RUN: opt -dxil-kernel-abi %t/capture-input.bc -o %t/capture.bc
+# RUN: llc -filetype=obj %t/capture.bc -o %t/capture.dxil
+# RUN: llvm-offload-binary -o %t/sycl.bin --image=file=%t/capture.dxil,kind=sycl,triple=dxil-pc-shadermodel6.0-compute,directx-metadata=%t/capture.bc
+# RUN: obj2yaml %t/sycl.bin | FileCheck %s --check-prefix=SYCL
+# RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/kernel.dxil,kind=sycl,directx-metadata=%t/kernel.bc 2>&1 | FileCheck %s --check-prefix=CAPTURE
+# RUN: not llvm-offload-binary -o %t/out.bin --image=file=%t/capture.dxil,kind=sycl,directx-metadata=%t/capture.bc,symbols=other 2>&1 | FileCheck %s --check-prefix=SYMBOLS
 
 # MANIFEST: ImageKind: IMG_DXIL
 # MANIFEST: directx.manifest
@@ -15,6 +22,13 @@
 # MISSING: missing compiler-generated DirectX launch manifest
 # KIND: 'directx-metadata' requires a DXIL image
 # CONFLICT: 'directx-metadata' cannot be combined with 'directx.manifest'
+# SYCL: OffloadKind: OFK_SYCL
+# SYCL: directx.manifest
+# SYCL: "capture":{"offsets":[0],"pointer_size":8,"size":8}
+# SYCL: Key: symbols
+# SYCL: Value: "\x01\0\0\0\f\0\0\0\x06\0\0\0kernel\0"
+# CAPTURE: SYCL DirectX images require a captured kernel entry
+# SYMBOLS: SYCL DirectX metadata generates 'symbols'; an explicit symbol table is not allowed
 
 #--- kernel.ll
 target triple = "dxil-pc-shadermodel6.0-compute"
@@ -26,3 +40,16 @@ define void @kernel(ptr %out, float %value) #0 {
   ret void
 }
 attributes #0 = { "dx.kernel" "hlsl.numthreads"="1,1,1" }
+
+#--- capture.ll
+target datalayout = "e-p:32:32-i64:64"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { ptr, [4 x i8] }
+define void @kernel(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  %out = load ptr, ptr %args
+  store float 1.0, ptr %out
+  ret void
+}
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="1,1,1" }
+!0 = !{i32 8, i32 8, !1}
+!1 = !{i32 0, i32 8}

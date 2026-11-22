@@ -16,6 +16,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Frontend/Offloading/Utility.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -230,6 +231,23 @@ static Error bundleImages() {
         if (!Manifest)
           return Manifest.takeError();
         ImageBinary.StringData["directx.manifest"] = Saver.save(*Manifest);
+        if (ImageBinary.TheOffloadKind == OFK_SYCL) {
+          if (Args.count("symbols"))
+            return createStringError(
+                "SYCL DirectX metadata generates 'symbols'; "
+                "an explicit symbol table is not allowed");
+          auto JSON = json::parse(*Manifest);
+          if (!JSON)
+            return JSON.takeError();
+          auto *Object = JSON->getAsObject();
+          auto Entry = Object ? Object->getString("entry") : std::nullopt;
+          if (!Entry || !Object->getObject("capture"))
+            return createStringError("SYCL DirectX images require a captured "
+                                     "kernel entry");
+          SmallString<0> Symbols;
+          offloading::sycl::writeSymbolTable(ArrayRef(&*Entry, 1), Symbols);
+          ImageBinary.StringData["symbols"] = Saver.save(Symbols.str());
+        }
       }
       AllImages.emplace_back(std::move(ImageBinary));
     }

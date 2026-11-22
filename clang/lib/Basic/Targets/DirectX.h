@@ -82,6 +82,8 @@ public:
       // these fields before executable DXIL uses its resource pointer layout.
       PointerWidth = Aux->getPointerWidth(LangAS::Default);
       PointerAlign = Aux->getPointerAlign(LangAS::Default);
+      SizeType = Aux->getSizeType();
+      PtrDiffType = Aux->getPtrDiffType(LangAS::Default);
       resetDataLayout();
     }
     // The static values this addresses do not apply outside of the same thread
