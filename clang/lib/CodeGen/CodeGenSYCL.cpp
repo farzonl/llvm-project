@@ -118,6 +118,12 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
         CaptureType = CaptureType->getPointeeType();
       if (const auto *Record = CaptureType->getAs<RecordType>()) {
         const RecordDecl *RD = Record->getDecl();
+        // Offload entry points consume a packaged capture record, even when
+        // the host callable has nontrivial reference-counted members.
+        if (Fn->arg_size() == 1 && Fn->getArg(0)->getType()->isPointerTy())
+          Fn->addParamAttr(0, llvm::Attribute::getWithByValType(
+                                  getLLVMContext(),
+                                  getTypes().ConvertTypeForMem(CaptureType)));
         if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
           llvm::SmallVector<const ReqdWorkGroupSizeAttr *> Sizes;
           collectSYCLWorkGroupSizes(OutlinedFnDecl->getBody(), CXXRD, Sizes);
@@ -150,12 +156,30 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
         Layout.push_back(Integer(RL.getSize().getQuantity()));
         Layout.push_back(
             Integer(Ctx.getTargetInfo().getPointerWidth(LangAS::Default) / 8));
-        for (const FieldDecl *Field : RD->fields())
-          Layout.push_back(llvm::MDNode::get(
-              getLLVMContext(),
-              {Integer(RL.getFieldOffset(Field->getFieldIndex()) / 8),
-               Integer(
-                   Ctx.getTypeSizeInChars(Field->getType()).getQuantity())}));
+        auto AddFields = [&](auto &&Self, const RecordDecl *Record,
+                             uint64_t Base) -> void {
+          const ASTRecordLayout &RecordLayout = Ctx.getASTRecordLayout(Record);
+          for (const FieldDecl *Field : Record->fields()) {
+            uint64_t Offset =
+                Base + RecordLayout.getFieldOffset(Field->getFieldIndex()) / 8;
+            const auto *Nested = Field->getType()->getAs<RecordType>();
+            if (Nested && !Nested->getDecl()->isUnion() && !Field->isBitField())
+              Self(Self, Nested->getDecl(), Offset);
+            else {
+              llvm::SmallVector<llvm::Metadata *> FieldLayout{
+                  Integer(Offset),
+                  Integer(
+                      Ctx.getTypeSizeInChars(Field->getType()).getQuantity())};
+              for (const auto *Annotation :
+                   Field->specific_attrs<AnnotateAttr>())
+                if (Annotation->getAnnotation() == "sycl.accessor.pointer")
+                  FieldLayout.push_back(Integer(1));
+              Layout.push_back(
+                  llvm::MDNode::get(getLLVMContext(), FieldLayout));
+            }
+          }
+        };
+        AddFields(AddFields, RD, 0);
       }
     }
     Fn->setMetadata("dx.capture.layout",

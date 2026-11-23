@@ -47,9 +47,15 @@ AST capture-field offsets and sizes in `dx.capture.layout` function metadata.
 It requires an x64 auxiliary host target for captured pointers. The DirectX
 kernel ABI lowers a single by-value record into resources and root constants,
 and removes this metadata and the capture record before executable emission.
-Flat captures of buffer pointers and 32-bit integers/floats are supported;
-aggregates, unused fields, dynamic field indexing, and pointer escapes are
-rejected. Buffer access instructions determine SRV versus UAV bindings.
+Nested record captures are flattened to loaded leaf fields. Buffer pointers
+and 32-bit integers/floats are supported; unused fields, including host-only
+accessor ownership fields, do not produce bindings. Used wider scalars,
+dynamic field indexing, and pointer escapes remain unsupported.
+Ordinary buffer access instructions determine SRV versus UAV bindings.
+An optional third layout-metadata operand marks SYCL accessor pointers and
+forces UAV bindings so read/write aliases can share a resource. This marker
+and its recognized pointer annotation are removed before DXIL emission; they
+do not change the manifest ABI.
 
 The experimental libsycl DirectX backend accepts packaged SYCL DXIL images.
 `llvm-offload-binary` generates their binary SYCL symbol tables from the

@@ -16,6 +16,7 @@
 #ifndef _LIBSYCL_SRC_DETAIL_HANDLER_IMPL_HPP
 #define _LIBSYCL_SRC_DETAIL_HANDLER_IMPL_HPP
 
+#include <detail/buffer_impl.hpp>
 #include <sycl/__impl/detail/config.hpp>
 
 #include <OffloadAPI.h>
@@ -40,7 +41,10 @@ struct HandlerImpl {
   HandlerImpl &operator=(const HandlerImpl &) = delete;
   HandlerImpl &operator=(HandlerImpl &&) = delete;
 
-  ~HandlerImpl() = default;
+  ~HandlerImpl() {
+    for (const auto &Requirement : MBufferRequirements)
+      Requirement.Buffer->releaseRequirement();
+  }
 
   // Queue this handler is attached to.
   QueueImpl &MQueue;
@@ -56,6 +60,12 @@ struct HandlerImpl {
 
   /// Kernel execution range in liboffload format, set by setKernelRange().
   ol_kernel_launch_size_args_t MRange = {};
+
+  struct BufferRequirement {
+    BufferImpl *Buffer;
+    bool Writes;
+  };
+  std::vector<BufferRequirement> MBufferRequirements;
 };
 
 } // namespace detail

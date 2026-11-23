@@ -86,6 +86,7 @@ function(add_sycl_rt_library LIB_TARGET_NAME LIB_OBJ_NAME LIB_OUTPUT_NAME)
 endfunction(add_sycl_rt_library)
 
 set(LIBSYCL_SOURCES
+    "buffer.cpp"
     "context.cpp"
     "event.cpp"
     "exception.cpp"

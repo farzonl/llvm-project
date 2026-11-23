@@ -22,8 +22,8 @@ element per work-item. Work-item IDs, local/global ranges, group IDs/ranges,
 linear IDs, and 64-bit global offsets use a reusable target/runtime
 [NDRange ABI](directx-manifest.md#ndrange-dispatch-abi), including 2D/3D
 dimension ordering. Subgroup builtins remain explicitly unsupported.
-The captured kernel accepts only flat buffer
-pointers and 32-bit integer/float scalars, subject to the
+The captured kernel accepts buffer pointers and 32-bit integer/float scalars,
+including loaded fields of nested accessor records, subject to the
 [capture ABI restrictions](directx-manifest.md#restricted-capture-record-abi).
 The GNU `reqd_work_group_size(x,y,z)` attribute on a kernel lambda or functor's
 call operator fixes its native workgroup shape. Host local sizes must match;
@@ -396,10 +396,83 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
   --devices NVIDIA AMD Intel --jobs 2
 ```
 
-The command returns nonzero because the two geometry categories still fail.
-Their next major prerequisite is genuine buffer/accessor storage, scheduling,
+The command returned nonzero because the two geometry categories still failed.
+Their next major prerequisite at that checkpoint was buffer/accessor storage, scheduling,
 capture lowering, and lifetime/writeback semantics; compatibility declarations
 alone would not satisfy their device-execution tests.
+
+### Initial buffer/accessor execution
+
+One-dimensional, host-pointer-backed buffers now have real native storage and
+device accessors with `read`, `write`, and `read_write` modes. Command groups
+retain their requirements and use buffer events for dependencies across queues.
+The last buffer reference waits and writes results back even if accessor copies
+still retain the underlying allocation. Transfers between contexts or devices
+synchronize and migrate through owned host storage.
+
+The initial scheduler serializes host command-group construction/submission
+with a runtime-wide lock; GPU dispatch remains asynchronous. Migration and
+buffer destruction may block. Destroying the last buffer inside a command group
+before deferred submission is explicitly unsupported and reports an asynchronous
+error without retaining the caller's expired host pointer.
+
+Accessor capture records are flattened recursively, including nontrivial host
+callables. Unused host ownership fields are not exposed as device arguments.
+Accessor pointers use UAV views, including read-mode accessors, so aliases do
+not require incompatible simultaneous SRV/UAV resource states. Read-mode C++
+references remain const. Ordinary USM capture inference is unchanged.
+The module splitter also excludes DirectX kernels from possible indirect-call
+targets, as it already did for kernels with dedicated calling conventions.
+
+GPU tests on NVIDIA, AMD, and Intel verify initial upload, read-only input
+preservation, same-buffer accessor aliases, cross-queue ordering, concurrent
+host submissions, context migration, and last-buffer writeback while an
+accessor is retained. NDRange default construction and subsequent assignment
+are tested in all three dimensions.
+
+Rebuild the compiler and runtime before running the buffer test from a
+Visual Studio developer prompt with the variables defined above:
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /clang:-fsycl ^
+  /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  /I "%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\buffer.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\buffer-foundation.exe" /Fo:"%CTS_BUILD%\buffer-foundation.obj"
+set "PATH=%LLVM_LIB_BUILD%\bin;%RUNTIME_BUILD%\lib;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\buffer-foundation.exe" %D
+```
+
+The indices above are the three tested hardware adapters; use the existing
+demo's `--list` output to check the mapping on another machine.
+
+The unchanged range and NDRange CTS categories now compile their objects but
+fail device linking on byte-sized `bool` accesses: DirectX buffer lowering
+currently accepts only 32-bit integers and floats. Neither category has run,
+and neither is a CTS pass. The previously passing header/error categories are
+retained separately.
+
+The final measurement repeats all four unchanged categories:
+
+```bat
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\buffer-verified" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+This command returns nonzero for the two device-link failures and records zero
+executions for them; it does not run stale executables.
+
+Next steps include real subword storage semantics (without substituting
+32-bit boolean elements), wide captured scalars used by accessor size queries,
+multidimensional/subrange accessors, host/placeholder accessors, buffer
+properties and complete reference/API conformance. Only nonempty host-pointer
+buffers with the standard allocator are implemented in this increment.
+This does not advertise shared USM, atomics, FP16/FP64, or general workgroup
+specialization.
 
 ### Adapter validation
 

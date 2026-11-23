@@ -33,6 +33,7 @@ template <int Dimensions = 1> class nd_range {
 public:
   static constexpr int dimensions = Dimensions;
 
+  nd_range() = default;
   nd_range(const nd_range<Dimensions> &rhs) = default;
   nd_range(nd_range<Dimensions> &&rhs) = default;
   nd_range<Dimensions> &operator=(const nd_range<Dimensions> &rhs) = default;

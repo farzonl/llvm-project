@@ -119,7 +119,7 @@ public:
         FuncTypeToFuncsMap;
     for (const Function &F : M.functions()) {
       // Kernels can't be called (either directly or indirectly).
-      if (F.hasKernelCallingConv())
+      if (F.hasKernelCallingConv() || F.hasFnAttribute("dx.kernel"))
         continue;
 
       FuncTypeToFuncsMap[F.getFunctionType()].insert(&F);

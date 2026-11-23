@@ -13,6 +13,7 @@
 #include <detail/offload/offload_utils.hpp>
 #include <detail/queue_impl.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -66,11 +67,35 @@ void handler::prefetch(const void *ptr, std::size_t numBytes) {
 }
 
 std::shared_ptr<detail::EventImpl> handler::finalize() {
-  if (MImpl.MCGF)
-    return MImpl.MCGF();
+  for (const auto &Requirement : MImpl.MBufferRequirements)
+    if (auto Last = Requirement.Buffer->getLastEvent())
+      MDepEvents.push_back(detail::createSyclObjFromImpl<event>(Last));
+  auto Result = [&]() {
+    if (MImpl.MCGF)
+      return MImpl.MCGF();
 
-  auto EventsImpl = detail::getSyclObjImpls(MDepEvents);
-  return MImpl.MQueue.submitWait(EventsImpl);
+    auto EventsImpl = detail::getSyclObjImpls(MDepEvents);
+    return MImpl.MQueue.submitWait(EventsImpl);
+  }();
+  for (const auto &Requirement : MImpl.MBufferRequirements)
+    Requirement.Buffer->submitted(Result, Requirement.Writes);
+  return Result;
+}
+
+void *handler::requireBuffer(detail::BufferImpl *Buffer, access_mode Mode) {
+  if (!Buffer)
+    throw exception(make_error_code(errc::invalid),
+                    "An accessor requires a valid buffer");
+  auto It = std::find_if(
+      MImpl.MBufferRequirements.begin(), MImpl.MBufferRequirements.end(),
+      [&](const auto &Requirement) { return Requirement.Buffer == Buffer; });
+  bool Writes = Mode != access_mode::read;
+  if (It == MImpl.MBufferRequirements.end()) {
+    MImpl.MBufferRequirements.push_back({Buffer, Writes});
+    Buffer->retainRequirement();
+  } else
+    It->Writes |= Writes;
+  return Buffer->acquire(MImpl.MQueue);
 }
 
 void handler::fillImpl(void *Ptr, const void *Pattern, std::size_t PatternSize,

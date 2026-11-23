@@ -14,7 +14,9 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
@@ -127,17 +129,16 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   SmallVector<SmallVector<LoadInst *>> Loads(NumFields);
   SmallVector<bool> ReadOnly(NumFields, true);
   SmallVector<uint32_t> FieldOffsets;
+  SmallVector<uint32_t> FieldSizes;
   SmallVector<Type *> FieldTypes;
   json::Array Offsets;
   uint32_t End = 0;
   for (unsigned I = 0; I < NumFields; ++I) {
     auto *Field = dyn_cast<MDNode>(MD->getOperand(I + 2));
-    auto Offset = Field && Field->getNumOperands() == 2
-                      ? Integer(Field->getOperand(0))
-                      : std::nullopt;
-    auto Size = Field && Field->getNumOperands() == 2
-                    ? Integer(Field->getOperand(1))
-                    : std::nullopt;
+    bool ValidField =
+        Field && (Field->getNumOperands() == 2 || Field->getNumOperands() == 3);
+    auto Offset = ValidField ? Integer(Field->getOperand(0)) : std::nullopt;
+    auto Size = ValidField ? Integer(Field->getOperand(1)) : std::nullopt;
     if (!Offset || !Size || *Offset < End || *Offset >= *Bytes ||
         *Size > *Bytes - *Offset) {
       fail("capture fields must be ordered, nonoverlapping, and in bounds");
@@ -145,30 +146,49 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     }
     unsigned Element = RecordLayout->getElementContainingOffset(*Offset);
     Type *Ty = Record->getElementType(Element);
-    if (RecordLayout->getElementOffset(Element) != *Offset) {
+    uint64_t RelativeOffset = *Offset - RecordLayout->getElementOffset(Element);
+    while (auto *Nested = dyn_cast<StructType>(Ty)) {
+      if (Nested->isOpaque() || Nested->getNumElements() == 0) {
+        fail("capture layout contains an empty or opaque nested record");
+        return nullptr;
+      }
+      const StructLayout *NestedLayout = Layout.getStructLayout(Nested);
+      unsigned NestedElement =
+          NestedLayout->getElementContainingOffset(RelativeOffset);
+      RelativeOffset -= NestedLayout->getElementOffset(NestedElement);
+      Ty = Nested->getElementType(NestedElement);
+    }
+    if (RelativeOffset != 0) {
       fail("capture layout does not match record field offsets");
       return nullptr;
     }
-    if (Ty->isPointerTy()) {
-      unsigned AS = Ty->getPointerAddressSpace();
-      if ((AS != 0 && AS != 4) || *Size != 8 || *Offset % 8) {
-        fail("captured buffers require 64-bit default or generic pointers");
+    if (Field->getNumOperands() == 3) {
+      auto AccessorPointer = Integer(Field->getOperand(2));
+      if (!AccessorPointer || *AccessorPointer != 1 || !Ty->isPointerTy()) {
+        fail("accessor capture marker requires a pointer field");
         return nullptr;
       }
-      Types.push_back(PointerType::get(Kernel.getContext(), 0));
-    } else if ((Ty->isIntegerTy(32) || Ty->isFloatTy()) && *Size == 4 &&
-               *Offset % 4 == 0) {
-      Types.push_back(Ty);
-    } else {
-      fail("captures must be buffer pointers or 32-bit integer/float values");
-      return nullptr;
+      // Accessors can alias across read and write modes. Keep their views in
+      // UAV state instead of creating incompatible SRV/UAV aliases.
+      ReadOnly[I] = false;
     }
     FieldOffsets.push_back(*Offset);
+    FieldSizes.push_back(*Size);
     FieldTypes.push_back(Ty);
-    Offsets.push_back(*Offset);
     End = *Offset + *Size;
   }
   SmallVector<Value *> Worklist{Kernel.getArg(0)};
+  for (Instruction &I : make_early_inc_range(instructions(Kernel)))
+    if (auto *Annotation = dyn_cast<IntrinsicInst>(&I);
+        Annotation &&
+        Annotation->getIntrinsicID() == Intrinsic::ptr_annotation) {
+      StringRef Name;
+      if (getConstantStringInfo(Annotation->getArgOperand(1), Name) &&
+          Name == "sycl.accessor.pointer") {
+        Annotation->replaceAllUsesWith(Annotation->getArgOperand(0));
+        Annotation->eraseFromParent();
+      }
+    }
   SmallVector<Instruction *> Addresses;
   SmallPtrSet<Value *, 16> Seen;
   while (!Worklist.empty()) {
@@ -197,6 +217,18 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
         fail("capture load does not match a complete record field");
         return nullptr;
       }
+      Type *Ty = Load->getType();
+      if (Ty->isPointerTy()) {
+        unsigned AS = Ty->getPointerAddressSpace();
+        if ((AS != 0 && AS != 4) || FieldSizes[Field] != 8 || Offset % 8) {
+          fail("captured buffers require 64-bit default or generic pointers");
+          return nullptr;
+        }
+      } else if ((!Ty->isIntegerTy(32) && !Ty->isFloatTy()) ||
+                 FieldSizes[Field] != 4 || Offset % 4) {
+        fail("captures must be buffer pointers or 32-bit integer/float values");
+        return nullptr;
+      }
       Loads[Field].push_back(Load);
       if (Load->getType()->isPointerTy()) {
         if (!checkPointer(*Load, false))
@@ -216,9 +248,15 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       }
     }
   }
-  if (llvm::any_of(Loads, [](const auto &Field) { return Field.empty(); })) {
-    fail("unused captured fields are not supported");
-    return nullptr;
+  SmallVector<unsigned> UsedFields;
+  for (unsigned I = 0; I < NumFields; ++I) {
+    if (Loads[I].empty())
+      continue;
+    UsedFields.push_back(I);
+    Type *Ty = FieldTypes[I];
+    Types.push_back(Ty->isPointerTy() ? PointerType::get(Kernel.getContext(), 0)
+                                      : Ty);
+    Offsets.push_back(FieldOffsets[I]);
   }
   auto *Flat =
       Function::Create(FunctionType::get(Kernel.getReturnType(), Types, false),
@@ -232,9 +270,10 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   Flat->setDSOLocal(Kernel.isDSOLocal());
   Flat->splice(Flat->begin(), &Kernel);
   for (auto [Index, Arg] : enumerate(Flat->args())) {
-    if (Arg.getType()->isPointerTy() && ReadOnly[Index])
+    unsigned Field = UsedFields[Index];
+    if (Arg.getType()->isPointerTy() && ReadOnly[Field])
       Arg.addAttr(Attribute::get(Kernel.getContext(), "dx.readonly"));
-    for (LoadInst *Load : Loads[Index]) {
+    for (LoadInst *Load : Loads[Field]) {
       if (Load->getType()->isPointerTy())
         replaceBufferPointer(Load, &Arg);
       else

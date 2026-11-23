@@ -174,6 +174,9 @@ public:
                         const std::vector<EventImplPtr> &DepEvents);
 
 private:
+  EventImplPtr memcpyImpl(void *Dest, const void *Src, std::size_t NumBytes,
+                          const std::vector<EventImplPtr> &DepEvents);
+  friend class BufferImpl;
   void handleEventDependencies(const std::vector<EventImplPtr> &Deps);
   EventImplPtr createEvent(std::vector<EventImplPtr> &&Deps = {});
 

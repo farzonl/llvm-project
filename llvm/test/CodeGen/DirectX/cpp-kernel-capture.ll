@@ -5,7 +5,8 @@
 target datalayout = "e-p:64:64-i64:64"
 target triple = "dxil-pc-shadermodel6.0-compute"
 
-%Capture = type { float, i32, ptr addrspace(4) }
+%Accessor = type { ptr addrspace(4), ptr, i64 }
+%Capture = type { float, i32, %Accessor }
 
 define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
   %token = call token @llvm.experimental.convergence.entry()
@@ -29,10 +30,12 @@ exit:
 declare token @llvm.experimental.convergence.entry()
 declare i32 @llvm.dx.thread.id.in.group(i32)
 attributes #0 = { convergent "dx.kernel" "hlsl.numthreads"="64,1,1" }
-!0 = !{i32 16, i32 8, !1, !2, !3}
+!0 = !{i32 32, i32 8, !1, !2, !3, !4, !5}
 !1 = !{i32 0, i32 4}
 !2 = !{i32 4, i32 4}
 !3 = !{i32 8, i32 8}
+!4 = !{i32 16, i32 8}
+!5 = !{i32 24, i32 8}
 
 ; CHECK: target datalayout = "{{.*}}p:32:32{{.*}}"
 ; CHECK: %__dx_kernel_args = type <{ float, i32 }>
@@ -43,4 +46,4 @@ attributes #0 = { convergent "dx.kernel" "hlsl.numthreads"="64,1,1" }
 ; CHECK: load i32, ptr addrspace(2)
 ; CHECK: store float {{.*}}, ptr %{{.*}}
 ; CHECK-NOT: addrspace(4)
-; CHECK: \22capture\22:{\22offsets\22:[0,4,8],\22pointer_size\22:8,\22size\22:16}
+; CHECK: \22capture\22:{\22offsets\22:[0,4,8],\22pointer_size\22:8,\22size\22:32}

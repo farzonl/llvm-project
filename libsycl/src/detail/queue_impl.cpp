@@ -218,6 +218,12 @@ EventImplPtr QueueImpl::memcpy(void *Dest, const void *Src,
                                const std::vector<EventImplPtr> &DepEvents) {
   assert(MContext && "Context impl ptr can't be nullptr");
   NestedCallsTracker Tracker(*MContext);
+  return memcpyImpl(Dest, Src, NumBytes, DepEvents);
+}
+
+EventImplPtr QueueImpl::memcpyImpl(void *Dest, const void *Src,
+                                   std::size_t NumBytes,
+                                   const std::vector<EventImplPtr> &DepEvents) {
   checkEventsPlatformMatch(DepEvents, *MContext);
   if (NumBytes == 0)
     return submitWait(DepEvents);
@@ -312,6 +318,7 @@ EventImplPtr QueueImpl::createEvent(std::vector<EventImplPtr> &&Deps) {
 
 EventImplPtr QueueImpl::submitWithHandler(const TypelessCGF &CGF) {
   assert(MContext && "Context impl ptr can't be nullptr");
+  std::lock_guard<std::recursive_mutex> Lock(getBufferSubmissionMutex());
   detail::HandlerImpl HandlerImplVal(*this);
   handler Handler(HandlerImplVal);
   {

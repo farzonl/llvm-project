@@ -13,8 +13,26 @@
 
 #include <cassert>
 #include <iostream>
+#include <type_traits>
 
 int main() {
+  auto CheckDefault = [](auto Dimension) {
+    constexpr int Dims = decltype(Dimension)::value;
+    sycl::nd_range<Dims> Default;
+    assert(Default.get_global_range() == sycl::range<Dims>{});
+    assert(Default.get_local_range() == sycl::range<Dims>{});
+    assert(Default.get_offset() == sycl::id<Dims>{});
+    auto Global = sycl::range<Dims>{} + 8;
+    auto Local = sycl::range<Dims>{} + 2;
+    Default = sycl::nd_range<Dims>(Global, Local);
+    assert(Default.get_global_range() == Global);
+    assert(Default.get_local_range() == Local);
+    assert(Default.get_group_range() == sycl::range<Dims>{} + 4);
+  };
+  CheckDefault(std::integral_constant<int, 1>{});
+  CheckDefault(std::integral_constant<int, 2>{});
+  CheckDefault(std::integral_constant<int, 3>{});
+
   sycl::nd_range<1> OneDimNdRangeOffset({4}, {2}, {1});
   assert(OneDimNdRangeOffset.get_global_range() == sycl::range<1>(4));
   assert(OneDimNdRangeOffset.get_local_range() == sycl::range<1>(2));

@@ -16,6 +16,7 @@
 #ifndef _LIBSYCL___IMPL_HANDLER_HPP
 #define _LIBSYCL___IMPL_HANDLER_HPP
 
+#include <sycl/__impl/access_enums.hpp>
 #include <sycl/__impl/detail/config.hpp>
 #include <sycl/__impl/detail/get_device_kernel_info.hpp>
 #include <sycl/__impl/detail/kernel_arg_helpers.hpp>
@@ -35,6 +36,7 @@ _LIBSYCL_BEGIN_NAMESPACE_SYCL
 namespace detail {
 struct HandlerImpl;
 class QueueImpl;
+class BufferImpl;
 } // namespace detail
 
 class _LIBSYCL_EXPORT handler : private detail::KernelSubmissionBase<handler> {
@@ -190,6 +192,9 @@ private:
   std::vector<event> MDepEvents;
 
   detail::HandlerImpl &MImpl;
+
+  void *requireBuffer(detail::BufferImpl *Buffer, access_mode Mode);
+  template <typename, int, access_mode, target> friend class accessor;
 
   friend sycl::detail::ImplUtils;
   friend class detail::QueueImpl;
