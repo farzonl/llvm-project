@@ -1,0 +1,21 @@
+diff --git a/cmake/AddSYCLExecutable.cmake b/cmake/AddSYCLExecutable.cmake
+--- a/cmake/AddSYCLExecutable.cmake
++++ b/cmake/AddSYCLExecutable.cmake
+@@ -1,4 +1,4 @@
+-set (KNOWN_SYCL_IMPLEMENTATIONS "DPCPP;AdaptiveCpp;SimSYCL;ProtoSYCL")
++set (KNOWN_SYCL_IMPLEMENTATIONS "DPCPP;AdaptiveCpp;SimSYCL;ProtoSYCL;LibSYCL")
+ if ("${SYCL_IMPLEMENTATION}" STREQUAL "" OR NOT ${SYCL_IMPLEMENTATION} IN_LIST KNOWN_SYCL_IMPLEMENTATIONS)
+     message(FATAL_ERROR
+         "The SYCL CTS requires specifying a SYCL implementation with "
+diff --git a/tests/common/disabled_for_test_case.h b/tests/common/disabled_for_test_case.h
+--- a/tests/common/disabled_for_test_case.h
++++ b/tests/common/disabled_for_test_case.h
+@@ -56,6 +56,8 @@
+ #define INTERNAL_CTS_SYCL_IMPL_SimSYCL ()
+ #elif SYCL_CTS_COMPILING_WITH_PROTOSYCL
+ #define INTERNAL_CTS_SYCL_IMPL_ProtoSYCL ()
++#elif SYCL_CTS_COMPILING_WITH_LIBSYCL
++#define INTERNAL_CTS_SYCL_IMPL_LibSYCL ()
+ #else
+ #error Unknown SYCL implementation
+ #endif
