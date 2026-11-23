@@ -13,8 +13,12 @@ kernel, lowers the resource-backed ABI, emits and signs DXIL, and packages each
 kernel's launch manifest and SYCL symbol table. The host linker embeds and
 registers the resulting images. libsycl preserves each
 DXIL image's manifest when validating and loading it through liboffload.
-The backend is exposed as `sycl::backend::ext_llvm_directx`. Only device USM is
-supported; host and shared USM aspects are reported as unavailable.
+The backend is exposed as `sycl::backend::ext_llvm_directx`. Device USM and
+restricted, eagerly coherent shared USM are supported. Host and atomic-shared
+USM aspects remain unavailable. Shared allocations use
+[paired host/GPU storage](directx-manifest.md#sharedmanaged-allocations);
+operations involving them currently complete synchronously. Device-only
+dispatch and transfers remain asynchronous.
 
 This is **restricted parallel SYCL support**, not full SYCL or OpenCL support.
 Vector addition uses `nd_range<1>` with 64 work-items per workgroup and one
@@ -642,6 +646,64 @@ Confirmed fully passing categories remain **3 of 97 (about 3.1%)**; only four
 categories were remeasured, not the other 93. This increment removes the
 workgroup-size blocker, not the next shared-USM prerequisite or the remaining
 local-accessor/barrier work.
+
+### Eagerly coherent shared USM
+
+`malloc_shared` and `aligned_alloc_shared` now return real CPU-accessible
+allocation pointers backed by context-owned GPU resources. Bound shared
+allocations are uploaded before real GPU execution and read back before enqueue
+returns. Shared copies/fills use the same explicit coherence policy, including
+device/shared staging transfers. This conservative implementation serializes
+managed operations per device; it does not claim page-fault migration,
+concurrent CPU/GPU access, atomic shared-USM support, or nonblocking shared
+enqueue.
+
+The native test at `libsycl/test/basic/shared-usm.cpp` checks aligned allocations,
+CPU initialization, two dependent GPU updates, subsequent CPU edits, another
+queue's GPU update, host/shared/device copy directions, interior fills, and
+prefix/suffix guards on NVIDIA, AMD, and Intel. Raw shader bindings retain
+their existing 16-byte offset alignment; smaller offsets are explicitly
+rejected rather than silently rounded. Runtime tests also validate shared
+allocation kind, requested size, interior-pointer metadata, alignment,
+context ownership, and lifetime.
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\shared-usm.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\shared-usm.exe" /Fo:"%CTS_BUILD%\shared-usm.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\shared-usm.exe" %D
+```
+
+Refresh both runtime DLLs before remeasuring CTS. The unchanged Range category
+now gets past shared allocation but still passes **4/5 cases and
+8,946/8,947 assertions** per vendor: its first full-conformance large-range
+submission (`UINT32_MAX` work-items) exceeds the native per-axis dispatch limit.
+Later requested ranges include more than 32-bit work-items and approximately
+8.7 trillion work-items. They are not truncated, skipped, or replaced with a
+single dummy dispatch. Large logical-range execution requires a separate
+compiler/runtime geometry contract; it is not implemented by shared migration.
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\shared-usm-verified" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+Header/error and the six NDRange cases (558 assertions) remain passing.
+Confirmed fully passing categories remain **3/97 (about 3.1%)**, not a new
+full-suite pass rate; the other 93 categories were not remeasured. Large-range
+execution, local accessors/barriers, unrestricted resource-backed pointers,
+and complete USM/public-library APIs remain separate prerequisites.
 
 ### Adapter validation
 

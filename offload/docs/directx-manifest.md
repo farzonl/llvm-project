@@ -258,10 +258,50 @@ including zero for shaders without shared storage. Occupancy calculations and co
 Kernel symbols are borrowed from their program and must not be used after its
 destruction.
 
+## Shared/managed allocations
+
+`OL_ALLOC_TYPE_MANAGED` allocations now pair aligned CPU-accessible storage
+with a default-heap GPU buffer. Their tokens are actual host pointers;
+resource resolution translates their byte offsets into the paired GPU buffer,
+not into shader-visible CPU virtual addresses. Native backing storage and
+GPU resources share one context-owned lifetime, including pooled allocations.
+`olGetMemInfo` still reports each live user allocation's requested size, base,
+device, and kind, including interior pointers. Overlapping native token ranges
+are explicitly rejected.
+
+For a kernel that binds managed allocations, the runtime orders a completion
+callback on the user queue and serializes managed operations on that device.
+That callback uses a private GPU queue to upload every bound
+allocation's full logical contents, execute the actual compiled GPU shader,
+and read the logical contents back before returning from enqueue. This avoids
+holding the migration lock while waiting for user-queue host callbacks. Captured
+aliases of one allocation are migrated once. Whole-allocation migration
+preserves bytes outside an interior binding, including guards. CPU updates
+between submissions are observed, and successive GPU updates do not get
+overwritten by stale host contents.
+
+Managed copies and fills also complete synchronously. Host/shared copies and
+shared fills operate on CPU storage; device/shared copies use upload/readback
+staging. A later kernel uploads the resulting CPU contents. Ordinary
+device-only copies, fills, and dispatches retain their existing asynchronous
+path. No CPU code substitutes for a GPU kernel.
+
+This is explicit eager coherence, not demand paging, zero-copy GPU memory,
+or concurrent host/device access. Host USM, host registration, user-visible
+atomic shared-USM operations, and prefetch remain unsupported. Do not access
+a shared allocation concurrently with device work; concurrent/atomic shared
+aspects are not advertised. Existing compiler/resource restrictions still
+apply, including 16-byte alignment of raw-buffer binding offsets. Smaller
+aligned interior CPU accesses and copies do not require shader bindings.
+General pointer transport in device data and complete public SYCL pointer
+queries remain separate work.
+
 ## Dispatch and copy completion
 
 `olLaunchKernel` accepts null queues and explicit compute queues. Explicit-queue
-launches and buffer copies enqueue work without waiting for GPU completion.
+device-only launches and buffer copies enqueue work without waiting for GPU
+completion. Operations involving managed allocations use the synchronous
+coherence path above, even on an explicit queue.
 Null-queue operations block until their work and host readbacks complete.
 A null queue uses the device-owned synchronous queue, but arguments are still
 resolved only in the program's originating

@@ -50,7 +50,7 @@ TEST(PlatformTest, APIGetPlatformsDefaultMock) {
 #endif
 }
 
-TEST(PlatformTest, DirectXBackendReportsDeviceOnlyUsm) {
+TEST(PlatformTest, DirectXBackendReportsNonconcurrentSharedUsm) {
   unittests::UnittestsHelper Helper;
   ON_CALL(Helper.Mock.get(),
           olGetPlatformInfo(_, OL_PLATFORM_INFO_BACKEND, _, _))
@@ -67,7 +67,8 @@ TEST(PlatformTest, DirectXBackendReportsDeviceOnlyUsm) {
     EXPECT_EQ(Device.get_backend(), backend::ext_llvm_directx);
     EXPECT_TRUE(Device.has(aspect::usm_device_allocations));
     EXPECT_FALSE(Device.has(aspect::usm_host_allocations));
-    EXPECT_FALSE(Device.has(aspect::usm_shared_allocations));
+    EXPECT_TRUE(Device.has(aspect::usm_shared_allocations));
+    EXPECT_FALSE(Device.has(aspect::usm_atomic_shared_allocations));
   }
 }
 

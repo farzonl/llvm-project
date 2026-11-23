@@ -26,7 +26,9 @@ pattern fills, and synchronization/profiling events.
 It enumerates DXCore adapters supporting `D3D12_GRAPHICS` and requests a D3D12
 device with minimum feature level 11.0 for each adapter. Device names, LUID-based UIDs,
 and native `ID3D12Device` handles are available. Compute-only adapters and
-host/managed allocations are not supported yet.
+host allocations are not supported yet. Managed allocations use CPU-accessible
+storage paired with GPU buffers and synchronous migration for operations that
+use them; see [shared-memory semantics](directx-manifest.md#sharedmanaged-allocations).
 This is not an OpenMP target.
 
 The [standalone C++ vector-add demo](directx-demo.md) uses an experimental
@@ -150,8 +152,10 @@ the documented Clang or DXC commands; running the tests does not require either
 compiler.
 The OffloadAPI initialization, platform, context, basic queue, and buffer copy
 tests can also run, including profiling-event creation, ordered host callbacks,
-and device-buffer pattern fills. Tests requiring host/managed allocations or
-general-purpose device binaries are not supported yet.
+and device-buffer pattern fills. Managed allocation/copy/fill and restricted
+compute execution are also supported, with the synchronous migration limits
+documented above. Tests requiring host allocations or general-purpose device
+binaries are not supported yet.
 The DirectX-specific tests exercise packaged compute shaders.
 Device information reports DXCore vendor/driver identity and memory capacity,
 D3D12 group and per-axis dispatch limits, and native floating-point support.

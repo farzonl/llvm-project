@@ -301,10 +301,23 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   std::string ShaderModelVersion;
   std::mutex ContextsMutex;
   SmallVector<DirectXPluginContextTy *> Contexts;
+  std::mutex ManagedMutex;
+  std::unique_ptr<DirectXQueueTy> ManagedQueue;
   std::mutex SynchronousQueueMutex;
   std::unique_ptr<DirectXQueueTy> SynchronousQueue;
 
-  enum class CopyKind { Upload, Readback, Device };
+  enum class CopyKind { Upload, Readback, Device, Host };
+  // Ordered user-queue callbacks hold ManagedMutex while using this queue.
+  Expected<DirectXQueueTy *> getManagedQueue(PluginContextTy *Context) {
+    if (!ManagedQueue) {
+      auto Queue = std::make_unique<DirectXQueueTy>(Device.Get());
+      if (auto Err = Queue->init())
+        return std::move(Err);
+      ManagedQueue = std::move(Queue);
+    }
+    ManagedQueue->Context = Context;
+    return ManagedQueue.get();
+  }
   Expected<DirectXQueueTy *> getQueue(AsyncInfoWrapperTy &AsyncInfo) {
     if (AsyncInfo.hasQueue()) {
       auto *Queue = AsyncInfo.getQueueAs<DirectXQueueHandleTy *>()->get();
@@ -328,6 +341,12 @@ struct DirectXDeviceTy final : GenericDeviceTy {
 
   Expected<DirectXBufferTy> getBuffer(const void *Ptr, size_t Size,
                                       PluginContextTy *Context);
+  Expected<std::optional<PluginAllocInfoTy>>
+  getManagedAllocation(const void *Ptr, size_t Size, PluginContextTy *Context);
+  Error copyBuffer(void *Dst, const void *Src, int64_t Size,
+                   AsyncInfoWrapperTy &AsyncInfo, CopyKind Kind,
+                   bool ForceBlocking = false,
+                   DirectXQueueTy *ExecutionQueue = nullptr);
   Error copy(void *Dst, const void *Src, int64_t Size,
              AsyncInfoWrapperTy &AsyncInfo, CopyKind Kind);
 
@@ -364,6 +383,11 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     return Error::success();
   }
   Error deinitImpl() override {
+    if (ManagedQueue) {
+      if (auto Err = ManagedQueue->synchronize())
+        return Err;
+      ManagedQueue.reset();
+    }
     if (SynchronousQueue) {
       if (auto Err = SynchronousQueue->synchronize())
         return Err;
@@ -593,16 +617,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
   Error dataMemcpyImpl(void *Dst, const void *Src, int64_t Size,
                        AsyncInfoWrapperTy &AsyncInfo) override {
-    if (Size < 0)
-      return Plugin::error(ErrorCode::INVALID_SIZE,
-                           "DirectX copy size is not representable");
-    auto Queue = getQueue(AsyncInfo);
-    if (!Queue)
-      return Queue.takeError();
-    if (auto Err = (*Queue)->synchronize())
-      return Err;
-    std::memcpy(Dst, Src, Size);
-    return Error::success();
+    return copy(Dst, Src, Size, AsyncInfo, CopyKind::Host);
   }
   Error dataExchangeImpl(const void *Src, GenericDeviceTy &DstDevice, void *Dst,
                          int64_t Size, AsyncInfoWrapperTy &AsyncInfo,
@@ -620,6 +635,20 @@ struct DirectXDeviceTy final : GenericDeviceTy {
     auto Queue = getQueue(AsyncInfo);
     if (!Queue)
       return Queue.takeError();
+    auto Managed = getManagedAllocation(Ptr, Size, (*Queue)->Context);
+    if (!Managed)
+      return Managed.takeError();
+    if (*Managed) {
+      return (*Queue)->enqueueHostCall(
+          [this, Ptr, Pattern, PatternSize, Size] {
+            std::lock_guard<std::mutex> Lock(ManagedMutex);
+            for (int64_t Offset = 0; Offset < Size; Offset += PatternSize)
+              std::memcpy(static_cast<char *>(Ptr) + Offset, Pattern,
+                          PatternSize);
+            return Error::success();
+          },
+          true);
+    }
     auto Destination = getBuffer(Ptr, Size, (*Queue)->Context);
     if (!Destination)
       return Destination.takeError();
@@ -864,8 +893,13 @@ struct DirectXPluginContextTy final : PluginContextTy {
   DirectXDeviceTy &Owner;
   ComPtr<ID3D12Device> Device;
   std::mutex AllocationsMutex;
+  struct NativeAllocationTy {
+    ComPtr<ID3D12Resource> Resource;
+    std::unique_ptr<void, decltype(&std::free)> HostMemory;
+    size_t Size;
+  };
   // Pool backing resources and live user allocations have different lifetimes.
-  std::map<uintptr_t, ComPtr<ID3D12Resource>> Resources;
+  std::map<uintptr_t, NativeAllocationTy> Resources;
   std::map<uintptr_t, PluginAllocInfoTy> Allocations;
 
   DirectXPluginContextTy(GenericPluginTy &Plugin,
@@ -905,8 +939,8 @@ struct DirectXPluginContextTy final : PluginContextTy {
   Expected<void *> allocateImpl(GenericDeviceTy &, int64_t Size,
                                 ol_alloc_type_t Kind, size_t Alignment,
                                 GenericProfilerTy *) override {
-    if (Kind != OL_ALLOC_TYPE_DEVICE)
-      return unsupported("host or managed memory allocation");
+    if (Kind != OL_ALLOC_TYPE_DEVICE && Kind != OL_ALLOC_TYPE_MANAGED)
+      return unsupported("host memory allocation");
     if (Size <= 0)
       return Plugin::error(ErrorCode::INVALID_SIZE,
                            "DirectX buffer size must be positive");
@@ -928,11 +962,29 @@ struct DirectXPluginContextTy final : PluginContextTy {
       return Plugin::error(ErrorCode::BACKEND_FAILURE,
                            "DirectX buffer address is not representable");
     uintptr_t AlignedAddress = alignTo(Address, Alignment);
+    std::unique_ptr<void, decltype(&std::free)> HostMemory(nullptr, &std::free);
+    if (Kind == OL_ALLOC_TYPE_MANAGED) {
+      HostMemory.reset(std::malloc(*Width));
+      if (!HostMemory)
+        return Plugin::error(ErrorCode::OUT_OF_RESOURCES,
+                             "cannot allocate DirectX shared host storage");
+      AlignedAddress =
+          alignTo(reinterpret_cast<uintptr_t>(HostMemory.get()), Alignment);
+    }
     {
       std::lock_guard<std::mutex> Lock(AllocationsMutex);
-      if (!Resources.emplace(AlignedAddress, std::move(Resource)).second)
+      auto Next = Resources.lower_bound(AlignedAddress);
+      if ((Next != Resources.end() &&
+           static_cast<uint64_t>(Size) > Next->first - AlignedAddress) ||
+          (Next != Resources.begin() &&
+           AlignedAddress - std::prev(Next)->first <
+               std::prev(Next)->second.Size))
         return Plugin::error(ErrorCode::BACKEND_FAILURE,
-                             "DirectX runtime returned a duplicate address");
+                             "DirectX allocation token ranges overlap");
+      Resources.emplace(AlignedAddress,
+                        NativeAllocationTy{std::move(Resource),
+                                           std::move(HostMemory),
+                                           static_cast<size_t>(Size)});
     }
     return reinterpret_cast<void *>(AlignedAddress);
   }
@@ -993,7 +1045,33 @@ struct DirectXPluginContextTy final : PluginContextTy {
       return Plugin::error(ErrorCode::BACKEND_FAILURE,
                            "DirectX allocation has no backing resource");
     --Resource;
-    return directx::getBufferFromAddress(Resource->second, Address, Size);
+    // Managed tokens are CPU addresses, not the backing GPU virtual addresses.
+    uint64_t GPUAddress =
+        Resource->second.HostMemory
+            ? Resource->second.Resource->GetGPUVirtualAddress() +
+                  (Address - Resource->first)
+            : Address;
+    return directx::getBufferFromAddress(Resource->second.Resource, GPUAddress,
+                                         Size);
+  }
+
+  Expected<std::optional<PluginAllocInfoTy>>
+  getManagedAllocation(const void *Ptr, size_t Size) {
+    auto Allocation = getAllocInfo(Ptr);
+    if (!Allocation) {
+      if (auto Err = error::consumeErrorIfCode(Allocation.takeError(),
+                                               ErrorCode::NOT_FOUND))
+        return std::move(Err);
+      return std::optional<PluginAllocInfoTy>();
+    }
+    if (Allocation->Kind != OL_ALLOC_TYPE_MANAGED)
+      return std::optional<PluginAllocInfoTy>();
+    size_t Offset = reinterpret_cast<uintptr_t>(Ptr) -
+                    reinterpret_cast<uintptr_t>(Allocation->Base);
+    if (Size > Allocation->Size - Offset)
+      return Plugin::error(ErrorCode::INVALID_SIZE,
+                           "DirectX shared transfer exceeds allocation size");
+    return std::optional<PluginAllocInfoTy>(*Allocation);
   }
 };
 
@@ -1088,6 +1166,7 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
     LaunchRoot = Variant->RootSignature;
   }
   auto &Context = *static_cast<DirectXPluginContextTy *>(Program->Context);
+  std::map<uintptr_t, PluginAllocInfoTy> Managed;
   auto Bindings = std::make_shared<directx::DirectXArgumentBindingsTy>();
   if (auto Err = Bindings->prepare(
           *Manifest, ArrayRef(Args.Args, Args.NumArgs),
@@ -1097,6 +1176,9 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
             auto Allocation = Context.getAllocInfo(Pointer);
             if (!Allocation)
               return Allocation.takeError();
+            if (Allocation->Kind == OL_ALLOC_TYPE_MANAGED)
+              Managed.emplace(reinterpret_cast<uintptr_t>(Allocation->Base),
+                              *Allocation);
             size_t Remaining = Allocation->Size -
                                (reinterpret_cast<uintptr_t>(Pointer) -
                                 reinterpret_cast<uintptr_t>(Allocation->Base));
@@ -1154,7 +1236,48 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   if (!Barriers.empty())
     Submission.List->ResourceBarrier(static_cast<UINT>(Barriers.size()),
                                      Barriers.data());
-  return (*Queue)->submit(std::move(Submission), AsyncInfo.isSynchronous());
+  if (Managed.empty())
+    return (*Queue)->submit(std::move(Submission), AsyncInfo.isSynchronous());
+  return (*Queue)->enqueueHostCall(
+      [&DXDevice, &AsyncInfo, Context = Program->Context,
+       Managed = std::move(Managed),
+       Submission = std::move(Submission)]() mutable -> Error {
+        std::lock_guard<std::mutex> Lock(DXDevice.ManagedMutex);
+        auto Queue = DXDevice.getManagedQueue(Context);
+        if (!Queue)
+          return Queue.takeError();
+        for (const auto &[Address, Allocation] : Managed)
+          if (auto Err = DXDevice.copyBuffer(
+                  Allocation.Base, Allocation.Base, Allocation.Size, AsyncInfo,
+                  DirectXDeviceTy::CopyKind::Upload, true, *Queue))
+            return Err;
+        if (auto Err = (*Queue)->submit(std::move(Submission), true))
+          return Err;
+        for (const auto &[Address, Allocation] : Managed)
+          if (auto Err = DXDevice.copyBuffer(
+                  Allocation.Base, Allocation.Base, Allocation.Size, AsyncInfo,
+                  DirectXDeviceTy::CopyKind::Readback, true, *Queue))
+            return Err;
+        return Error::success();
+      },
+      true);
+}
+
+Expected<std::optional<PluginAllocInfoTy>>
+DirectXDeviceTy::getManagedAllocation(const void *Ptr, size_t Size,
+                                      PluginContextTy *Context) {
+  if (Context)
+    return static_cast<DirectXPluginContextTy *>(Context)->getManagedAllocation(
+        Ptr, Size);
+  std::lock_guard<std::mutex> Lock(ContextsMutex);
+  for (auto *Candidate : Contexts) {
+    auto Allocation = Candidate->getManagedAllocation(Ptr, Size);
+    if (!Allocation)
+      return Allocation.takeError();
+    if (*Allocation)
+      return Allocation;
+  }
+  return std::optional<PluginAllocInfoTy>();
 }
 
 Expected<DirectXBufferTy> DirectXDeviceTy::getBuffer(const void *Ptr,
@@ -1181,12 +1304,62 @@ Error DirectXDeviceTy::copy(void *Dst, const void *Src, int64_t Size,
   if (Size < 0)
     return Plugin::error(ErrorCode::INVALID_SIZE,
                          "DirectX copy size is not representable");
-  if (Size == 0)
+  if (!Size && Kind != CopyKind::Host)
     return Error::success();
   auto Queue = getQueue(AsyncInfo);
   if (!Queue)
     return Queue.takeError();
-  bool Blocking = AsyncInfo.isSynchronous();
+  auto Destination = getManagedAllocation(Dst, Size, (*Queue)->Context);
+  if (!Destination)
+    return Destination.takeError();
+  auto Source = getManagedAllocation(Src, Size, (*Queue)->Context);
+  if (!Source)
+    return Source.takeError();
+  if (!*Source && !*Destination)
+    return copyBuffer(Dst, Src, Size, AsyncInfo, Kind);
+  return (*Queue)->enqueueHostCall(
+      [this, Dst, Src, Size, Kind, &AsyncInfo, Context = (*Queue)->Context,
+       Destination = bool(*Destination), Source = bool(*Source)]() -> Error {
+        std::lock_guard<std::mutex> Lock(ManagedMutex);
+        bool NativeDestination = Kind != CopyKind::Readback &&
+                                 Kind != CopyKind::Host && !Destination;
+        bool NativeSource =
+            Kind != CopyKind::Upload && Kind != CopyKind::Host && !Source;
+        if (!NativeDestination && !NativeSource) {
+          std::memcpy(Dst, Src, Size);
+          return Error::success();
+        }
+        auto Queue = getManagedQueue(Context);
+        if (!Queue)
+          return Queue.takeError();
+        return copyBuffer(Dst, Src, Size, AsyncInfo,
+                          NativeDestination ? CopyKind::Upload
+                                            : CopyKind::Readback,
+                          true, *Queue);
+      },
+      true);
+}
+
+Error DirectXDeviceTy::copyBuffer(void *Dst, const void *Src, int64_t Size,
+                                  AsyncInfoWrapperTy &AsyncInfo, CopyKind Kind,
+                                  bool ForceBlocking,
+                                  DirectXQueueTy *ExecutionQueue) {
+  if (Size < 0)
+    return Plugin::error(ErrorCode::INVALID_SIZE,
+                         "DirectX copy size is not representable");
+  if (Size == 0 && Kind != CopyKind::Host)
+    return Error::success();
+  auto Queue = ExecutionQueue ? Expected<DirectXQueueTy *>(ExecutionQueue)
+                              : getQueue(AsyncInfo);
+  if (!Queue)
+    return Queue.takeError();
+  if (Kind == CopyKind::Host) {
+    if (auto Err = (*Queue)->synchronize())
+      return Err;
+    std::memcpy(Dst, Src, Size);
+    return Error::success();
+  }
+  bool Blocking = ForceBlocking || AsyncInfo.isSynchronous();
   DirectXBufferTy Destination, Source;
   if (Kind != CopyKind::Readback) {
     auto Buffer = getBuffer(Dst, Size, (*Queue)->Context);
