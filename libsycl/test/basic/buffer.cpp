@@ -93,6 +93,28 @@ void readCapturedID(sycl::queue &Queue,
   });
 }
 
+template <int Dimensions> class BufferMultidimensional;
+
+template <int Dimensions>
+void updateMultidimensional(sycl::queue &Queue,
+                            sycl::buffer<int, Dimensions> &Buffer) {
+  Queue.submit([&](sycl::handler &Handler) {
+    sycl::accessor Output(Buffer, Handler);
+    Handler.parallel_for<BufferMultidimensional<Dimensions>>(
+        Buffer.get_range(), [=](sycl::item<Dimensions> Item) {
+          auto Index = Item.get_id();
+          int Value = Output[Index] + static_cast<int>(Item.get_linear_id());
+          if constexpr (Dimensions == 2)
+            Output[Index[0]][Index[1]] = Value;
+          else
+            Output[Index[0]][Index[1]][Index[2]] = Value;
+        });
+  });
+}
+
+template void updateMultidimensional<2>(sycl::queue &, sycl::buffer<int, 2> &);
+template void updateMultidimensional<3>(sycl::queue &, sycl::buffer<int, 3> &);
+
 template <typename T, unsigned Count> class BufferByteUpdate;
 
 template <typename T, unsigned Count>
@@ -231,6 +253,58 @@ void run(int Argc, char **Argv) {
   };
   sycl::queue First(Device, OnError);
   sycl::queue Second(First.get_context(), Device, OnError);
+  {
+    int Values[3][5]{};
+    {
+      sycl::buffer<int, 2> Buffer(&Values[0][0], sycl::range<2>(3, 5));
+      {
+        sycl::host_accessor Host(Buffer, sycl::write_only);
+        for (unsigned I = 0; I < 3; ++I)
+          for (unsigned J = 0; J < 5; ++J)
+            Host[I][J] = static_cast<int>(I * 100 + J * 7);
+      }
+      updateMultidimensional(First, Buffer);
+      sycl::host_accessor Read(Buffer, sycl::read_only);
+      static_assert(std::is_same_v<decltype(Read[0][0]), const int &>);
+      assert(Read.get_range() == sycl::range<2>(3, 5));
+      assert(Read.size() == 15);
+      for (unsigned I = 0; I < 3; ++I)
+        for (unsigned J = 0; J < 5; ++J)
+          assert(Read[sycl::id<2>(I, J)] ==
+                 static_cast<int>(I * 100 + J * 7 + I * 5 + J));
+    }
+    assert(Values[2][4] == 242);
+  }
+  {
+    sycl::buffer<int, 3> Buffer(sycl::range<3>(2, 3, 5));
+    {
+      sycl::host_accessor Host(Buffer);
+      for (unsigned I = 0; I < 2; ++I)
+        for (unsigned J = 0; J < 3; ++J)
+          for (unsigned K = 0; K < 5; ++K)
+            Host[I][J][K] = 17;
+    }
+    updateMultidimensional(Second, Buffer);
+    sycl::host_accessor Read(Buffer, sycl::read_only);
+    static_assert(std::is_same_v<decltype(Read[0][0][0]), const int &>);
+    assert(Read.get_range() == sycl::range<3>(2, 3, 5));
+    for (unsigned I = 0; I < 2; ++I)
+      for (unsigned J = 0; J < 3; ++J)
+        for (unsigned K = 0; K < 5; ++K)
+          assert(Read[I][J][K] == static_cast<int>(17 + (I * 3 + J) * 5 + K));
+  }
+  for (auto Range :
+       {sycl::range<2>(0, 5),
+        sycl::range<2>(std::numeric_limits<std::size_t>::max(), 2),
+        sycl::range<2>(std::numeric_limits<std::size_t>::max() / 2 + 1, 3)}) {
+    bool Rejected = false;
+    try {
+      sycl::buffer<unsigned char, 2> Invalid(Range);
+    } catch (const sycl::exception &Error) {
+      Rejected = Error.code() == sycl::make_error_code(sycl::errc::invalid);
+    }
+    assert(Rejected);
+  }
   {
     sycl::buffer<int> Owned(sycl::range<1>(8));
     {

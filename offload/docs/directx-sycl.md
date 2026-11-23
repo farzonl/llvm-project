@@ -905,6 +905,48 @@ The extended native buffer test also passes on all three vendors, including
 tests, the 28-test queue unit suite, and 35 focused DirectX
 argument/manifest/workgroup/feature tests pass.
 
+### Multidimensional buffer/accessor execution
+
+Buffers and host/device accessors now support one, two, or three dimensions.
+They retain the full range and use the shared row-major linearization helper
+for `id` indexing. Chained subscripts (`accessor[i][j][k]`) and `item` indexing
+address the same storage, preserving read-only reference types. Device capture
+records retain the actual range fields; existing one-dimensional accessor
+layout is unchanged.
+
+Buffer construction checks each extent before multiplication, rejecting empty
+dimensions and element-count/byte-size overflow before allocation. Host leases,
+cross-queue dependencies, uploads, readback, and deferred writeback use the same
+runtime paths as one-dimensional buffers. Standard allocators and mutable,
+trivially copyable, normally aligned elements remain required. Subranges,
+placeholders, local accessors, and full buffer/accessor conformance remain
+outside this increment.
+
+The native buffer test adds non-square 3x5 and 2x3x5 cases, covering host
+initialization, device `id` reads and chained writes, const host references,
+row-major readback, caller-owned writeback, and invalid extent rejection on
+NVIDIA, AMD, and Intel. Unchanged `test_item` also passes **6/6 cases and
+93/93 assertions per vendor**, including item API, construction, equality,
+and static members.
+
+After rebuilding the previous passing categories against the updated header,
+the six-category measurement passes **109/109 cases and 12,562/12,562 assertions
+per vendor**. The confirmed fully passing category count advances from
+**5/97 to 6/97**. The other 91 configured categories were not measured by this
+run; this is not a full-suite conformance rate. All seven measurement-reporting
+unit tests also pass.
+
+Reproduce the combined measurement after rebuilding device objects affected
+by the public-header change:
+
+```bat
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\multidimensional-item-final" ^
+  --targets test_item test_id test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
