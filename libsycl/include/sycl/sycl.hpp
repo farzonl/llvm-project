@@ -32,6 +32,7 @@
 #include <sycl/__impl/index_space_classes.hpp>
 #include <sycl/__impl/kernel_bundle.hpp>
 #include <sycl/__impl/memory_enums.hpp>
+#include <sycl/__impl/multi_ptr.hpp>
 #include <sycl/__impl/nd_item.hpp>
 #include <sycl/__impl/nd_range.hpp>
 #include <sycl/__impl/platform.hpp>

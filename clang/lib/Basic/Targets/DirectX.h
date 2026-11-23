@@ -25,6 +25,8 @@ static constexpr LangASMap DirectXAddrSpaceMap = {
     {LangAS::opencl_constant, 2},      {LangAS::opencl_generic, 4},
     {LangAS::opencl_global_device, 5}, {LangAS::opencl_global_host, 6},
     {LangAS::hlsl_groupshared, 3},     {LangAS::hlsl_constant, 2},
+    {LangAS::sycl_global, 1},          {LangAS::sycl_local, 3},
+    {LangAS::sycl_private, 0},         {LangAS::sycl_generic, 4},
 };
 
 class LLVM_LIBRARY_VISIBILITY DirectXTargetInfo : public TargetInfo {

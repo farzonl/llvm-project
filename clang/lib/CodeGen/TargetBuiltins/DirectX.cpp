@@ -45,6 +45,8 @@ Value *CodeGenFunction::EmitDirectXBuiltinExpr(unsigned BuiltinID,
   case DirectX::BI__builtin_dx_sync_threads:
     return EmitIntrinsicCall(
         Intrinsic::dx_group_memory_barrier_with_group_sync);
+  case DirectX::BI__builtin_dx_sync_threads_and_memory:
+    return EmitIntrinsicCall(Intrinsic::dx_all_memory_barrier_with_group_sync);
   case DirectX::BI__builtin_dx_dot2add: {
     Value *A = EmitScalarExpr(E->getArg(0));
     Value *B = EmitScalarExpr(E->getArg(1));

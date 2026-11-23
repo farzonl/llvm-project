@@ -947,6 +947,79 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
   --devices NVIDIA AMD Intel --jobs 2 --timeout 900
 ```
 
+### Typed pointer and workgroup-barrier foundation
+
+The modern non-void `multi_ptr` interface now supports explicitly decorated or
+undecorated global, local, private, and generic pointers. Device compilation
+uses actual Clang SYCL address-space types, not interchangeable host pointers.
+Supported operations include dereferencing, indexing, arithmetic, same-type
+comparisons, const-preserving conversions, and named-space-to-generic
+conversions. Device accessor construction and
+`get_multi_ptr<access::decorated::yes/no>()` preserve read-only element
+constness. Host representations remain ordinary pointers.
+
+The DirectX kernel ABI validates and normalizes default/global/generic buffer
+casts while retaining the correct resource access mode. This is not arbitrary
+device pointer transport: surviving resource-pointer comparisons, escapes,
+and casts to local memory are rejected. The legacy, void, and constant-space
+interfaces, checked address-space casts, prefetch, and complete pointer
+conformance remain unimplemented.
+
+DirectX `group_barrier` now synchronizes workgroup execution and fences both
+groupshared and global resource memory. The existing shared-memory-only DirectX
+builtin retains its original semantics; a separate all-memory builtin supplies
+the SYCL fence. Supported fence scopes must resolve during compilation to
+`work_item` or `work_group`, including the default workgroup scope. Other
+fence scopes and subgroup execution are explicitly rejected. The SPIR-V path
+is unchanged.
+
+The native pointer test checks decorated/raw/generic resource access, private
+arrays, and cross-lane groupshared and global scratch reads after a barrier,
+using two independent 32-thread workgroups. It passes on NVIDIA, AMD, and Intel,
+as does the rebuilt buffer regression. This uses static groupshared storage;
+it does not implement dynamic local-accessor allocation or asynchronous
+workgroup copies.
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\multi_ptr.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\multi-ptr.exe" /Fo:"%CTS_BUILD%\multi-ptr.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\multi-ptr.exe" %D
+```
+
+Rebuild the earlier passing categories and remeasure the unchanged group and
+ND-item prerequisites without excluding their copy tests:
+
+```bat
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\pointer-barrier-final" ^
+  --targets test_group test_nd_item test_item test_id ^
+    test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The eight-category remeasurement preserves all six previously passing
+categories: **109/109 cases and 12,562/12,562 assertions per vendor**.
+Group and ND-item still fail compilation and execute no tests. Their recorded
+diagnostics now include missing `sycl::byte`, missing `local_accessor`, and
+unsupported over-aligned vector buffer elements. Their complete copy tests
+also require device events, asynchronous group-copy operations, and group
+execution APIs; no CTS assertions or test sources were changed.
+
+Confirmed fully passing categories remain **6/97**, not eight passing
+categories or a full-suite conformance result. The other 89 configured
+categories were not remeasured. Eight focused compiler tests, the SPIR-V and
+DirectX barrier IR checks, an actual unsupported-scope DXIL-link rejection,
+and seven measurement-reporting unit tests pass. The next workgroup milestone
+is real local-accessor allocation and its compiler/runtime ABI, followed by
+copy/event and scheduling support.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

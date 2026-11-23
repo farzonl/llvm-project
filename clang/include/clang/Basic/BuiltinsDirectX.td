@@ -28,6 +28,12 @@ def DxSyncThreads : Builtin {
   let Prototype = "void()";
 }
 
+def DxSyncThreadsAndMemory : Builtin {
+  let Spellings = ["__builtin_dx_sync_threads_and_memory"];
+  let Attributes = [NoThrow];
+  let Prototype = "void()";
+}
+
 def DxDot2Add : Builtin { 
   let Spellings = ["__builtin_dx_dot2add"];
   let Attributes = [NoThrow, Const];

@@ -15,6 +15,7 @@
 #include <sycl/__impl/access_enums.hpp>
 #include <sycl/__impl/detail/linearization.hpp>
 #include <sycl/__impl/handler.hpp>
+#include <sycl/__impl/multi_ptr.hpp>
 #include <type_traits>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
@@ -144,7 +145,7 @@ class accessor {
   range<Dimensions> MRange;
 
 public:
-  using value_type = T;
+  using value_type = std::conditional_t<Mode == access_mode::read, const T, T>;
   using reference =
       std::conditional_t<Mode == access_mode::read, const T &, T &>;
   template <typename Allocator>
@@ -198,6 +199,16 @@ public:
   }
   range<Dimensions> get_range() const { return MRange; }
   std::size_t size() const { return MRange.size(); }
+  template <access::decorated Decoration>
+  multi_ptr<value_type, access::address_space::global_space, Decoration>
+  get_multi_ptr() const {
+    using Pointer =
+        multi_ptr<value_type, access::address_space::global_space, Decoration>;
+    using DecoratedPointer =
+        typename multi_ptr<value_type, access::address_space::global_space,
+                           access::decorated::yes>::pointer;
+    return Pointer((DecoratedPointer)MPointer);
+  }
 };
 
 template <typename T, int Dims, typename Allocator>

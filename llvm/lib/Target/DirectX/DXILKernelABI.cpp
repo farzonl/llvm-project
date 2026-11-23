@@ -58,6 +58,15 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
         Worklist.push_back(GEP);
         continue;
       }
+      if (auto *Cast = dyn_cast<AddrSpaceCastInst>(U)) {
+        unsigned AS = Cast->getDestAddressSpace();
+        if (AS != 0 && AS != 1 && AS != 4) {
+          fail("buffer address-space casts must preserve global memory");
+          return false;
+        }
+        Worklist.push_back(Cast);
+        continue;
+      }
       if (auto *MemSet = dyn_cast<MemSetInst>(U)) {
         if (ReadOnly || MemSet->isVolatile()) {
           fail("buffer pointer escape or unsupported store");
@@ -118,6 +127,9 @@ void replaceBufferPointer(Value *Old, Value *Pointer) {
         I->copyMetadata(*GEP);
       replaceBufferPointer(GEP, New);
       GEP->eraseFromParent();
+    } else if (auto *Cast = dyn_cast<AddrSpaceCastInst>(U)) {
+      replaceBufferPointer(Cast, Pointer);
+      Cast->eraseFromParent();
     } else if (auto *Load = dyn_cast<LoadInst>(U)) {
       Load->setOperand(0, Pointer);
     } else {
@@ -462,7 +474,7 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
           for (User *Use : Pointer->users())
             if (isa<StoreInst>(Use))
               ReadOnly[Field] = false;
-            else if (isa<GetElementPtrInst>(Use))
+            else if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use))
               Pointers.push_back(Use);
         }
       }
@@ -740,6 +752,7 @@ bool lowerKernel(Module &M) {
     Constants = json::Object{{"register", 0}, {"space", 0}, {"size", Bytes}};
   }
   unsigned ScalarIndex = 0;
+  SmallVector<std::pair<Value *, Value *>> BufferPointers;
   for (Argument &Arg : Kernel->args()) {
     if (!Arg.getType()->isPointerTy()) {
       unsigned ScalarOffset = ScalarOffsets[ScalarIndex++];
@@ -769,13 +782,16 @@ bool lowerKernel(Module &M) {
         Intrinsic::dx_resource_getpointer,
         {Arg.getType(), HandleTy, Builder.getInt32Ty()},
         {Handle, Builder.getInt32(0)}, {}, "", PointerBundles);
-    Arg.replaceAllUsesWith(Pointer);
+    BufferPointers.emplace_back(&Arg, Pointer);
     Arguments.push_back(json::Object{{"index", Arg.getArgNo()},
                                      {"kind", ReadOnly ? "srv" : "uav"},
                                      {"register", Register},
                                      {"space", 0},
                                      {"min_size", 4}});
   }
+  // Remapping can erase the builder's original insertion point.
+  for (auto [Argument, Pointer] : BufferPointers)
+    replaceBufferPointer(Argument, Pointer);
   for (CallInst *Call : DispatchQueries) {
     IRBuilder<> QueryBuilder(Call);
     unsigned Dim = cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue();

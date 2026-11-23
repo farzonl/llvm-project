@@ -74,6 +74,11 @@ the 252-byte budget. Kernels with 64-bit scalars use the existing `dx.Layout`
 type to describe the exact cbuffer byte size and offsets independently of the
 packed LLVM record. Dispatch constants follow the user scalar region.
 Ordinary buffer access instructions determine SRV versus UAV bindings.
+Buffer-pointer casts between the default, global, and generic LLVM address
+spaces are validated and normalized before resource access lowering. Writes
+through these casts still require UAV bindings. Casts to local memory, pointer
+escapes, and surviving pointer comparisons remain unsupported; decoration does
+not turn a resource binding into an unrestricted shader pointer.
 An optional third layout-metadata operand marks SYCL accessor pointers and
 forces UAV bindings so read/write aliases can share a resource. This marker
 and its recognized pointer annotation are removed before DXIL emission; they

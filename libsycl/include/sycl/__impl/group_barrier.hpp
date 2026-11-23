@@ -70,6 +70,12 @@ template <> struct GroupScope<::sycl::sub_group> {
   static constexpr __spirv::Scope value = __spirv::Scope::Subgroup;
 };
 
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
+void unsupportedDirectXBarrierScope() __attribute__((
+    error("DirectX SYCL barriers require work-group execution and work-item or "
+          "work-group fence scope")));
+#endif
+
 } // namespace detail
 
 /// Blocks until all work-items in group g have reached this synchronization
@@ -78,7 +84,15 @@ template <typename Group>
 std::enable_if_t<is_group_v<Group>>
 group_barrier(Group /*g*/,
               [[maybe_unused]] memory_scope fence_scope = Group::fence_scope) {
-#ifdef __SYCL_DEVICE_ONLY__
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
+  static_assert(detail::GroupScope<Group>::value == __spirv::Scope::Workgroup,
+                "DirectX SYCL subgroup barriers are not implemented");
+  if (fence_scope == memory_scope::work_group ||
+      fence_scope == memory_scope::work_item)
+    __builtin_dx_sync_threads_and_memory();
+  else
+    detail::unsupportedDirectXBarrierScope();
+#elif defined(__SYCL_DEVICE_ONLY__)
   __spirv_ControlBarrier(detail::GroupScope<Group>::value,
                          detail::getScope(fence_scope),
                          __spirv::MemorySemanticsMask::SequentiallyConsistent |
