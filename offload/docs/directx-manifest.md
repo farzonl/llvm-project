@@ -20,7 +20,7 @@ in `llvm.offload.manifest` intermediate bitcode metadata. The standalone demo's
 and adds feature declarations from the final DXIL
 container. The metadata is not embedded in executable DXIL: validation rejects
 unknown named metadata. This path currently accepts only indexed buffer-pointer
-arguments with scalar 8-bit integer or 32-bit integer/float accesses,
+arguments with 8/32/64-bit integer or 32-bit float accesses,
 32/64-bit integer and 32-bit float scalar arguments packed
 into `b0, space0` root constants. Flat C++ kernels retain fixed workgroup
 sizes; eligible SYCL capture kernels can carry the specialization recipe below.
@@ -44,18 +44,31 @@ matches the record, rather than one argument per binding. The runtime copies
 its scalar values and resolves its buffer tokens during submission.
 Existing manifests without `capture` retain the separate-argument ABI.
 
+An optional `sizes` array records each capture field's source byte width in
+argument-index order. Without it, source widths equal the binding widths.
+One- and two-byte integer fields may feed four-byte scalar bindings; all other
+source sizes must match their bindings. Source alignment and record bounds use
+these original widths. The runtime zero-extends their bits into root constants,
+and generated code truncates to the original integer type before applying
+signed or unsigned operations. This avoids reading neighboring fields or
+padding and leaves existing capture manifests compatible.
+
 The experimental Clang `-cc1 -fsycl-is-device` compute path records the actual
 AST capture-field offsets and sizes in `dx.capture.layout` function metadata.
 It requires an x64 auxiliary host target for captured pointers. The DirectX
 kernel ABI lowers a single by-value record into resources and root constants,
 and removes this metadata and the capture record before executable emission.
 Nested records, nonvirtual bases, and fixed-size arrays are flattened to loaded
-leaf fields at their actual host offsets. Buffer pointers, 32/64-bit integers,
+leaf fields at their actual host offsets. Buffer pointers, 8/16/32/64-bit integers,
 and 32-bit floats are supported; unused fields, including host-only accessor
 ownership fields, do not produce bindings. A completely unused capture still
 requires one complete, nonempty host record, but has an empty `offsets` array
-and no bindings. Other scalar types, virtual bases, dynamic field indexing,
-and pointer escapes remain unsupported.
+and no bindings. Runtime indexing of fixed-size captured scalar arrays
+materializes the required array in private kernel storage, including nested
+arrays. These arrays may only be indexed and read; their scalar fields count
+against the root-constant budget. Pointer arrays,
+padded element records, other scalar types, virtual bases, and pointer escapes
+remain unsupported.
 Root constants align each scalar to its width, counting alignment gaps against
 the 252-byte budget. Kernels with 64-bit scalars use the existing `dx.Layout`
 type to describe the exact cbuffer byte size and offsets independently of the
@@ -80,6 +93,12 @@ are eligible for mandatory inlining unless explicitly `noinline` or marked
 with an unsupported-device-call diagnostic. This prepares private callable
 copies for the restricted ABI; it does not implement general out-of-line
 device calls.
+
+Resource-backed `memset` is expanded to byte stores before pointer remapping.
+Constant-size copies from capture records are expanded using complete scalar
+fields; all source fields are loaded before stores to preserve `memmove`
+semantics. Partial-field copies and arbitrary device memory-copy APIs remain
+outside this restricted path.
 
 Byte accesses retain their original byte offsets. Loads extract a byte from
 an aligned 32-bit word; stores use a masked atomic compare-exchange retry
@@ -200,7 +219,7 @@ the shared runtime JIT path.
 
 Loading validates the launch ABI, queries the selected D3D12 device's shader-model
 support, and checks all declared feature requirements. The prototype currently
-implements device queries for `Doubles`, `WaveOps`, `Int64Ops`,
+implements device queries for `Doubles`, `MinimumPrecision`, `WaveOps`, `Int64Ops`,
 `NativeLowPrecision`, and `AtomicInt64OnGroupShared`. Other requirements produce
 `UNSUPPORTED` rather than being assumed available. Optional feature queries are
 made only when required. An unrecognized query (`E_INVALIDARG`) means the

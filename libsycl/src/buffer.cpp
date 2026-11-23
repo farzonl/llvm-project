@@ -25,10 +25,19 @@ std::recursive_mutex &getBufferSubmissionMutex() {
 
 BufferImpl::BufferImpl(void *Host, std::size_t Bytes)
     : MHost(Host), MStorage(Bytes) {
-  std::memcpy(MStorage.data(), Host, Bytes);
+  if (Host)
+    std::memcpy(MStorage.data(), Host, Bytes);
+}
+
+void BufferImpl::waitForHostAccess() {
+  std::unique_lock<std::mutex> Lock(MHostAccessMutex);
+  MHostAccessCondition.wait(Lock,
+                            [&] { return !MHostWriter && MHostReaders == 0; });
 }
 
 void BufferImpl::synchronize() {
+  if (MLastEvent)
+    MLastEvent->waitAndThrow();
   if (MQueue)
     MQueue->waitAndThrow();
   if (MDirty) {
@@ -47,8 +56,9 @@ void BufferImpl::freeDevice() {
 }
 
 BufferImpl::~BufferImpl() {
-  std::lock_guard<std::recursive_mutex> Lock(getBufferSubmissionMutex());
+  // Only the final reference destroys storage; no submission can still use it.
   try {
+    waitForHostAccess();
     synchronize();
   } catch (const sycl::exception &) {
     recordAsyncException(MQueue, std::current_exception());
@@ -63,6 +73,7 @@ BufferImpl::~BufferImpl() {
 }
 
 void *BufferImpl::acquire(QueueImpl &Queue) {
+  waitForHostAccess();
   if (MQueue && (&MQueue->getContext() != &Queue.getContext() ||
                  &MQueue->getDevice() != &Queue.getDevice())) {
     synchronize();
@@ -95,6 +106,94 @@ void *BufferImpl::acquire(QueueImpl &Queue) {
   return MDevicePointer;
 }
 
+void *BufferImpl::acquireHost(access_mode Mode) {
+  if (Mode == access_mode::read) {
+    std::lock_guard<std::mutex> Lock(MHostAccessMutex);
+    if (MHostReaders) {
+      ++MHostReaders;
+      return MStorage.data();
+    }
+  }
+  std::lock_guard<std::recursive_mutex> SubmissionLock(
+      getBufferSubmissionMutex());
+  if (MPendingRequirements)
+    throw exception(make_error_code(errc::invalid),
+                    "A host accessor cannot be acquired while its buffer "
+                    "has an unsubmitted command-group requirement");
+  std::unique_lock<std::mutex> Lock(MHostAccessMutex);
+  bool Writes = Mode != access_mode::read;
+  MHostAccessCondition.wait(
+      Lock, [&] { return !MHostWriter && (!Writes || MHostReaders == 0); });
+  synchronize();
+  if (Writes) {
+    MHostWriter = true;
+    MNeedsUpload = true;
+  } else
+    ++MHostReaders;
+  return MStorage.data();
+}
+
+void BufferImpl::releaseHost(access_mode Mode) noexcept {
+  {
+    std::lock_guard<std::mutex> Lock(MHostAccessMutex);
+    if (Mode == access_mode::read)
+      --MHostReaders;
+    else
+      MHostWriter = false;
+  }
+  MHostAccessCondition.notify_all();
+  if (MBufferReferences == 0)
+    finalizeHostStorage();
+}
+
+void BufferImpl::finalizeHostStorage() noexcept {
+  {
+    std::lock_guard<std::mutex> Lock(MHostAccessMutex);
+    if (MBufferReferences || MPendingRequirements || MHostWriter ||
+        MHostReaders || MHostStorageFinalized)
+      return;
+    MHostStorageFinalized = true;
+  }
+  try {
+    synchronize();
+    if (MHost)
+      std::memcpy(MHost, MStorage.data(), MStorage.size());
+  } catch (const sycl::exception &) {
+    recordAsyncException(MQueue, std::current_exception());
+  }
+  MHost = nullptr;
+  if (MQueue)
+    MQueue->throwAsynchronous();
+}
+
+class HostAccessImpl {
+  BufferImpl *MBuffer;
+  access_mode MMode;
+
+public:
+  void *Pointer;
+  HostAccessImpl(BufferImpl *Buffer, access_mode Mode)
+      : MBuffer(Buffer), MMode(Mode), Pointer(Buffer->acquireHost(Mode)) {
+    retainBuffer(MBuffer);
+  }
+  ~HostAccessImpl() {
+    MBuffer->releaseHost(MMode);
+    releaseBuffer(MBuffer);
+  }
+};
+
+std::shared_ptr<HostAccessImpl> acquireHostAccess(BufferImpl *Buffer,
+                                                  access_mode Mode) {
+  if (!Buffer)
+    throw exception(make_error_code(errc::invalid),
+                    "A host accessor requires a valid buffer");
+  return std::make_shared<HostAccessImpl>(Buffer, Mode);
+}
+
+void *getHostAccessPointer(const HostAccessImpl &Access) {
+  return Access.Pointer;
+}
+
 void BufferImpl::submitted(std::shared_ptr<EventImpl> Event, bool Writes) {
   MLastEvent = std::move(Event);
   MDirty |= Writes;
@@ -107,6 +206,8 @@ void BufferImpl::retainRequirement() {
 
 void BufferImpl::releaseRequirement() {
   --MPendingRequirements;
+  if (MBufferReferences == 0)
+    finalizeHostStorage();
   releaseBuffer(this);
 }
 
@@ -126,7 +227,6 @@ void releaseBuffer(BufferImpl *Buffer) noexcept {
 void retainBufferOwner(BufferImpl *Buffer) noexcept {
   if (!Buffer)
     return;
-  std::lock_guard<std::recursive_mutex> Lock(getBufferSubmissionMutex());
   ++Buffer->MBufferReferences;
   retainBuffer(Buffer);
 }
@@ -134,23 +234,8 @@ void retainBufferOwner(BufferImpl *Buffer) noexcept {
 void releaseBufferOwner(BufferImpl *Buffer) noexcept {
   if (!Buffer)
     return;
-  std::lock_guard<std::recursive_mutex> Lock(getBufferSubmissionMutex());
-  if (--Buffer->MBufferReferences == 0) {
-    try {
-      if (Buffer->MPendingRequirements)
-        throw exception(make_error_code(errc::feature_not_supported),
-                        "Destroying the last buffer inside a command group "
-                        "before submission is not supported");
-      Buffer->synchronize();
-      std::memcpy(Buffer->MHost, Buffer->MStorage.data(),
-                  Buffer->MStorage.size());
-    } catch (const sycl::exception &) {
-      recordAsyncException(Buffer->MQueue, std::current_exception());
-    }
-    Buffer->MHost = nullptr;
-    if (Buffer->MQueue)
-      Buffer->MQueue->throwAsynchronous();
-  }
+  if (--Buffer->MBufferReferences == 0)
+    Buffer->finalizeHostStorage();
   releaseBuffer(Buffer);
 }
 } // namespace detail

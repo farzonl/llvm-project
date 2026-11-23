@@ -320,20 +320,16 @@ bool DXILFlattenArraysVisitor::visitGetElementPtrInst(GetElementPtrInst &GEP) {
     for (auto [VarIndex, Multiplier] : Info.VariableOffsets) {
       assert(Multiplier.getActiveBits() <= 32 &&
              "The multiplier for a flat GEP index must fit within 32 bits");
-      assert(VarIndex->getType()->isIntegerTy(32) &&
-             "Expected i32-typed GEP indices");
-      Value *VI;
+      Value *VI = Builder.CreateSExtOrTrunc(VarIndex, Builder.getInt32Ty());
       if (Multiplier.getZExtValue() % BytesPerElem != 0) {
         // This can happen, e.g., with i8 GEPs. To handle this we just divide
         // by BytesPerElem using an instruction after multiplying VarIndex by
         // Multiplier.
-        VI = Builder.CreateMul(VarIndex,
-                               Builder.getInt32(Multiplier.getZExtValue()));
+        VI = Builder.CreateMul(VI, Builder.getInt32(Multiplier.getZExtValue()));
         VI = Builder.CreateLShr(VI, Builder.getInt32(Log2_32(BytesPerElem)));
       } else
         VI = Builder.CreateMul(
-            VarIndex,
-            Builder.getInt32(Multiplier.getZExtValue() / BytesPerElem));
+            VI, Builder.getInt32(Multiplier.getZExtValue() / BytesPerElem));
       FlattenedIndex = Builder.CreateAdd(FlattenedIndex, VI);
     }
 

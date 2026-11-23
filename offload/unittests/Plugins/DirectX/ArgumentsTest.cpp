@@ -124,6 +124,21 @@ TEST(DirectXArgumentsTest, SnapshotsDispatchGeometryAnd64BitOffsets) {
               error::ErrorCode::UNSUPPORTED, "no global-offset");
 }
 
+TEST(DirectXArgumentsTest, PromotesNarrowCaptureFieldsWithoutReadingPadding) {
+  DirectXManifestTy Manifest;
+  Manifest.Constants = DirectXConstantBindingTy{0, 0, 8};
+  Manifest.Arguments = {{0, DirectXScalarBindingTy{4, 0}},
+                        {1, DirectXScalarBindingTy{4, 4}}};
+  Manifest.Capture = DirectXCaptureLayoutTy{4, {0, 2}, {1, 2}};
+  uint8_t Record[] = {0xAB, 0xCC, 0xEF, 0xBE};
+  void *Args[] = {Record};
+  int64_t Sizes[] = {sizeof(Record)};
+  DirectXArgumentBindingsTy Bindings;
+  auto Err = Bindings.prepare(Manifest, Args, Sizes, noBuffers);
+  ASSERT_FALSE(static_cast<bool>(Err)) << toString(std::move(Err));
+  EXPECT_EQ(ArrayRef(Bindings.Constants), (ArrayRef<uint32_t>{0xAB, 0xBEEF}));
+}
+
 TEST(DirectXArgumentsTest,
      RequiresExactArgumentShapesAndPreservesPreviousData) {
   DirectXManifestTy Manifest;

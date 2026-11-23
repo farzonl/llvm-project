@@ -5,6 +5,8 @@
 ; RUN: not opt -S -dxil-kernel-abi %t/multiple.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=MULTIPLE
 ; RUN: not opt -S -dxil-kernel-abi %t/dtor.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=DTOR
 ; RUN: not opt -dxil-kernel-abi -dxil-kernel-numthreads=2,1,1 %t/escape.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=FIXED
+; RUN: not opt -S -dxil-kernel-abi %t/readonly-memset.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=ESCAPE
+; RUN: not opt -S -dxil-kernel-abi %t/volatile-memset.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=ESCAPE
 
 ; SCALAR: arguments must be default-address-space buffer pointers or 32/64-bit integer or float scalars
 ; ESCAPE: buffer pointer escape or unsupported store
@@ -19,6 +21,24 @@ define void @scalar(i16 %value) #0 {
   ret void
 }
 attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
+
+;--- readonly-memset.ll
+target triple = "dxil-pc-shadermodel6.0-compute"
+define void @readonly_memset(ptr "dx.readonly" %out) #0 {
+  call void @llvm.memset.p0.i64(ptr %out, i8 0, i64 24, i1 false)
+  ret void
+}
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="1,1,1" }
+
+;--- volatile-memset.ll
+target triple = "dxil-pc-shadermodel6.0-compute"
+define void @volatile_memset(ptr %out) #0 {
+  call void @llvm.memset.p0.i64(ptr %out, i8 0, i64 24, i1 true)
+  ret void
+}
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1 immarg)
+attributes #0 = { "dx.kernel" "hlsl.numthreads"="1,1,1" }
 
 ;--- dtor.ll
 target triple = "dxil-pc-shadermodel6.0-compute"

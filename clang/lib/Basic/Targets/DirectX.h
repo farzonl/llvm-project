@@ -84,6 +84,8 @@ public:
       PointerAlign = Aux->getPointerAlign(LangAS::Default);
       SizeType = Aux->getSizeType();
       PtrDiffType = Aux->getPtrDiffType(LangAS::Default);
+      if (!Opts.WCharSize)
+        WCharType = Aux->getWCharType();
       VaListKind = Aux->getBuiltinVaListKind();
       resetDataLayout();
       // Intermediate SYCL IR contains host-side declarations and capture

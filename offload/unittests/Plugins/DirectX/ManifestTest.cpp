@@ -162,6 +162,26 @@ TEST(DirectXManifestTest, AcceptsUnusedCaptureFields) {
               error::ErrorCode::INVALID_BINARY, "nonempty record");
 }
 
+TEST(DirectXManifestTest, ValidatesNarrowCaptureSourceSizes) {
+  auto Object = emptyManifest();
+  Object["constants"] = constants(8);
+  Object["arguments"] = json::Array{scalar(0, 4, 0), scalar(1, 4, 4)};
+  Object["capture"] = json::Object{{"size", 4},
+                                   {"pointer_size", 8},
+                                   {"offsets", json::Array{0, 2}},
+                                   {"sizes", json::Array{1, 2}}};
+  auto Manifest = DirectXManifestTy::parse(encode(Object));
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  for (auto Sizes : {json::Array{0, 2}, json::Array{3, 2}, json::Array{1, 8}}) {
+    (*Object.getObject("capture"))["sizes"] = std::move(Sizes);
+    expectError(DirectXManifestTy::parse(encode(Object)),
+                error::ErrorCode::INVALID_BINARY, "capture source sizes");
+  }
+  (*Object.getObject("capture"))["sizes"] = json::Array{1};
+  expectError(DirectXManifestTy::parse(encode(Object)),
+              error::ErrorCode::INVALID_BINARY, "one source size");
+}
+
 TEST(DirectXManifestTest, AcceptsEmptyKernelsAndFullRootBudget) {
   auto Empty = DirectXManifestTy::parse(encode(emptyManifest()));
   ASSERT_TRUE(static_cast<bool>(Empty)) << toString(Empty.takeError());

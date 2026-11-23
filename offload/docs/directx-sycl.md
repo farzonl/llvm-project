@@ -809,6 +809,102 @@ The existing buffer, executable-bundle, shared-USM, uniform-workgroup, and
 65,537-element vector-add tests were rebuilt and passed on all three vendors.
 The full queue unit suite and focused measurement-reporting tests also pass.
 
+### Owned buffers, host access, and 64-bit results
+
+One-dimensional buffers can now allocate their own storage from a range,
+without requiring a caller-owned host pointer. `read_only`, `write_only`, and
+`read_write` tags select device and host accessor modes, including deduction
+of the corresponding accessor type.
+
+Host accessor construction waits for the buffer's latest submitted event and
+reads back GPU writes. Writable host access marks the storage for upload before
+subsequent GPU execution. Copies share one host-access lifetime; independently
+acquired read accessors may coexist. Device submissions wait until all host
+accessors for that buffer are released. This is a conservative blocking
+submission policy, not a general nonblocking scheduler: release a host accessor
+before submitting dependent work on the same thread.
+
+A host accessor keeps owned storage alive after the last buffer object is
+destroyed. For caller-owned storage, final writeback is deferred until that
+remaining host access and pending command-group requirements end, so the caller's
+memory must remain valid until then. Unlike the previous explicit rejection,
+destroying the last buffer object inside an unsubmitted command group now defers
+final writeback until submission completes. Buffer-owner and last-reference
+cleanup do not acquire the global submission lock, allowing owners and host
+leases to be released while another submission waits for them.
+Acquiring the first host lease while its buffer has an unsubmitted command-group
+requirement is explicitly rejected rather than exposing incomplete device work.
+
+Resource-backed 64-bit integer loads/stores now transport two 32-bit words per
+element without changing buffer layout. Compiler-generated vectors of these
+integers use the same word transport. Constants are split with scalar
+operations before DXIL emission, avoiding residual vector constant expressions
+that caused the initial ID-result shader to write zeros on AMD.
+This does not introduce FP64 or atomic buffer support.
+
+Aggregate zero initialization uses byte-store lowering for resource-backed
+`memset`. Copies of captured aggregates transport complete scalar fields,
+loading all fields before storing to preserve `memmove` semantics.
+Narrow integer captures retain their one-/two-byte host widths in the manifest
+and are promoted into 32-bit root-constant slots without reading host padding.
+Generated code restores the original width before signed or unsigned arithmetic.
+The DirectX SYCL frontend also inherits the host's default `wchar_t` type,
+preserving Windows' two-byte unsigned representation and capture field offsets.
+Explicit compiler options overriding `wchar_t` remain honored.
+After capture lowering, executable DXIL restores the native `wchar_size`
+module flag alongside its pointer layout. The actual integer types and host
+capture widths are unchanged. This prevents NVIDIA's 64-bit arithmetic shader
+linking from conflicting with the intermediate Windows language ABI.
+Shaders that retain 16-bit operations require a successful native
+`MinimumPrecision` feature check; this does not change advertised SYCL half
+capabilities.
+Runtime-indexed captured scalar arrays are initialized in private kernel
+storage from their actual capture fields. The same lowering supports nested
+scalar arrays; the required fields still count against the 252-byte root limit.
+Writes and pointer escapes through these captured arrays remain rejected.
+
+The extended `libsycl/test/basic/buffer.cpp` checks GPU-to-host visibility,
+host edits followed by another queue's GPU update, copied and independent
+read-access lifetimes, blocked submissions, last-owner storage/writeback,
+distinct high/low words and negative integers, constant/captured/zero
+three-component ID results, runtime ID and nested-array indexing, and
+signed/unsigned byte, short, boolean, and `wchar_t` captures with neighboring
+sentinel bytes.
+Existing byte-buffer, dependency, migration, and sentinel checks remain
+included. Buffers/accessors remain one-dimensional with the standard allocator;
+over-aligned elements, subranges, placeholders, and full buffer/accessor API
+conformance remain outside this increment.
+
+The unchanged ID CTS now passes **89/89 cases and 2,960/2,960 assertions**
+on each of NVIDIA, AMD, and Intel. Error, header, range, and NDRange remain
+fully passing. The combined measurement reports **103/103 cases and
+12,469/12,469 assertions per vendor**, advancing the confirmed fully passing
+category count from **4/97 to 5/97**. The other 92 configured categories were
+not measured by this run; this is not a full-suite conformance rate.
+
+The final measurement uses freshly relinked DXIL after restoring native shader
+ABI metadata. The initial Windows-width correction passed AMD and Intel but
+exposed NVIDIA's shader-linking conflict; that failed run is not counted as
+an all-vendor pass. Rebuild device objects after frontend capture-layout
+changes, and relink executables after backend ABI changes.
+
+```bat
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+copy /y "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin\LLVMSYCL.dll"
+copy /y "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin\LLVMOffload.dll"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\host-access-id-native-final" ^
+  --targets test_id test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The extended native buffer test also passes on all three vendors, including
+64-bit division with a captured Windows `wchar_t`. Thirteen focused compiler
+tests, the 28-test queue unit suite, and 35 focused DirectX
+argument/manifest/workgroup/feature tests pass.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

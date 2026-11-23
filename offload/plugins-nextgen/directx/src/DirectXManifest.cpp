@@ -285,8 +285,8 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
     const auto *Block = Value->getAsObject();
     if (!Block)
       return invalid("capture must be an object");
-    if (auto Err =
-            checkKeys(*Block, {"size", "pointer_size", "offsets"}, "capture"))
+    if (auto Err = checkKeys(
+            *Block, {"size", "pointer_size", "offsets", "sizes"}, "capture"))
       return std::move(Err);
     auto Size = readU32(Block->get("size"), "capture.size");
     if (!Size)
@@ -303,6 +303,10 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
     if (!*Size || !Offsets || Offsets->size() != Manifest.Arguments.size())
       return invalid(
           "capture requires a nonempty record and one offset per binding");
+    const auto *Sizes = Block->getArray("sizes");
+    if (Block->get("sizes") &&
+        (!Sizes || Sizes->size() != Manifest.Arguments.size()))
+      return invalid("capture requires one source size per binding");
     DirectXCaptureLayoutTy Layout;
     Layout.Size = *Size;
     uint32_t End = 0;
@@ -312,12 +316,23 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
         return Offset.takeError();
       const auto *Scalar = std::get_if<DirectXScalarBindingTy>(&Arg.Binding);
       uint32_t Width = Scalar ? Scalar->Size : *PointerSize;
+      if (Sizes) {
+        auto SourceSize = readU32(&(*Sizes)[Arg.Index], "capture.sizes");
+        if (!SourceSize)
+          return SourceSize.takeError();
+        if (*SourceSize != Width &&
+            (!Scalar || Width != 4 || (*SourceSize != 1 && *SourceSize != 2)))
+          return invalid("capture source sizes must match bindings or use "
+                         "1/2-byte scalars promoted to four bytes");
+        Width = *SourceSize;
+      }
       if (*Offset % Width || *Offset < End || *Offset > *Size ||
           Width > *Size - *Offset)
         return invalid("capture fields must be aligned, ordered, "
                        "nonoverlapping, and in bounds");
       End = *Offset + Width;
       Layout.Offsets.push_back(*Offset);
+      Layout.Sizes.push_back(Width);
     }
     Manifest.Capture = std::move(Layout);
   }

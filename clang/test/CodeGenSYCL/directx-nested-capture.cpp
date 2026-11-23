@@ -68,3 +68,21 @@ void launch_derived(DerivedCallable Function) {
 // CHECK: ![[BASE0]] = !{i32 0, i32 8}
 // CHECK: ![[DERIVED_DATA]] = !{i32 16, i32 8, i32 1}
 // CHECK: ![[DERIVED_OWNER]] = !{i32 24, i32 8}
+
+struct WCharCallable {
+  Accessor Output;
+  wchar_t Value;
+  unsigned char Sentinel;
+  void operator()() const {
+    Output.Data[0] = static_cast<unsigned>(Value) + Sentinel;
+  }
+};
+class WCharCapture;
+[[clang::sycl_kernel_entry_point(WCharCapture)]]
+void launch_wchar(WCharCallable Function) {
+  Function();
+}
+
+// CHECK: ![[WCHAR_LAYOUT:[0-9]+]] = !{i32 32, i32 8, ![[DATA]], ![[OWNER]], ![[COUNT]], ![[WCHAR:[0-9]+]], ![[SENTINEL:[0-9]+]]}
+// CHECK: ![[WCHAR]] = !{i32 24, i32 2}
+// CHECK: ![[SENTINEL]] = !{i32 26, i32 1}

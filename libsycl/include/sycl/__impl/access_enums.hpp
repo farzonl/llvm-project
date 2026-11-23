@@ -34,6 +34,11 @@ enum class target : std::uint32_t {
   global_buffer __SYCL2020_DEPRECATED("Use target::device instead") = device
 };
 
+template <access_mode Mode> struct mode_tag_t {};
+inline constexpr mode_tag_t<access_mode::read> read_only{};
+inline constexpr mode_tag_t<access_mode::write> write_only{};
+inline constexpr mode_tag_t<access_mode::read_write> read_write{};
+
 namespace access {
 
 using mode __SYCL2020_DEPRECATED("Use sycl::access_mode instead") = access_mode;

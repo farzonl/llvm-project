@@ -45,6 +45,54 @@ void increment(sycl::queue &Queue, sycl::buffer<int> &Buffer) {
   });
 }
 
+void copyWide(sycl::queue &Queue, sycl::buffer<long long> &Input,
+              sycl::buffer<long long> &Output) {
+  Queue.submit([&](sycl::handler &Handler) {
+    sycl::accessor Read(Input, Handler, sycl::read_only);
+    sycl::accessor Write(Output, Handler, sycl::write_only);
+    Handler.single_task<class BufferWideCopy>([=] {
+      for (unsigned I = 0; I < 3; ++I)
+        Write[I] = Read[I] + 0x100000003LL;
+    });
+  });
+}
+
+void writeID(sycl::queue &Queue, sycl::buffer<sycl::id<3>> &Buffer,
+             const sycl::id<3> &Values) {
+  Queue.submit([&](sycl::handler &Handler) {
+    sycl::accessor Output(Buffer, Handler, sycl::write_only);
+    Handler.single_task<class BufferID>([=] {
+      Output[0] = sycl::id<3>(0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL,
+                              0x100000003ULL);
+      auto Modified = Values;
+      Modified[0] = 7;
+      Output[1] = Modified;
+      Output[2] = sycl::id<3>(0, 0, 0);
+    });
+  });
+}
+
+void writeTemporaryBuffer(sycl::queue &Queue, int *Host) {
+  Queue.submit([&](sycl::handler &Handler) {
+    sycl::buffer<int> Local(Host, sycl::range<1>(8));
+    sycl::accessor Access(Local, Handler);
+    Handler.single_task<class BufferTemporaryLifetime>([=] {
+      for (unsigned I = 0; I < 8; ++I)
+        Access[I] = static_cast<int>(I * 7 + 1);
+    });
+  });
+}
+
+void readCapturedID(sycl::queue &Queue,
+                    sycl::buffer<unsigned long long> &Buffer,
+                    const sycl::id<3> &Values, int Index) {
+  Queue.submit([&](sycl::handler &Handler) {
+    sycl::accessor Output(Buffer, Handler, sycl::write_only);
+    Handler.single_task<class BufferCapturedIDIndex>(
+        [=] { Output[0] = Values[Index]; });
+  });
+}
+
 template <typename T, unsigned Count> class BufferByteUpdate;
 
 template <typename T, unsigned Count>
@@ -82,6 +130,12 @@ struct CaptureValues {
   unsigned long long Values[2][2];
   float Scale;
   long long SignedValue;
+  signed char SignedByte;
+  unsigned char UnsignedByte;
+  short SignedShort;
+  bool Flag;
+  wchar_t WideChar;
+  unsigned char Sentinel;
 };
 
 void submitUnusedCapture(sycl::queue &Queue, sycl::buffer<int> &Buffer) {
@@ -104,6 +158,16 @@ void writeCapturedValues(sycl::queue &Queue, sycl::buffer<unsigned> &Buffer,
       Output[5] = Values.SignedValue < -1
                       ? static_cast<unsigned>(Values.SignedValue >> 32)
                       : 0;
+      Output[6] = static_cast<unsigned>(Values.SignedByte);
+      Output[7] = Values.UnsignedByte;
+      Output[8] = static_cast<unsigned>(Values.SignedShort);
+      Output[9] = Values.Flag ? 1 : 0;
+      Output[10] =
+          static_cast<unsigned>(Values.Values[(Bias / 4) % 2][(Bias / 2) % 2]);
+      Output[11] = static_cast<unsigned>(Values.WideChar);
+      Output[12] = Values.Sentinel;
+      Output[13] = static_cast<unsigned>(
+          Values.SignedValue / static_cast<long long>(Values.WideChar));
     });
   });
 }
@@ -112,6 +176,8 @@ void writeCapturedValues(sycl::queue &Queue, sycl::buffer<unsigned> &Buffer,
 #  include <array>
 #  include <atomic>
 #  include <cassert>
+#  include <chrono>
+#  include <future>
 #  include <iostream>
 #  include <optional>
 #  include <thread>
@@ -165,6 +231,121 @@ void run(int Argc, char **Argv) {
   };
   sycl::queue First(Device, OnError);
   sycl::queue Second(First.get_context(), Device, OnError);
+  {
+    sycl::buffer<int> Owned(sycl::range<1>(8));
+    {
+      sycl::host_accessor Host(Owned, sycl::write_only);
+      static_assert(std::is_same_v<decltype(Host[0]), int &>);
+      for (unsigned I = 0; I < 8; ++I)
+        Host[I] = static_cast<int>(I * 9);
+    }
+    increment(First, Owned);
+    {
+      sycl::host_accessor Read(Owned, sycl::read_only);
+      static_assert(std::is_same_v<decltype(Read[0]), const int &>);
+      for (unsigned I = 0; I < 8; ++I)
+        assert(Read[I] == static_cast<int>(I * 9 + 1));
+      assert(Read.byte_size() == 8 * sizeof(int));
+      assert(Read.get_range() == sycl::range<1>(8));
+      const auto Copy = Read;
+      assert(Copy.get_pointer() == Read.get_pointer());
+    }
+    using HostAccess = sycl::host_accessor<int>;
+    std::optional<HostAccess> Host(std::in_place, Owned);
+    std::optional<HostAccess> Retained(*Host);
+    std::optional<HostAccess> Unrelated;
+    std::optional<sycl::buffer<int>> Other(std::in_place, sycl::range<1>(1));
+    Unrelated.emplace(*Other);
+    (*Unrelated)[0] = 91;
+    Host->operator[](0) = 123;
+    std::promise<void> Started;
+    auto Start = Started.get_future();
+    auto Submission = std::async(std::launch::async, [&] {
+      Started.set_value();
+      increment(Second, Owned);
+    });
+    Start.get();
+    bool Blocked = Submission.wait_for(std::chrono::milliseconds(100)) ==
+                   std::future_status::timeout;
+    Other.reset();
+    Unrelated.reset();
+    Host.reset();
+    bool CopyBlocked = Submission.wait_for(std::chrono::milliseconds(100)) ==
+                       std::future_status::timeout;
+    Retained.reset();
+    Submission.get();
+    assert(Blocked && CopyBlocked);
+    {
+      sycl::host_accessor Result(Owned, sycl::read_only);
+      assert(Result[0] == 124);
+    }
+    using ReadAccess = sycl::host_accessor<int, 1, sycl::access_mode::read>;
+    std::optional<ReadAccess> ReadA(std::in_place, Owned);
+    std::optional<ReadAccess> ReadB;
+    std::promise<void> ReadersStarted;
+    auto ReadersStart = ReadersStarted.get_future();
+    auto ReadersSubmission = std::async(std::launch::async, [&] {
+      ReadersStarted.set_value();
+      increment(First, Owned);
+    });
+    ReadersStart.get();
+    bool FirstReaderBlocked =
+        ReadersSubmission.wait_for(std::chrono::milliseconds(100)) ==
+        std::future_status::timeout;
+    ReadB.emplace(Owned);
+    ReadA.reset();
+    bool ReaderBlocked =
+        ReadersSubmission.wait_for(std::chrono::milliseconds(100)) ==
+        std::future_status::timeout;
+    ReadB.reset();
+    ReadersSubmission.get();
+    assert(FirstReaderBlocked && ReaderBlocked);
+    sycl::host_accessor Result(Owned, sycl::read_only);
+    assert(Result[0] == 125);
+  }
+  {
+    std::optional<sycl::host_accessor<int>> Retained;
+    int HostValue = 9;
+    {
+      sycl::buffer<int> Buffer(&HostValue, sycl::range<1>(1));
+      Retained.emplace(Buffer);
+      (*Retained)[0] = 47;
+    }
+    assert((*Retained)[0] == 47);
+    Retained.reset();
+    assert(HostValue == 47);
+  }
+  {
+    sycl::buffer<sycl::id<3>> Buffer{3};
+    const sycl::id<3> CapturedID(0x8765432112345678ULL, 0xABCDEF0123456789ULL,
+                                 0x200000005ULL);
+    writeID(First, Buffer, CapturedID);
+    sycl::host_accessor Result(Buffer, sycl::read_only);
+    if (Result[0] != sycl::id<3>(0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL,
+                                 0x100000003ULL))
+      std::cerr << "Wide ID transport mismatch: " << std::hex << Result[0][0]
+                << ", " << Result[0][1] << ", " << Result[0][2] << std::dec
+                << '\n';
+    assert(Result[0] == sycl::id<3>(0x123456789ABCDEF0ULL,
+                                    0xFEDCBA9876543210ULL, 0x100000003ULL));
+    assert(Result[1] == sycl::id<3>(7, CapturedID[1], CapturedID[2]));
+    assert(Result[2] == sycl::id<3>(0, 0, 0));
+    sycl::buffer<unsigned long long> Indexed{1};
+    for (int I = 0; I < 3; ++I) {
+      readCapturedID(First, Indexed, CapturedID, I);
+      sycl::host_accessor Element(Indexed, sycl::read_only);
+      assert(Element[0] == CapturedID[I]);
+    }
+  }
+  {
+    long long Values[] = {0x123456789ABCDE0LL, -0x123456789ABCDE0LL, -1};
+    sycl::buffer<long long> Input(Values, sycl::range<1>(3));
+    sycl::buffer<long long> Output{3};
+    copyWide(First, Input, Output);
+    sycl::host_accessor Result(Output, sycl::read_only);
+    for (unsigned I = 0; I < 3; ++I)
+      assert(Result[I] == Values[I] + 0x100000003LL);
+  }
   checkBytes<bool, 1>(First, 1);
   checkBytes<bool, 5>(First, 3);
   checkBytes<unsigned char, 1>(First, 2);
@@ -180,11 +361,18 @@ void run(int Argc, char **Argv) {
   CaptureValues Captured{{{0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL},
                           {0x0BADF00DDEADBEEFULL, 0x89ABCDEF01234567ULL}},
                          0.5f,
-                         -0x100000003LL};
+                         -0x100000003LL,
+                         -101,
+                         203,
+                         -12345,
+                         true,
+                         wchar_t(0xFFF1),
+                         0xA5};
   for (unsigned Bias : {6u, 10u}) {
-    std::array<unsigned, 6> Result{};
+    Captured.Flag = Bias == 6;
+    std::array<unsigned, 14> Result{};
     {
-      sycl::buffer<unsigned> Buffer(Result.data(), sycl::range<1>(6));
+      sycl::buffer<unsigned> Buffer(Result.data(), sycl::range<1>(14));
       writeCapturedValues(First, Buffer, Bias, Captured);
     }
     assert(Result[0] == Bias + static_cast<unsigned>(Captured.Values[0][0]));
@@ -193,6 +381,17 @@ void run(int Argc, char **Argv) {
     assert(Result[3] == static_cast<unsigned>(Captured.Values[1][1] >> 32));
     assert(Result[4] == static_cast<unsigned>(Captured.Scale * Bias));
     assert(Result[5] == static_cast<unsigned>(Captured.SignedValue >> 32));
+    assert(Result[6] == static_cast<unsigned>(Captured.SignedByte));
+    assert(Result[7] == Captured.UnsignedByte);
+    assert(Result[8] == static_cast<unsigned>(Captured.SignedShort));
+    assert(Result[9] == static_cast<unsigned>(Captured.Flag));
+    assert(Result[10] == static_cast<unsigned>(
+                             Captured.Values[(Bias / 4) % 2][(Bias / 2) % 2]));
+    assert(Result[11] == static_cast<unsigned>(Captured.WideChar));
+    assert(Result[12] == Captured.Sentinel);
+    assert(Result[13] ==
+           static_cast<unsigned>(Captured.SignedValue /
+                                 static_cast<long long>(Captured.WideChar)));
     Captured.Values[0][0] += 7;
     Captured.Values[0][1] -= 0x100000000ULL;
     Captured.SignedValue -= 0x100000000LL;
@@ -248,24 +447,10 @@ void run(int Argc, char **Argv) {
     assert(Output[I] == static_cast<float>(I * 3) + 1.5f);
   }
   {
-    bool Rejected = false;
-    sycl::queue Queue(Device, [&](sycl::exception_list Errors) {
-      for (const auto &Error : Errors) {
-        try {
-          std::rethrow_exception(Error);
-        } catch (const sycl::exception &Exception) {
-          assert(Exception.code() ==
-                 sycl::make_error_code(sycl::errc::feature_not_supported));
-          Rejected = true;
-        }
-      }
-    });
     std::array<int, 8> Host{};
-    Queue.submit([&](sycl::handler &Handler) {
-      sycl::buffer<int> Local(Host.data(), sycl::range<1>(8));
-      sycl::accessor Access(Local, Handler);
-    });
-    assert(Rejected);
+    writeTemporaryBuffer(First, Host.data());
+    for (unsigned I = 0; I < 8; ++I)
+      assert(Host[I] == static_cast<int>(I * 7 + 1));
   }
   {
     std::optional<sycl::accessor<int>> Retained;
@@ -296,7 +481,8 @@ void run(int Argc, char **Argv) {
       assert(Migrated[I] == static_cast<int>(I * 3 + 2));
   }
   std::cout << Device.get_info<sycl::info::device::name>()
-            << ": buffer dependencies, byte storage and writeback passed\n";
+            << ": buffer dependencies, host access, wide/byte storage and "
+               "writeback passed\n";
   assert(!AsyncFailed.load());
 }
 

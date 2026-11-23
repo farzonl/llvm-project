@@ -10,6 +10,7 @@
 #define _LIBSYCL_SRC_DETAIL_BUFFER_IMPL_HPP
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <sycl/__impl/buffer.hpp>
@@ -25,8 +26,8 @@ std::recursive_mutex &getBufferSubmissionMutex();
 
 class BufferImpl {
   std::atomic<std::size_t> MReferences{1};
-  std::size_t MBufferReferences = 1;
-  std::size_t MPendingRequirements = 0;
+  std::atomic<std::size_t> MBufferReferences{1};
+  std::atomic<std::size_t> MPendingRequirements{0};
   void *MHost;
   std::vector<unsigned char> MStorage;
   void *MDevicePointer = nullptr;
@@ -34,8 +35,15 @@ class BufferImpl {
   std::shared_ptr<EventImpl> MLastEvent;
   bool MDirty = false;
   bool MNeedsUpload = true;
+  std::mutex MHostAccessMutex;
+  std::condition_variable MHostAccessCondition;
+  std::size_t MHostReaders = 0;
+  bool MHostWriter = false;
+  bool MHostStorageFinalized = false;
 
   void synchronize();
+  void waitForHostAccess();
+  void finalizeHostStorage() noexcept;
   void freeDevice();
   friend void retainBuffer(BufferImpl *) noexcept;
   friend void releaseBuffer(BufferImpl *) noexcept;
@@ -50,6 +58,8 @@ public:
   void submitted(std::shared_ptr<EventImpl> Event, bool Writes);
   void retainRequirement();
   void releaseRequirement();
+  void *acquireHost(access_mode Mode);
+  void releaseHost(access_mode Mode) noexcept;
 };
 } // namespace detail
 _LIBSYCL_END_NAMESPACE_SYCL

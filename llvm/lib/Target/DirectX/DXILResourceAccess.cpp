@@ -278,6 +278,26 @@ static void createRawStores(IntrinsicInst *II, StoreInst *SI,
     return;
   }
 
+  if (V->getType()->getScalarType()->isIntegerTy(64) && !RTI.isStruct()) {
+    // Split scalar words explicitly so constants become literals before DXIL
+    // emission, rather than vector bitcast/extract constant expressions.
+    auto *VT = dyn_cast<FixedVectorType>(V->getType());
+    unsigned Elements = VT ? VT->getNumElements() : 1;
+    Value *Words = PoisonValue::get(
+        FixedVectorType::get(Builder.getInt32Ty(), 2 * Elements));
+    for (unsigned I = 0; I < Elements; ++I) {
+      Value *Element = VT ? Builder.CreateExtractElement(V, I) : V;
+      Words = Builder.CreateInsertElement(
+          Words, Builder.CreateTrunc(Element, Builder.getInt32Ty()), 2 * I);
+      Words = Builder.CreateInsertElement(
+          Words,
+          Builder.CreateTrunc(Builder.CreateLShr(Element, Builder.getInt64(32)),
+                              Builder.getInt32Ty()),
+          2 * I + 1);
+    }
+    V = Words;
+  }
+
   auto *VT = dyn_cast<FixedVectorType>(V->getType());
   if (VT && VT->getNumElements() > 4) {
     // Split into stores of at most 4 elements.
@@ -730,6 +750,11 @@ static void createRawLoads(IntrinsicInst *II, LoadInst *LI,
   assert(!LI->getType()->isAggregateType() &&
          "Resource load should be scalar or vector type");
 
+  Type *LoadType = LI->getType();
+  bool Split64 = LoadType->getScalarType()->isIntegerTy(64) && !RTI.isStruct();
+  if (Split64)
+    LoadType = FixedVectorType::get(Builder.getInt32Ty(),
+                                    DL.getTypeSizeInBits(LoadType) / 32);
   Value *V;
   if (LI->getType()->isIntegerTy(8) && !RTI.isStruct()) {
     Value *Address = Builder.CreateAdd(Index, Offset);
@@ -739,7 +764,7 @@ static void createRawLoads(IntrinsicInst *II, LoadInst *LI,
     Value *Word = emitRawLoad(Builder, Builder.getInt32Ty(), II->getOperand(0),
                               WordAddress, Builder.getInt32(0), RTI);
     V = Builder.CreateTrunc(Builder.CreateLShr(Word, Shift), LI->getType());
-  } else if (auto *VT = dyn_cast<FixedVectorType>(LI->getType())) {
+  } else if (auto *VT = dyn_cast<FixedVectorType>(LoadType)) {
     // Split into loads of at most 4 elements.
     Type *EltTy = VT->getElementType();
     Value *Stride = ConstantInt::get(Builder.getInt32Ty(),
@@ -759,6 +784,21 @@ static void createRawLoads(IntrinsicInst *II, LoadInst *LI,
     V = emitRawLoad(Builder, LI->getType(), II->getOperand(0), Index, Offset,
                     RTI);
 
+  if (Split64) {
+    auto *VT = dyn_cast<FixedVectorType>(LI->getType());
+    unsigned Elements = VT ? VT->getNumElements() : 1;
+    Value *Result = VT ? PoisonValue::get(VT) : nullptr;
+    for (unsigned I = 0; I < Elements; ++I) {
+      Value *Low = Builder.CreateZExt(Builder.CreateExtractElement(V, 2 * I),
+                                      Builder.getInt64Ty());
+      Value *High = Builder.CreateZExt(
+          Builder.CreateExtractElement(V, 2 * I + 1), Builder.getInt64Ty());
+      Value *Element =
+          Builder.CreateOr(Low, Builder.CreateShl(High, Builder.getInt64(32)));
+      Result = VT ? Builder.CreateInsertElement(Result, Element, I) : Element;
+    }
+    V = Result;
+  }
   LI->replaceAllUsesWith(V);
 }
 

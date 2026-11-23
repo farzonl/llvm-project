@@ -63,6 +63,8 @@ Error DirectXArgumentBindingsTy::prepare(
   for (const auto &Arg : Manifest.Arguments) {
     const auto *Scalar = std::get_if<DirectXScalarBindingTy>(&Arg.Binding);
     uint32_t Width = Scalar ? Scalar->Size : sizeof(void *);
+    if (Manifest.Capture)
+      Width = Manifest.Capture->getFieldSize(Arg.Index, Width);
     const void *Value = Manifest.Capture
                             ? static_cast<const char *>(Args[0]) +
                                   Manifest.Capture->Offsets[Arg.Index]
@@ -73,11 +75,17 @@ Error DirectXArgumentBindingsTy::prepare(
                                        "DirectX argument %u has no value",
                                        Arg.Index);
     if (Scalar) {
-      if (Size != Scalar->Size)
+      if (Size != Width)
         return error::createOffloadError(
             ErrorCode::INVALID_SIZE, "DirectX scalar argument %u size mismatch",
             Arg.Index);
       auto *Bytes = static_cast<const char *>(Value);
+      if (Width == 1 || Width == 2) {
+        Result.Constants[Scalar->Offset / 4] =
+            Width == 1 ? static_cast<uint8_t>(*Bytes)
+                       : support::endian::read16le(Bytes);
+        continue;
+      }
       for (uint32_t I = 0; I < Scalar->Size / 4; ++I)
         Result.Constants[Scalar->Offset / 4 + I] =
             support::endian::read32le(Bytes + I * 4);

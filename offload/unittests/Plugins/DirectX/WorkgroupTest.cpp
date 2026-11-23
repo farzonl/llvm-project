@@ -115,6 +115,32 @@ TEST(DirectXWorkgroupTest, RejectsMalformedEncodingAndBitcode) {
               error::ErrorCode::INVALID_BINARY, "bitcode");
 }
 
+TEST(DirectXWorkgroupTest, MatchesNarrowCaptureSourceWidth) {
+  constexpr StringLiteral NarrowRecipe = R"(
+target datalayout = "e-p:64:64-i64:64"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { i16 }
+define void @main(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  ret void
+}
+attributes #0 = {
+  "dx.kernel" "dx.workgroup.specializable" "hlsl.numthreads"="1,1,1"
+}
+!0 = !{i32 2, i32 8, !1}
+!1 = !{i32 0, i32 2}
+)";
+  auto Manifest = manifest();
+  Manifest.Capture = DirectXCaptureLayoutTy{2, {0}, {2}};
+  Manifest.Constants = DirectXConstantBindingTy{0, 0, 4};
+  Manifest.Arguments[0].Binding = DirectXScalarBindingTy{4, 0};
+  std::string Encoded = encodeBase64(recipeBitcode(NarrowRecipe));
+  auto Result = readRecipe(Encoded, Manifest);
+  ASSERT_TRUE(static_cast<bool>(Result)) << toString(Result.takeError());
+  Manifest.Capture->Sizes[0] = 1;
+  expectError(readRecipe(Encoded, Manifest), error::ErrorCode::INVALID_BINARY,
+              "capture field");
+}
+
 TEST(DirectXWorkgroupTest, RequiresSYCLCapture) {
   std::string Encoded = encodeBase64(recipeBitcode());
   expectError(readRecipe(Encoded, manifest(), OFK_None),

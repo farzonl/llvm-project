@@ -105,7 +105,8 @@ llvm::omp::target::plugin::directx::readWorkgroupIR(
     uint32_t Offset = Manifest.Capture->Offsets[I];
     const auto *Scalar =
         std::get_if<DirectXScalarBindingTy>(&Manifest.Arguments[I].Binding);
-    uint32_t Width = Scalar ? Scalar->Size : 8;
+    uint32_t Width =
+        Manifest.Capture->getFieldSize(I, Scalar ? Scalar->Size : 8);
     bool Found = false;
     for (unsigned Field = 2; Field < Layout->getNumOperands(); ++Field) {
       auto *MD = dyn_cast<MDNode>(Layout->getOperand(Field));

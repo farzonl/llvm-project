@@ -8,6 +8,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectX.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Frontend/Offloading/DirectX.h"
@@ -18,6 +20,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
@@ -25,7 +28,9 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/LowerMemIntrinsics.h"
 
 using namespace llvm;
 
@@ -48,9 +53,21 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
     Value *Pointer = Worklist.pop_back_val();
     if (!Seen.insert(Pointer).second)
       continue;
-    for (User *U : Pointer->users()) {
+    for (User *U : make_early_inc_range(Pointer->users())) {
       if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
         Worklist.push_back(GEP);
+        continue;
+      }
+      if (auto *MemSet = dyn_cast<MemSetInst>(U)) {
+        if (ReadOnly || MemSet->isVolatile()) {
+          fail("buffer pointer escape or unsupported store");
+          return false;
+        }
+        expandMemSetAsLoop(MemSet);
+        MemSet->eraseFromParent();
+        // Expansion adds pointer users that must be checked before remapping.
+        Seen.erase(Pointer);
+        Worklist.push_back(Pointer);
         continue;
       }
       Type *Ty = nullptr;
@@ -71,8 +88,13 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
         fail("buffer pointers may only be indexed, loaded, or stored");
         return false;
       }
-      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(32) && !Ty->isFloatTy()) {
-        fail("buffer accesses must use 8-bit or 32-bit integers or floats");
+      auto *VectorTy = dyn_cast<FixedVectorType>(Ty);
+      bool Is64BitInteger =
+          Ty->isIntegerTy(64) ||
+          (VectorTy && VectorTy->getElementType()->isIntegerTy(64));
+      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(32) && !Ty->isFloatTy() &&
+          !Is64BitInteger) {
+        fail("buffer accesses must use 8/32/64-bit integers or floats");
         return false;
       }
       Accessed = true;
@@ -139,7 +161,9 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   SmallVector<uint32_t> FieldOffsets;
   SmallVector<uint32_t> FieldSizes;
   SmallVector<Type *> FieldTypes;
+  SmallVector<std::pair<uint32_t, ArrayType *>> CaptureArrays;
   json::Array Offsets;
+  json::Array Sizes;
   uint32_t End = 0;
   for (unsigned I = 0; I < NumFields; ++I) {
     auto *Field = dyn_cast<MDNode>(MD->getOperand(I + 2));
@@ -157,6 +181,10 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     uint64_t RelativeOffset = *Offset - RecordLayout->getElementOffset(Element);
     while (Ty->isStructTy() || Ty->isArrayTy()) {
       if (auto *Array = dyn_cast<ArrayType>(Ty)) {
+        std::pair<uint32_t, ArrayType *> Storage{
+            uint32_t(*Offset - RelativeOffset), Array};
+        if (!llvm::is_contained(CaptureArrays, Storage))
+          CaptureArrays.push_back(Storage);
         Type *ElementType = Array->getElementType();
         uint64_t Stride = Layout.getTypeAllocSize(ElementType);
         if (!Stride || RelativeOffset / Stride >= Array->getNumElements()) {
@@ -201,6 +229,178 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     FieldTypes.push_back(Ty);
     End = *Offset + *Size;
   }
+  bool ScalarizedCopies = false;
+  for (Instruction &I : make_early_inc_range(instructions(Kernel))) {
+    auto *Copy = dyn_cast<MemTransferInst>(&I);
+    if (!Copy)
+      continue;
+    int64_t SourceOffset = 0;
+    if (GetPointerBaseWithConstantOffset(Copy->getSource(), SourceOffset,
+                                         Layout) != Kernel.getArg(0))
+      continue;
+    auto *Length = dyn_cast<ConstantInt>(Copy->getLength());
+    if (Copy->isVolatile() || !Length || SourceOffset < 0 ||
+        uint64_t(SourceOffset) > *Bytes ||
+        Length->getLimitedValue() > *Bytes - uint64_t(SourceOffset)) {
+      fail("captured aggregate copies require a bounded constant size");
+      return nullptr;
+    }
+    SmallVector<unsigned> CopiedFields;
+    uint64_t CopyEnd = SourceOffset + Length->getZExtValue();
+    for (uint64_t Offset = SourceOffset; Offset < CopyEnd;) {
+      auto It = llvm::find(FieldOffsets, Offset);
+      unsigned Field = It - FieldOffsets.begin();
+      if (It == FieldOffsets.end() ||
+          (!FieldTypes[Field]->isIntegerTy(32) &&
+           !FieldTypes[Field]->isIntegerTy(64) &&
+           !FieldTypes[Field]->isFloatTy()) ||
+          FieldSizes[Field] != Layout.getTypeStoreSize(FieldTypes[Field]) ||
+          FieldSizes[Field] > CopyEnd - Offset ||
+          commonAlignment(Copy->getDestAlign().valueOrOne(),
+                          Offset - SourceOffset) < Align(FieldSizes[Field])) {
+        fail("captured aggregate copies must cover complete aligned scalar "
+             "fields");
+        return nullptr;
+      }
+      CopiedFields.push_back(Field);
+      Offset += FieldSizes[Field];
+    }
+    IRBuilder<> Builder(Copy);
+    SmallVector<Value *> Values;
+    for (unsigned Field : CopiedFields) {
+      uint64_t Offset = FieldOffsets[Field] - SourceOffset;
+      Value *Source = Builder.CreateConstGEP1_64(Builder.getInt8Ty(),
+                                                 Copy->getSource(), Offset);
+      Values.push_back(Builder.CreateAlignedLoad(
+          FieldTypes[Field], Source,
+          commonAlignment(Copy->getSourceAlign().valueOrOne(), Offset)));
+    }
+    // Load every field first to preserve memmove's overlapping-copy semantics.
+    for (auto [Field, FieldValue] : zip(CopiedFields, Values)) {
+      uint64_t Offset = FieldOffsets[Field] - SourceOffset;
+      Value *Dest = Builder.CreateConstGEP1_64(Builder.getInt8Ty(),
+                                               Copy->getDest(), Offset);
+      Builder.CreateAlignedStore(
+          FieldValue, Dest,
+          commonAlignment(Copy->getDestAlign().valueOrOne(), Offset));
+    }
+    Copy->eraseFromParent();
+    ScalarizedCopies = true;
+  }
+  if (ScalarizedCopies) {
+    legacy::FunctionPassManager Passes(Kernel.getParent());
+    Passes.add(createSROAPass());
+    Passes.doInitialization();
+    Passes.run(Kernel);
+    Passes.doFinalization();
+  }
+  SmallVector<GetElementPtrInst *> DynamicAddresses;
+  for (Instruction &I : instructions(Kernel))
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+      int64_t Base = 0;
+      APInt Offset(Layout.getIndexSizeInBits(GEP->getPointerAddressSpace()), 0);
+      if (GetPointerBaseWithConstantOffset(GEP->getPointerOperand(), Base,
+                                           Layout) == Kernel.getArg(0) &&
+          !GEP->accumulateConstantOffset(Layout, Offset))
+        DynamicAddresses.push_back(GEP);
+    }
+  DenseMap<std::pair<uint32_t, ArrayType *>, AllocaInst *> ArrayStorage;
+  for (auto *GEP : DynamicAddresses) {
+    unsigned Bits = Layout.getIndexSizeInBits(GEP->getPointerAddressSpace());
+    APInt Offset(Bits, 0);
+    SmallMapVector<Value *, APInt, 4> Variables;
+    int64_t Base = 0;
+    GetPointerBaseWithConstantOffset(GEP->getPointerOperand(), Base, Layout);
+    if (GEP->getPointerAddressSpace() != 0 ||
+        !GEP->collectOffset(Layout, Bits, Variables, Offset)) {
+      fail("dynamic capture arrays require default-address-space indexing");
+      return nullptr;
+    }
+    Offset += APInt(Bits, Base);
+    std::optional<std::pair<uint32_t, ArrayType *>> Array;
+    uint64_t ArrayBytes = UINT64_MAX;
+    // Materialize only the enclosing array needed by these indexing strides.
+    for (auto Candidate : CaptureArrays) {
+      uint64_t Bytes = Layout.getTypeAllocSize(Candidate.second);
+      if (Offset.isNegative() || Offset.getLimitedValue() < Candidate.first ||
+          Offset.getLimitedValue() - Candidate.first >= Bytes ||
+          llvm::any_of(Variables, [&](const auto &Variable) {
+            uint64_t Scale = Variable.second.getLimitedValue();
+            return Scale > Bytes ||
+                   (Scale == Bytes && Candidate.second->getNumElements() != 1);
+          }))
+        continue;
+      if (Bytes < ArrayBytes) {
+        Array = Candidate;
+        ArrayBytes = Bytes;
+      }
+    }
+    if (!Array) {
+      fail("dynamic capture indexing requires a fixed-size scalar array");
+      return nullptr;
+    }
+    SmallVector<Value *> ArrayPointers{GEP};
+    SmallPtrSet<Value *, 16> SeenArrayPointers;
+    while (!ArrayPointers.empty()) {
+      Value *Pointer = ArrayPointers.pop_back_val();
+      if (!SeenArrayPointers.insert(Pointer).second)
+        continue;
+      for (User *Use : Pointer->users()) {
+        if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use)) {
+          ArrayPointers.push_back(Use);
+          continue;
+        }
+        auto *Load = dyn_cast<LoadInst>(Use);
+        if (!Load || Load->isAtomic() || Load->isVolatile() ||
+            Load->getType()->isPointerTy()) {
+          fail("dynamic capture arrays may only be indexed and read");
+          return nullptr;
+        }
+      }
+    }
+    AllocaInst *&Storage = ArrayStorage[*Array];
+    if (!Storage) {
+      IRBuilder<> Builder(&*Kernel.getEntryBlock().getFirstInsertionPt());
+      Storage = Builder.CreateAlloca(Array->second, nullptr, "capture.array");
+      uint64_t End = Array->first + ArrayBytes;
+      for (uint64_t FieldOffset = Array->first; FieldOffset < End;) {
+        auto It = llvm::find(FieldOffsets, FieldOffset);
+        unsigned Field = It - FieldOffsets.begin();
+        if (It == FieldOffsets.end() ||
+            (!FieldTypes[Field]->isIntegerTy(8) &&
+             !FieldTypes[Field]->isIntegerTy(16) &&
+             !FieldTypes[Field]->isIntegerTy(32) &&
+             !FieldTypes[Field]->isIntegerTy(64) &&
+             !FieldTypes[Field]->isFloatTy()) ||
+            FieldSizes[Field] != Layout.getTypeStoreSize(FieldTypes[Field]) ||
+            FieldSizes[Field] > End - FieldOffset) {
+          fail("dynamic capture arrays require contiguous scalar fields");
+          return nullptr;
+        }
+        Value *Source = Builder.CreateConstGEP1_64(
+            Builder.getInt8Ty(), Kernel.getArg(0), FieldOffset);
+        Value *FieldValue = Builder.CreateLoad(FieldTypes[Field], Source);
+        Value *Dest = Builder.CreateConstGEP1_64(Builder.getInt8Ty(), Storage,
+                                                 FieldOffset - Array->first);
+        Builder.CreateStore(FieldValue, Dest);
+        FieldOffset += FieldSizes[Field];
+      }
+    }
+    IRBuilder<> Builder(GEP);
+    Value *Index = ConstantInt::get(Kernel.getContext(),
+                                    Offset - APInt(Bits, Array->first));
+    for (auto &[Variable, Scale] : Variables)
+      Index = Builder.CreateAdd(
+          Index,
+          Builder.CreateMul(
+              Builder.CreateSExtOrTrunc(Variable, Builder.getIntNTy(Bits)),
+              ConstantInt::get(Kernel.getContext(), Scale)));
+    Value *Address = Builder.CreateGEP(Builder.getInt8Ty(), Storage, Index, "",
+                                       GEP->getNoWrapFlags());
+    cast<Instruction>(Address)->copyMetadata(*GEP);
+    GEP->replaceAllUsesWith(Address);
+    GEP->eraseFromParent();
+  }
   SmallVector<Value *> Worklist{Kernel.getArg(0)};
   for (Instruction &I : make_early_inc_range(instructions(Kernel)))
     if (auto *Annotation = dyn_cast<IntrinsicInst>(&I))
@@ -240,11 +440,13 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
           fail("captured buffers require 64-bit default or generic pointers");
           return nullptr;
         }
-      } else if ((!Ty->isIntegerTy(32) && !Ty->isIntegerTy(64) &&
+      } else if ((!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16) &&
+                  !Ty->isIntegerTy(32) && !Ty->isIntegerTy(64) &&
                   !Ty->isFloatTy()) ||
                  FieldSizes[Field] != Layout.getTypeStoreSize(Ty) ||
                  Offset % FieldSizes[Field]) {
-        fail("captures must be buffer pointers, 32/64-bit integers, or floats");
+        fail("captures must be buffer pointers, 8/16/32/64-bit integers, or "
+             "floats");
         return nullptr;
       }
       Loads[Field].push_back(Load);
@@ -267,14 +469,20 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     }
   }
   SmallVector<unsigned> UsedFields;
+  bool HasNarrowIntegers = false;
   for (unsigned I = 0; I < NumFields; ++I) {
     if (Loads[I].empty())
       continue;
     UsedFields.push_back(I);
     Type *Ty = FieldTypes[I];
+    if (Ty->isIntegerTy(8) || Ty->isIntegerTy(16)) {
+      HasNarrowIntegers = true;
+      Ty = Type::getInt32Ty(Kernel.getContext());
+    }
     Types.push_back(Ty->isPointerTy() ? PointerType::get(Kernel.getContext(), 0)
                                       : Ty);
     Offsets.push_back(FieldOffsets[I]);
+    Sizes.push_back(FieldSizes[I]);
   }
   auto *Flat =
       Function::Create(FunctionType::get(Kernel.getReturnType(), Types, false),
@@ -294,8 +502,13 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     for (LoadInst *Load : Loads[Field]) {
       if (Load->getType()->isPointerTy())
         replaceBufferPointer(Load, &Arg);
-      else
-        Load->replaceAllUsesWith(&Arg);
+      else {
+        IRBuilder<> Builder(Load);
+        Value *Replacement = &Arg;
+        if (Arg.getType() != Load->getType())
+          Replacement = Builder.CreateTrunc(&Arg, Load->getType());
+        Load->replaceAllUsesWith(Replacement);
+      }
       Load->eraseFromParent();
     }
   }
@@ -309,6 +522,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   }
   Capture = json::Object{
       {"size", *Bytes}, {"pointer_size", 8}, {"offsets", std::move(Offsets)}};
+  if (HasNarrowIntegers)
+    Capture["sizes"] = std::move(Sizes);
   Kernel.eraseFromParent();
   return Flat;
 }
@@ -625,6 +840,9 @@ bool lowerKernel(Module &M) {
     Size->eraseFromParent();
   }
   M.setDataLayout(M.getTargetTriple().computeDataLayout());
+  // Executable DXIL uses its native ABI, not the capture's host language ABI.
+  if (M.getModuleFlag("wchar_size"))
+    M.setModuleFlag(Module::Error, "wchar_size", 4);
   return true;
 }
 

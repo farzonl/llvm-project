@@ -35,11 +35,16 @@ struct FeatureQueries {
       Query.HighestShaderModel = std::min(Model, Query.HighestShaderModel);
       break;
     }
-    case D3D12_FEATURE_D3D12_OPTIONS:
-      static_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS *>(Data)
-          ->DoublePrecisionFloatShaderOps =
+    case D3D12_FEATURE_D3D12_OPTIONS: {
+      auto &Query = *static_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS *>(Data);
+      Query.DoublePrecisionFloatShaderOps =
           (Available & uint64_t(F::Doubles)) != 0;
+      Query.MinPrecisionSupport =
+          (Available & uint64_t(F::MinimumPrecision))
+              ? D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT
+              : D3D12_SHADER_MIN_PRECISION_SUPPORT_NONE;
       break;
+    }
     case D3D12_FEATURE_D3D12_OPTIONS1: {
       auto &Query = *static_cast<D3D12_FEATURE_DATA_D3D12_OPTIONS1 *>(Data);
       Query.WaveOps = (Available & uint64_t(F::WaveOps)) != 0;
@@ -92,6 +97,7 @@ TEST(DirectXFeaturesTest, RejectsMissingShaderModelAndEachOptionalFeature) {
   Manifest.ShaderModel = {6, 0};
   for (auto [Flag, Name] :
        {std::pair{F::Doubles, "Doubles"}, std::pair{F::WaveOps, "WaveOps"},
+        std::pair{F::MinimumPrecision, "MinimumPrecision"},
         std::pair{F::Int64Ops, "Int64Ops"},
         std::pair{F::NativeLowPrecision, "NativeLowPrecision"},
         std::pair{F::AtomicInt64OnGroupShared, "AtomicInt64OnGroupShared"}}) {

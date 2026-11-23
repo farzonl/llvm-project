@@ -32,7 +32,8 @@ Error checkDeviceCapabilities(
     function_ref<HRESULT(D3D12_FEATURE, void *, UINT)> Query) {
   using F = dxbc::FeatureFlags;
   constexpr uint64_t Supported =
-      uint64_t(F::Doubles) | uint64_t(F::WaveOps) | uint64_t(F::Int64Ops) |
+      uint64_t(F::Doubles) | uint64_t(F::MinimumPrecision) |
+      uint64_t(F::WaveOps) | uint64_t(F::Int64Ops) |
       uint64_t(F::NativeLowPrecision) | uint64_t(F::AtomicInt64OnGroupShared);
   if (Manifest.Features & ~Supported)
     return error::createOffloadError(
@@ -50,14 +51,20 @@ Error checkDeviceCapabilities(
   if (Model.HighestShaderModel < Requested)
     return unsupported("shader model");
 
-  if (Manifest.Features & uint64_t(F::Doubles)) {
+  if (Manifest.Features &
+      (uint64_t(F::Doubles) | uint64_t(F::MinimumPrecision))) {
     D3D12_FEATURE_DATA_D3D12_OPTIONS Options{};
     if (auto Err = checkQuery(
             Query(D3D12_FEATURE_D3D12_OPTIONS, &Options, sizeof(Options)),
             "CheckFeatureSupport(D3D12_OPTIONS)"))
       return Err;
-    if (!Options.DoublePrecisionFloatShaderOps)
+    if ((Manifest.Features & uint64_t(F::Doubles)) &&
+        !Options.DoublePrecisionFloatShaderOps)
       return unsupported("Doubles");
+    if ((Manifest.Features & uint64_t(F::MinimumPrecision)) &&
+        !(Options.MinPrecisionSupport &
+          D3D12_SHADER_MIN_PRECISION_SUPPORT_16_BIT))
+      return unsupported("MinimumPrecision");
   }
   if (Manifest.Features & (uint64_t(F::WaveOps) | uint64_t(F::Int64Ops))) {
     D3D12_FEATURE_DATA_D3D12_OPTIONS1 Options{};
