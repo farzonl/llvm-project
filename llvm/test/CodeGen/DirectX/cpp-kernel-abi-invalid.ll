@@ -4,12 +4,14 @@
 ; RUN: not opt -S -dxil-kernel-abi %t/dimensions.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=DIMS
 ; RUN: not opt -S -dxil-kernel-abi %t/multiple.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=MULTIPLE
 ; RUN: not opt -S -dxil-kernel-abi %t/dtor.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=DTOR
+; RUN: not opt -dxil-kernel-abi -dxil-kernel-numthreads=2,1,1 %t/escape.ll -o %t/out.ll 2>&1 | FileCheck %s --check-prefix=FIXED
 
 ; SCALAR: arguments must be default-address-space buffer pointers or 32/64-bit integer or float scalars
 ; ESCAPE: buffer pointer escape or unsupported store
 ; DIMS: reqd_work_group_size is required
 ; MULTIPLE: exactly one defined kernel is required
 ; DTOR: dynamic device initialization and destruction are not supported
+; FIXED: kernel has a fixed workgroup size
 
 ;--- scalar.ll
 target triple = "dxil-pc-shadermodel6.0-compute"

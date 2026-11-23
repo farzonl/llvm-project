@@ -17,6 +17,7 @@
 #include "clang/AST/RecordLayout.h"
 #include "clang/Basic/DiagnosticFrontend.h"
 #include "clang/Basic/TargetInfo.h"
+#include "llvm/Frontend/Offloading/DirectX.h"
 #include "llvm/Frontend/Offloading/OffloadWrapper.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/VirtualFileSystem.h"
@@ -109,8 +110,10 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
   CGF.FinishFunction();
   if (getTriple().isDXIL()) {
     getTargetCodeGenInfo().setTargetAttributes(KernelEntryPointFn, Fn, *this);
-    if (!Fn->hasFnAttribute("hlsl.numthreads"))
+    if (!Fn->hasFnAttribute("hlsl.numthreads")) {
       Fn->addFnAttr("hlsl.numthreads", "1,1,1");
+      Fn->addFnAttr(llvm::offloading::directx::WorkgroupSpecializableAttr);
+    }
     llvm::SmallVector<llvm::Metadata *> Layout;
     if (Args.size() == 1) {
       QualType CaptureType = Args[0]->getType().getNonReferenceType();
@@ -145,8 +148,11 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
             }
             Threads = std::move(Shape);
           }
-          if (!Threads.empty())
+          if (!Threads.empty()) {
             Fn->addFnAttr("hlsl.numthreads", Threads);
+            Fn->removeFnAttr(
+                llvm::offloading::directx::WorkgroupSpecializableAttr);
+          }
         }
         const ASTRecordLayout &RL = Ctx.getASTRecordLayout(RD);
         auto Integer = [&](uint64_t Value) {

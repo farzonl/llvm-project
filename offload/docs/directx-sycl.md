@@ -27,11 +27,14 @@ floats, including loaded fields of nested records, nonvirtual bases, and
 fixed-size arrays, subject to the
 [capture ABI restrictions](directx-manifest.md#restricted-capture-record-abi).
 The GNU `reqd_work_group_size(x,y,z)` attribute on a kernel lambda or functor's
-call operator fixes its native workgroup shape. Host local sizes must match;
-this is not runtime workgroup specialization. Without the attribute, the
-compiler currently uses one thread per workgroup, allowing `single_task`
-and range submissions within native dispatch limits. General local-size
-selection and specialization remain future work.
+call operator fixes its native workgroup shape. Host local sizes must match.
+Without the attribute, the compiler packages signed one-thread AOT DXIL and an
+optional prepared-IR recipe. Other uniform local shapes are now regenerated,
+signed, validated, and cached by the runtime through
+[compiler-backed workgroup variants](directx-manifest.md#compiler-backed-sycl-workgroup-variants).
+First use of a new shape requires compiler/validator tools and blocks enqueue;
+the default shape and cached variants need no tool invocation. Local-accessor
+allocation and general local-memory specialization remain future work.
 
 SYCL registration can contain multiple images, but each DirectX image describes
 one kernel, and libsycl loads each as a separate program. Default relocatable
@@ -118,7 +121,9 @@ Only `directx-sycl-vector-add.exe`, `LLVMSYCL.dll`, and `LLVMOffload.dll` are
 needed at execution time, in addition to the Visual C++ runtime and a compatible
 Windows D3D12/DXCore installation. The build copies both LLVM runtime DLLs
 beside the executable. Neither the intermediate package nor compiler/validator
-tools are needed on the destination machine.
+tools are needed on the destination machine for this fixed-shape example.
+Applications requesting new attribute-free workgroup shapes currently also
+need this branch's compiler tools and DXIL validator at execution time.
 
 ## Run and verify
 
@@ -584,6 +589,60 @@ unchanged byte-buffer layout on all three vendors. Dynamic array indexing,
 general device aggregates, other scalar types, and runtime local-size
 specialization remain outside this checkpoint.
 
+### Compiler-backed uniform workgroup shapes
+
+Attribute-free SYCL kernels now execute real regenerated DXIL for requested
+uniform local shapes. The native test at `libsycl/test/basic/workgroup.cpp`
+checks one-thread AOT execution without compiler tools, non-power-of-two
+1D shapes 3 and 5, 2D `{2,3}`, and 3D `{2,3,2}`, including global/local/group
+linear IDs and local ranges on NVIDIA, AMD, and Intel. Changed global ranges
+reuse a cached shape with an intentionally invalid compiler directory.
+An uncached shape with that directory fails explicitly; it does not use a
+dummy shader or one-thread fallback. Fixed-shape kernels retain AOT execution
+and reject shape overrides.
+
+Use the Windows build variables above:
+
+```bat
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\workgroup.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\workgroup-specialization.exe" ^
+  /Fo:"%CTS_BUILD%\workgroup-specialization.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\workgroup-specialization.exe" %D
+```
+
+Rebuild the CTS range/NDRange device objects after changing compiler-produced
+recipe metadata and refresh the runtime DLL. With the two tool variables set:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\workgroup-verified" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+The unchanged Range CTS now passes **8,946 of 8,947 assertions** on each
+hardware vendor, up from 126 of 127. It still has **4 of 5 passing cases**:
+after the workgroup checks succeed, `range_api` requests shared USM and fails
+with the actual unsupported-allocation diagnostic. Shared USM is not
+advertised or substituted with host-executed work. Range is therefore still
+not a passing category.
+
+Header/error and all six NDRange cases (558 assertions) continue to pass.
+Confirmed fully passing categories remain **3 of 97 (about 3.1%)**; only four
+categories were remeasured, not the other 93. This increment removes the
+workgroup-size blocker, not the next shared-USM prerequisite or the remaining
+local-accessor/barrier work.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
@@ -612,8 +671,9 @@ without reporting those results as CTS passes.
 
 ## Workgroup and local-memory specialization requirements
 
-This section describes the proposed next compiler/runtime contract, **not an
-implemented package ABI or supported feature**.
+Uniform local-shape regeneration is implemented by the bounded prepared-IR
+recipe above. This section describes the remaining general local-memory and
+deployment contract, **not a claim that all specialization features work**.
 
 ### Preserve fixed AOT execution
 
@@ -632,8 +692,9 @@ and a runtime compilation/signing service, with reusable AOT variants as an
 optimization. A different approach, such as virtualizing logical workgroups
 inside a fixed physical shape, would first need proven barrier and memory
 semantics; simply masking extra threads is not sufficient.
-The proposed service must not require an installed compiler, `dxv.exe`,
-or a developer prompt on the execution machine. Its library dependencies and
+The production service should remove the current requirement for installed
+compiler/validator tools on first use of a new shape, without requiring a
+developer prompt on the execution machine. Its library dependencies and
 packaging must be established before promising the same DLL count as fixed AOT
 execution. Shared/host USM or `online_compiler` aspects must not be advertised
 merely because internal specialization exists.
@@ -678,7 +739,7 @@ to fall back to a one-thread kernel.
 
 ### Validation gates
 
-Before specialization becomes a supported feature, validate:
+Before general local-memory specialization becomes a supported feature, validate:
 
 - Attribute-free 1D/2D/3D submissions and correct SYCL/native dimension ordering.
 - Multiple local shapes for one logical kernel, without changing source.

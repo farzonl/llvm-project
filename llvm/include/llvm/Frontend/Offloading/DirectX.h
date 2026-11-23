@@ -14,6 +14,10 @@
 
 namespace llvm::offloading::directx {
 
+inline constexpr char WorkgroupIRKey[] = "directx.workgroup.ir.v1";
+inline constexpr char WorkgroupSpecializableAttr[] =
+    "dx.workgroup.specializable";
+
 // The version-1 dispatch block is nine little-endian 32-bit root constants:
 // group counts (x,y,z), followed by three 64-bit global offsets (low word
 // first).

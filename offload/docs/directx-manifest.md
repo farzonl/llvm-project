@@ -22,7 +22,8 @@ container. The metadata is not embedded in executable DXIL: validation rejects
 unknown named metadata. This path currently accepts only indexed buffer-pointer
 arguments with scalar 8-bit integer or 32-bit integer/float accesses,
 32/64-bit integer and 32-bit float scalar arguments packed
-into `b0, space0` root constants, and fixed workgroup sizes.
+into `b0, space0` root constants. Flat C++ kernels retain fixed workgroup
+sizes; eligible SYCL capture kernels can carry the specialization recipe below.
 See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
 
 ## Restricted capture-record ABI
@@ -121,8 +122,8 @@ to this block. Local sizes remain the compiled `numthreads`; global sizes
 are group counts multiplied by local sizes. The ABI is independent of
 SYCL captures and also applies to flat C++ kernel arguments, so a future
 OpenCL frontend can use the same geometry transport and target intrinsics.
-Version 1 covers uniform workgroups. Non-uniform OpenCL workgroups and
-runtime workgroup specialization require further compiler/runtime support;
+Version 1 covers uniform workgroups, including regenerated SYCL workgroup
+variants. Non-uniform OpenCL workgroups require further compiler/runtime support;
 the version field allows their ABI requirements to evolve without changing
 existing packages.
 
@@ -138,6 +139,54 @@ Changing the host property or launching another range cannot alter pending
 work. SYCL reverses its dimension order when converting ranges and offsets:
 the last SYCL dimension maps to native x. No application-authored capture
 fields, manifest, or scalar argument is needed for launch geometry.
+
+## Compiler-backed SYCL workgroup variants
+
+An attribute-free SYCL kernel starts with signed AOT DXIL for native
+`numthreads` `[1,1,1]`. Clang marks its pre-ABI entry with
+`"dx.workgroup.specializable"`. Explicit `reqd_work_group_size` kernels are
+not marked and continue to reject conflicting launch shapes.
+
+For marked kernels, `clang-sycl-linker` also stores base64-encoded prepared
+LLVM bitcode under the optional `directx.workgroup.ir.v1` string-data key.
+This is the per-kernel module after helper inlining and scalar/CFG cleanup,
+but before capture/dispatch ABI lowering. It accompanies, rather than replaces,
+the executable DXIL and manifest. The runtime verifies the bitcode and checks
+its single entry, default shape, shader target/model, capture size, native
+pointer ABI, and used field offsets/widths against the original manifest.
+Empty, malformed, fixed-kernel, or mismatched recipes are rejected.
+
+On the first launch with a different native x/y/z shape, the runtime invokes
+`opt -dxil-kernel-abi -dxil-kernel-numthreads=x,y,z`, then `llc`, `dxv`, and
+`llvm-offload-binary`. This regenerates workgroup-size builtins, resource and
+dispatch lowering, DXIL, and the variant manifest; it does not edit only
+`numthreads` metadata. The resulting signed shader goes through the existing
+manifest/shader/device checks before root-signature and pipeline creation.
+Capture size and entry identity must remain unchanged. Variants that change
+reflected static shared-memory usage are explicitly unsupported, so the
+published original kernel metadata stays accurate.
+
+Set `OFFLOAD_DIRECTX_COMPILER_PATH` to the directory containing this branch's
+`opt`, `llc`, and `llvm-offload-binary`; otherwise they are found on `PATH`.
+An explicit directory is authoritative, not a hint followed by a silent PATH
+fallback. Set `OFFLOAD_DIRECTX_DXIL_VALIDATOR` to the validator executable;
+otherwise `dxv` is found on `PATH`. Missing tools, subprocess/signing failures,
+and invalid outputs produce errors, not fallback execution. Only known
+temporary compiler files and their unique directory are removed afterward.
+
+Successful variants are cached per kernel/program/device-context and exact
+shape. A kernel mutex serializes first compilation and cache publication.
+Buffer tokens, captured scalar values, group counts, and offsets are not cache
+keys. Each variant owns its manifest, root signature, and native pipeline;
+queued submissions retain their native objects. Failed compilation is not
+cached. This is an in-memory cache, not a persistent binary cache.
+
+The original AOT shape still runs without compiler tools. A new shape currently
+compiles synchronously during enqueue; cached dispatch/readback remains
+asynchronous. Compiler-free general specialization, local-accessor allocation
+slots, specialization constants, and local-memory/barrier validation are not
+implemented by this recipe version. It does not enable shared/host USM or
+advertise public online compilation.
 
 ## Program loading
 

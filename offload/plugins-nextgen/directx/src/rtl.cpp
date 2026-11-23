@@ -10,6 +10,7 @@
 #include "DirectXArguments.h"
 #include "DirectXFeatures.h"
 #include "DirectXRootSignature.h"
+#include "DirectXWorkgroup.h"
 #include "GlobalHandler.h"
 #include "PluginInterface.h"
 
@@ -69,6 +70,7 @@ struct DirectXProgramDataTy {
   DirectXManifestTy Manifest;
   std::unique_ptr<MemoryBuffer> Shader;
   uint32_t StaticSharedMemory = 0;
+  std::unique_ptr<MemoryBuffer> WorkgroupIR;
 };
 
 Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
@@ -129,15 +131,26 @@ Expected<DirectXProgramDataTy> readProgram(StringRef Input) {
   if (auto Err = Manifest->validateShader(Shader->getMemBufferRef(),
                                           &StaticSharedMemory))
     return std::move(Err);
+  auto WorkgroupIR = directx::readWorkgroupIR(Binary, *Manifest);
+  if (!WorkgroupIR)
+    return WorkgroupIR.takeError();
   return DirectXProgramDataTy{std::move(*Manifest), std::move(Shader),
-                              StaticSharedMemory};
+                              StaticSharedMemory, std::move(*WorkgroupIR)};
 }
 
 struct DirectXKernelTy;
+struct DirectXDeviceTy;
+
+struct DirectXWorkgroupVariantTy {
+  DirectXManifestTy Manifest;
+  ComPtr<ID3D12RootSignature> RootSignature;
+  ComPtr<ID3D12PipelineState> Pipeline;
+};
 
 struct DirectXImageTy final : DeviceImageTy {
   DirectXManifestTy Manifest;
   uint32_t StaticSharedMemory;
+  std::unique_ptr<MemoryBuffer> WorkgroupIR;
   ComPtr<ID3D12Device> NativeDevice;
   ComPtr<ID3D12RootSignature> RootSignature;
   PluginContextTy *Context;
@@ -149,7 +162,8 @@ struct DirectXImageTy final : DeviceImageTy {
                  PluginContextTy *Context)
       : DeviceImageTy(Id, Device, std::move(Data.Shader)),
         Manifest(std::move(Data.Manifest)),
-        StaticSharedMemory(Data.StaticSharedMemory), NativeDevice(NativeDevice),
+        StaticSharedMemory(Data.StaticSharedMemory),
+        WorkgroupIR(std::move(Data.WorkgroupIR)), NativeDevice(NativeDevice),
         RootSignature(std::move(RootSignature)), Context(Context) {}
 
   ~DirectXImageTy() override;
@@ -159,6 +173,14 @@ struct DirectXKernelTy final : GenericKernelTy {
   ComPtr<ID3D12PipelineState> Pipeline;
   DirectXImageTy *Program = nullptr;
   uint32_t NumThreads = 0;
+  mutable std::mutex VariantsMutex;
+  mutable std::map<std::array<uint32_t, 3>,
+                   std::shared_ptr<DirectXWorkgroupVariantTy>>
+      Variants;
+
+  Expected<std::shared_ptr<DirectXWorkgroupVariantTy>>
+  getVariant(DirectXDeviceTy &Device,
+             const std::array<uint32_t, 3> &Shape) const;
 
   DirectXKernelTy(StringRef Name) : GenericKernelTy(Name) {}
 
@@ -195,7 +217,9 @@ struct DirectXKernelTy final : GenericKernelTy {
     return unsupported("occupancy calculations");
   }
 
-  uint32_t getMaxThreads() const override { return NumThreads; }
+  uint32_t getMaxThreads() const override {
+    return Program && Program->WorkgroupIR ? 1024 : NumThreads;
+  }
   bool supportsGlobalOffset() const override { return true; }
 };
 
@@ -973,6 +997,53 @@ struct DirectXPluginContextTy final : PluginContextTy {
   }
 };
 
+Expected<std::shared_ptr<DirectXWorkgroupVariantTy>>
+DirectXKernelTy::getVariant(DirectXDeviceTy &Device,
+                            const std::array<uint32_t, 3> &Shape) const {
+  if (!Program->WorkgroupIR)
+    return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                         "DirectX group size must match compiled numthreads");
+  std::lock_guard<std::mutex> Lock(VariantsMutex);
+  if (auto It = Variants.find(Shape); It != Variants.end())
+    return It->second;
+  auto Package =
+      directx::compileWorkgroup(Program->WorkgroupIR->getBuffer(), Shape);
+  if (!Package)
+    return Package.takeError();
+  auto Data = readProgram((*Package)->getBuffer());
+  if (!Data)
+    return Data.takeError();
+  if (Data->Manifest.Entry != Program->Manifest.Entry ||
+      Data->Manifest.NumThreads != Shape || !Data->Manifest.Capture ||
+      Data->Manifest.Capture->Size != Program->Manifest.Capture->Size)
+    return Plugin::error(ErrorCode::INVALID_BINARY,
+                         "specialized DirectX image does not match the kernel");
+  if (Data->StaticSharedMemory != Program->StaticSharedMemory)
+    return unsupported(
+        "specialization that changes static shared-memory usage");
+  if (auto Err = directx::checkDeviceCapabilities(Data->Manifest,
+                                                  *Program->NativeDevice.Get()))
+    return std::move(Err);
+  auto Variant = std::make_shared<DirectXWorkgroupVariantTy>();
+  Variant->Manifest = std::move(Data->Manifest);
+  if (auto Err = directx::createRootSignature(
+          Variant->Manifest, *Program->NativeDevice.Get(),
+          Device.SerializeRootSignature, Variant->RootSignature))
+    return std::move(Err);
+  D3D12_COMPUTE_PIPELINE_STATE_DESC Desc{};
+  Desc.pRootSignature = Variant->RootSignature.Get();
+  Desc.CS = {Data->Shader->getBufferStart(), Data->Shader->getBufferSize()};
+  if (auto Err = check(Program->NativeDevice->CreateComputePipelineState(
+                           &Desc, IID_PPV_ARGS(&Variant->Pipeline)),
+                       "ID3D12Device::CreateComputePipelineState"))
+    return std::move(Err);
+  if (!Variant->Pipeline)
+    return Plugin::error(ErrorCode::BACKEND_FAILURE,
+                         "DirectX device returned no specialized pipeline");
+  Variants.emplace(Shape, Variant);
+  return Variant;
+}
+
 Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
                                   uint32_t NumThreads[3], uint32_t NumBlocks[3],
                                   uint32_t DynBlockMemSize,
@@ -987,9 +1058,6 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   if (DynBlockMemSize)
     return unsupported("dynamic shared memory");
   for (unsigned I = 0; I < 3; ++I) {
-    if (NumThreads[I] != Program->Manifest.NumThreads[I])
-      return Plugin::error(ErrorCode::INVALID_ARGUMENT,
-                           "DirectX group size must match compiled numthreads");
     if (NumBlocks[I] > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION)
       return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                            "DirectX dispatch group count exceeds 65535");
@@ -1005,10 +1073,24 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   if ((*Queue)->Context && (*Queue)->Context != Program->Context)
     return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                          "DirectX queue and program contexts differ");
+  const DirectXManifestTy *Manifest = &Program->Manifest;
+  ComPtr<ID3D12PipelineState> LaunchPipeline = Pipeline;
+  ComPtr<ID3D12RootSignature> LaunchRoot = Program->RootSignature;
+  std::shared_ptr<DirectXWorkgroupVariantTy> Variant;
+  std::array<uint32_t, 3> Shape{NumThreads[0], NumThreads[1], NumThreads[2]};
+  if (Shape != Program->Manifest.NumThreads) {
+    auto Result = getVariant(DXDevice, Shape);
+    if (!Result)
+      return Result.takeError();
+    Variant = std::move(*Result);
+    Manifest = &Variant->Manifest;
+    LaunchPipeline = Variant->Pipeline;
+    LaunchRoot = Variant->RootSignature;
+  }
   auto &Context = *static_cast<DirectXPluginContextTy *>(Program->Context);
   auto Bindings = std::make_shared<directx::DirectXArgumentBindingsTy>();
   if (auto Err = Bindings->prepare(
-          Program->Manifest, ArrayRef(Args.Args, Args.NumArgs),
+          *Manifest, ArrayRef(Args.Args, Args.NumArgs),
           ArrayRef(Args.ArgSizes, Args.NumArgs),
           [&](const void *Pointer)
               -> Expected<directx::DirectXResolvedBufferTy> {
@@ -1026,9 +1108,8 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
           }))
     return Err;
 
-  if (auto Err = Bindings->setDispatchGeometry(Program->Manifest,
-                                               ArrayRef(NumBlocks, 3),
-                                               ArrayRef(Args.GlobalOffset, 3)))
+  if (auto Err = Bindings->setDispatchGeometry(
+          *Manifest, ArrayRef(NumBlocks, 3), ArrayRef(Args.GlobalOffset, 3)))
     return Err;
   std::map<ID3D12Resource *, D3D12_RESOURCE_STATES> States;
   for (const auto &Buffer : Bindings->Buffers) {
@@ -1046,8 +1127,8 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   if (auto Err = Bindings->createDescriptorHeap(*Program->NativeDevice.Get()))
     return Err;
   DirectXQueueTy::SubmissionTy Submission{};
-  Submission.Pipeline = Pipeline;
-  Submission.RootSignature = Program->RootSignature;
+  Submission.Pipeline = LaunchPipeline;
+  Submission.RootSignature = LaunchRoot;
   Submission.Arguments = std::move(Bindings);
   if (auto Err = (*Queue)->createCommandList(Submission))
     return Err;

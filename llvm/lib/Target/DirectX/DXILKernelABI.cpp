@@ -20,6 +20,7 @@
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MathExtras.h"
@@ -29,6 +30,11 @@
 using namespace llvm;
 
 namespace {
+
+cl::list<unsigned> WorkgroupSize(
+    "dxil-kernel-numthreads", cl::CommaSeparated, cl::Hidden,
+    cl::desc(
+        "Specialize an eligible DirectX kernel to x,y,z workgroup dimensions"));
 
 void fail(const Twine &Message) {
   reportFatalUsageError("DirectX C++ kernel ABI: " + Message);
@@ -336,6 +342,21 @@ bool lowerKernel(Module &M) {
     fail("a compute shader target is required");
     return false;
   }
+  if (!WorkgroupSize.empty()) {
+    if (!Kernel->hasFnAttribute(
+            offloading::directx::WorkgroupSpecializableAttr)) {
+      fail("kernel has a fixed workgroup size");
+      return false;
+    }
+    if (WorkgroupSize.size() != 3) {
+      fail("specialization requires three workgroup dimensions");
+      return false;
+    }
+    Kernel->addFnAttr("hlsl.numthreads",
+                      std::to_string(WorkgroupSize[0]) + "," +
+                          std::to_string(WorkgroupSize[1]) + "," +
+                          std::to_string(WorkgroupSize[2]));
+  }
   SmallVector<StringRef> Dims;
   Kernel->getFnAttribute("hlsl.numthreads").getValueAsString().split(Dims, ',');
   uint32_t Threads[3]{};
@@ -434,6 +455,7 @@ bool lowerKernel(Module &M) {
   Entry->setAttributes(AttributeList::get(
       M.getContext(), Kernel->getAttributes().getFnAttrs(), {}, {}));
   Entry->removeFnAttr("dx.kernel");
+  Entry->removeFnAttr(offloading::directx::WorkgroupSpecializableAttr);
   // Resource-backed memory is no longer accessed through function arguments.
   Entry->removeFnAttr(Attribute::Memory);
   Entry->copyMetadata(Kernel, 0);

@@ -25,4 +25,4 @@ Abstract::~Abstract() {}
 // CHECK: declare void @__cxa_pure_virtual() {{.*}}#[[PURE:[0-9]+]]
 // CHECK: define void @{{.*}}(ptr {{.*}}byval(%class.anon) align 8 {{.*}})
 // CHECK: attributes #[[PURE]] = { {{.*}}"dontcall-error"="DirectX kernels do not support pure or deleted virtual calls"
-// CHECK: "hlsl.numthreads"="1,1,1"
+// CHECK: "dx.workgroup.specializable"{{.*}}"hlsl.numthreads"="1,1,1"

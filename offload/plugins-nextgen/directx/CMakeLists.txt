@@ -10,6 +10,7 @@ target_sources(omptarget.rtl.directx PRIVATE
   src/DirectXManifest.cpp
   src/DirectXRootSignature.cpp
   src/DirectXShader.cpp
+  src/DirectXWorkgroup.cpp
   src/rtl.cpp)
 target_include_directories(omptarget.rtl.directx PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -26,6 +26,7 @@
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/CodeGen/CommandFlags.h"
+#include "llvm/Frontend/Offloading/DirectX.h"
 #include "llvm/Frontend/Offloading/Utility.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/InstIterator.h"
@@ -43,6 +44,7 @@
 #include "llvm/Option/ArgList.h"
 #include "llvm/Option/OptTable.h"
 #include "llvm/Option/Option.h"
+#include "llvm/Support/Base64.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileOutputBuffer.h"
 #include "llvm/Support/FileSystem.h"
@@ -1042,6 +1044,18 @@ static Error linkDirectXImages(ArrayRef<SplitModule> Modules,
     Image.Flags = Entry.getFlags();
     for (const auto &[Key, Value] : Entry.strings())
       Image.StringData[Saver.save(Key)] = Saver.save(Value);
+    auto PreparedBuffer = MemoryBuffer::getFile(Prepared);
+    if (!PreparedBuffer)
+      return createFileError(Prepared, PreparedBuffer.getError());
+    LLVMContext Context;
+    auto PreparedModule =
+        parseBitcodeFile((*PreparedBuffer)->getMemBufferRef(), Context);
+    if (!PreparedModule)
+      return PreparedModule.takeError();
+    for (Function &F : **PreparedModule)
+      if (F.hasFnAttribute(offloading::directx::WorkgroupSpecializableAttr))
+        Image.StringData[offloading::directx::WorkgroupIRKey] =
+            Saver.save(encodeBase64((*PreparedBuffer)->getBuffer()));
     Image.Image = MemoryBuffer::getMemBufferCopy(Entry.getImage());
     Images.push_back(std::move(Image));
   }

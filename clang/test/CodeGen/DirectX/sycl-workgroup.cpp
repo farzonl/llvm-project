@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsycl-is-device -triple dxil-pc-shadermodel6.0-compute -aux-triple x86_64-pc-windows-msvc -std=c++17 -O1 -emit-llvm %s -o - | FileCheck %s
+// RUN: %clang_cc1 -fsycl-is-device -triple dxil-pc-shadermodel6.0-compute -aux-triple x86_64-pc-windows-msvc -std=c++17 -O1 -emit-llvm %s -o - | FileCheck %s --implicit-check-not=dx.workgroup.specializable
 // RUN: not %clang_cc1 -fsycl-is-device -triple dxil-pc-shadermodel6.0-compute -aux-triple x86_64-pc-windows-msvc -std=c++17 -DCONFLICT -emit-llvm %s -o %t.ll 2>&1 | FileCheck %s --check-prefix=CONFLICT
 
 template <class Name, class... Args>
