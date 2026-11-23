@@ -23,10 +23,25 @@ std::recursive_mutex &getBufferSubmissionMutex() {
   return Mutex;
 }
 
-BufferImpl::BufferImpl(void *Host, std::size_t Bytes)
-    : MHost(Host), MStorage(Bytes) {
+BufferImpl::BufferImpl(void *Host, std::size_t Bytes, std::size_t Alignment)
+    : MHost(Host), MBytes(Bytes), MAlignment(Alignment) {
+  if (!Bytes || !Alignment || (Alignment & (Alignment - 1)))
+    throw exception(make_error_code(errc::invalid),
+                    "Buffer storage requires a nonzero size and "
+                    "power-of-two alignment");
+  if (Bytes > std::numeric_limits<std::size_t>::max() - (Alignment - 1))
+    throw exception(make_error_code(errc::memory_allocation),
+                    "Aligned buffer storage size overflow");
+  MStorage.resize(Bytes + Alignment - 1);
+  void *Data = MStorage.data();
+  std::size_t Space = MStorage.size();
+  MData =
+      static_cast<unsigned char *>(std::align(Alignment, Bytes, Data, Space));
+  if (!MData)
+    throw exception(make_error_code(errc::memory_allocation),
+                    "Buffer storage alignment failed");
   if (Host)
-    std::memcpy(MStorage.data(), Host, Bytes);
+    std::memcpy(MData, Host, Bytes);
 }
 
 void BufferImpl::waitForHostAccess() {
@@ -41,8 +56,7 @@ void BufferImpl::synchronize() {
   if (MQueue)
     MQueue->waitAndThrow();
   if (MDirty) {
-    MQueue->memcpyImpl(MStorage.data(), MDevicePointer, MStorage.size(), {})
-        ->waitAndThrow();
+    MQueue->memcpyImpl(MData, MDevicePointer, MBytes, {})->waitAndThrow();
     MDirty = false;
   }
 }
@@ -83,7 +97,7 @@ void *BufferImpl::acquire(QueueImpl &Queue) {
     MNeedsUpload = true;
   }
   if (!MDevicePointer) {
-    std::size_t DeviceBytes = MStorage.size();
+    std::size_t DeviceBytes = MBytes;
     if (Queue.getBackend() == backend::ext_llvm_directx) {
       // Raw views address whole words, including the final partial word.
       std::size_t Padding = (4 - DeviceBytes % 4) % 4;
@@ -93,14 +107,19 @@ void *BufferImpl::acquire(QueueImpl &Queue) {
       DeviceBytes += Padding;
     }
     MQueue = Queue.shared_from_this();
-    callAndThrow(Queue.getContext(), olMemAlloc,
-                 Queue.getContext().getOLHandleRef(),
-                 Queue.getDevice().getOLHandle(), OL_ALLOC_TYPE_DEVICE,
-                 DeviceBytes, &MDevicePointer);
+    if (MAlignment > alignof(std::max_align_t))
+      callAndThrow(Queue.getContext(), olMemAllocAligned,
+                   Queue.getContext().getOLHandleRef(),
+                   Queue.getDevice().getOLHandle(), OL_ALLOC_TYPE_DEVICE,
+                   DeviceBytes, MAlignment, &MDevicePointer);
+    else
+      callAndThrow(Queue.getContext(), olMemAlloc,
+                   Queue.getContext().getOLHandleRef(),
+                   Queue.getDevice().getOLHandle(), OL_ALLOC_TYPE_DEVICE,
+                   DeviceBytes, &MDevicePointer);
   }
   if (MNeedsUpload) {
-    MLastEvent =
-        Queue.memcpyImpl(MDevicePointer, MStorage.data(), MStorage.size(), {});
+    MLastEvent = Queue.memcpyImpl(MDevicePointer, MData, MBytes, {});
     MNeedsUpload = false;
   }
   return MDevicePointer;
@@ -111,7 +130,7 @@ void *BufferImpl::acquireHost(access_mode Mode) {
     std::lock_guard<std::mutex> Lock(MHostAccessMutex);
     if (MHostReaders) {
       ++MHostReaders;
-      return MStorage.data();
+      return MData;
     }
   }
   std::lock_guard<std::recursive_mutex> SubmissionLock(
@@ -130,7 +149,7 @@ void *BufferImpl::acquireHost(access_mode Mode) {
     MNeedsUpload = true;
   } else
     ++MHostReaders;
-  return MStorage.data();
+  return MData;
 }
 
 void BufferImpl::releaseHost(access_mode Mode) noexcept {
@@ -157,7 +176,7 @@ void BufferImpl::finalizeHostStorage() noexcept {
   try {
     synchronize();
     if (MHost)
-      std::memcpy(MHost, MStorage.data(), MStorage.size());
+      std::memcpy(MHost, MData, MBytes);
   } catch (const sycl::exception &) {
     recordAsyncException(MQueue, std::current_exception());
   }
@@ -212,9 +231,14 @@ void BufferImpl::releaseRequirement() {
 }
 
 BufferImpl *makeBuffer(void *Host, std::size_t Bytes) {
+  // Keep the factory used by existing normally aligned buffer binaries.
+  return makeBuffer(Host, Bytes, alignof(std::max_align_t));
+}
+
+BufferImpl *makeBuffer(void *Host, std::size_t Bytes, std::size_t Alignment) {
   // The scheduler must outlive buffers with static storage duration.
   getBufferSubmissionMutex();
-  return new BufferImpl(Host, Bytes);
+  return new BufferImpl(Host, Bytes, Alignment);
 }
 void retainBuffer(BufferImpl *Buffer) noexcept {
   if (Buffer)

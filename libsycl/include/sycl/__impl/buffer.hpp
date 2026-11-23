@@ -24,6 +24,8 @@ namespace detail {
 class BufferImpl;
 class HostAccessImpl;
 _LIBSYCL_EXPORT BufferImpl *makeBuffer(void *Host, std::size_t Bytes);
+_LIBSYCL_EXPORT BufferImpl *makeBuffer(void *Host, std::size_t Bytes,
+                                       std::size_t Alignment);
 _LIBSYCL_EXPORT std::shared_ptr<HostAccessImpl>
 acquireHostAccess(BufferImpl *Buffer, access_mode Mode);
 _LIBSYCL_EXPORT void *getHostAccessPointer(const HostAccessImpl &Access);
@@ -70,8 +72,6 @@ class buffer {
                 "Custom buffer allocators are not implemented");
   static_assert(std::is_trivially_copyable_v<T> && !std::is_const_v<T>,
                 "Buffers require mutable trivially copyable elements");
-  static_assert(alignof(T) <= alignof(std::max_align_t),
-                "Over-aligned buffer elements are not implemented");
   detail::BufferImpl *MImpl;
   range<Dimensions> MRange;
   template <typename, int, access_mode, target> friend class accessor;
@@ -91,13 +91,13 @@ class buffer {
 
 public:
   explicit buffer(range<Dimensions> Range)
-      : MImpl(detail::makeBuffer(nullptr, checkedBytes(Range))), MRange(Range) {
-  }
+      : MImpl(detail::makeBuffer(nullptr, checkedBytes(Range), alignof(T))),
+        MRange(Range) {}
   buffer(T *Host, range<Dimensions> Range) : MRange(Range) {
     if (!Host)
       throw exception(make_error_code(errc::invalid),
                       "A buffer requires valid nonempty host storage");
-    MImpl = detail::makeBuffer(Host, checkedBytes(Range));
+    MImpl = detail::makeBuffer(Host, checkedBytes(Range), alignof(T));
   }
   buffer(const buffer &Other) : MImpl(Other.MImpl), MRange(Other.MRange) {
     detail::retainBufferOwner(MImpl);

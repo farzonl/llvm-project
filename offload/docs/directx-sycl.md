@@ -921,7 +921,8 @@ Buffer construction checks each extent before multiplication, rejecting empty
 dimensions and element-count/byte-size overflow before allocation. Host leases,
 cross-queue dependencies, uploads, readback, and deferred writeback use the same
 runtime paths as one-dimensional buffers. Standard allocators and mutable,
-trivially copyable, normally aligned elements remain required. Subranges,
+trivially copyable elements remain required. The aligned-buffer extension below
+removes the initial normal-alignment restriction. Subranges,
 placeholders, local accessors, and full buffer/accessor conformance remain
 outside this increment.
 
@@ -1236,6 +1237,77 @@ The confirmed category count remains **7/97** from the previous combined
 measurement; no additional full-category CTS pass is claimed. Full group and
 ND-item execution still requires the remaining type/storage and hierarchical
 execution prerequisites.
+
+### Aligned buffer storage
+
+Buffers now transport their element alignment to the runtime instead of
+rejecting over-aligned trivially copyable types. Host shadow storage uses a
+checked, aligned subspan of its owning allocation. Allocation padding is kept
+separate from the logical byte count: uploads, readback, device allocation, and
+caller-owned writeback use only the requested element bytes, with the existing
+DirectX final-word padding rule unchanged. Device storage requests the element
+alignment through liboffload's aligned allocation API when it exceeds normal
+alignment; backend alignment errors are surfaced. Invalid alignment and
+storage-size overflow produce explicit SYCL exceptions.
+
+The original two-argument buffer factory remains available for existing
+normally aligned binaries. New alignment-aware callers require the matching
+rebuilt headers and `LLVMSYCL.dll`. Buffer and host-accessor ownership,
+cross-queue/context migration, and deferred writeback retain their existing
+semantics.
+
+This removes a storage prerequisite, **not all vector-memory restrictions**.
+The native test executes scalar component accesses in buffers of
+`vec<int, 4>` and `vec<float, 16>`, plus an `alignas(256)` aggregate. It does
+not claim general whole-vector operations, vector local accessors, or
+cooperative vector-copy conformance.
+
+Rebuild the runtime/public headers together and use the Windows variables above:
+
+```bat
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\buffer_alignment.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\buffer-alignment.exe" /Fo:"%CTS_BUILD%\buffer-alignment.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\buffer-alignment.exe" %D
+```
+
+The regression checks actual **16-, 64-, and 256-byte pointer alignment**,
+owned and caller-owned 2D buffers, GPU updates across two contexts, host edits
+and re-upload, retained host-accessor lifetime, and untouched neighboring
+objects. It changes external guard objects after buffer construction so that
+overlong writeback cannot pass by restoring their original values. Invalid
+internal alignment and allocation-padding overflow are also rejected.
+
+It passes on NVIDIA, AMD, and Intel. The pre-existing buffer,
+cooperative-copy, local-accessor, pointer/barrier, and workgroup-specialization
+binaries also pass against the rebuilt runtime without recompilation.
+
+After refreshing both DLLs in the CTS executable directory, the unchanged
+header, error, and device-event categories pass **4/4 cases and 2/2 assertions
+per vendor**:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\aligned-buffer-final" ^
+  --targets test_device_event test_header test_error ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+Only these three categories were remeasured in this run. The previously
+confirmed count remains **7/97**, with no new full-category pass claimed.
+The group/ND-item prerequisites still include narrow/vector local operations,
+legacy interfaces, and hierarchical group execution.
 
 ### Adapter validation
 

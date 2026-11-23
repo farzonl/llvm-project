@@ -30,6 +30,9 @@ class BufferImpl {
   std::atomic<std::size_t> MPendingRequirements{0};
   void *MHost;
   std::vector<unsigned char> MStorage;
+  std::size_t MBytes;
+  std::size_t MAlignment;
+  unsigned char *MData;
   void *MDevicePointer = nullptr;
   std::shared_ptr<QueueImpl> MQueue;
   std::shared_ptr<EventImpl> MLastEvent;
@@ -51,7 +54,7 @@ class BufferImpl {
   friend void releaseBufferOwner(BufferImpl *) noexcept;
 
 public:
-  BufferImpl(void *Host, std::size_t Bytes);
+  BufferImpl(void *Host, std::size_t Bytes, std::size_t Alignment);
   ~BufferImpl();
   void *acquire(QueueImpl &Queue);
   std::shared_ptr<EventImpl> getLastEvent() const { return MLastEvent; }
