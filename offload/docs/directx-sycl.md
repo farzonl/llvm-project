@@ -36,9 +36,12 @@ Without the attribute, the compiler packages signed one-thread AOT DXIL and an
 optional prepared-IR recipe. Other uniform local shapes are now regenerated,
 signed, validated, and cached by the runtime through
 [compiler-backed workgroup variants](directx-manifest.md#compiler-backed-sycl-workgroup-variants).
-First use of a new shape requires compiler/validator tools and blocks enqueue;
-the default shape and cached variants need no tool invocation. Local-accessor
-allocation and general local-memory specialization remain future work.
+First use of a new shape requires compiler/validator tools and blocks enqueue.
+Bounded local-accessor allocations also specialize the prepared IR, including
+for fixed workgroup shapes. Allocation-bearing kernels always require a matching
+variant; their minimally sized packaged image is never dispatched. Default AOT
+images without local allocations and matching cached variants need no tool
+invocation. General local-memory specialization remains incomplete.
 Implicit `parallel_for(range)` kernels retain their logical extents in the
 capture record and cover them with overflow-safe GPU strided loops. Oversized
 ranges select a 64-thread variant along their largest axis and cap native
@@ -1098,6 +1101,87 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
   --build-dir "%CTS_BUILD%" ^
   --report-dir "%CTS_BUILD%\local-accessor-final" ^
   --targets test_group test_nd_item test_item test_id ^
+    test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+### Cooperative copies and device events
+
+DirectX `group` and `nd_item` now provide the modern decorated-pointer
+`async_work_group_copy` overloads for global-to-local and local-to-global
+transfers, including source/destination strides. Source pointers can preserve
+constness; destination elements must be mutable and match the source element
+type. Supported local operations remain nonvolatile, non-atomic 32-bit
+integer/float scalar accesses. This does not enable legacy pointer overloads,
+general vector/narrow/wide local transfers, or hierarchical group execution.
+Host calls and other device backends are explicitly unsupported.
+
+Work-items cooperatively transfer elements according to their local linear IDs.
+An all-memory workgroup synchronization precedes and follows each copy. The
+implementation deliberately completes the entire copy before returning its
+`device_event`: this is **eager completion, not hardware DMA or copy/compute
+overlap**. `device_event::wait()` and variadic `wait_for` therefore need no
+additional synchronization. An individual lane may wait on an already-completed
+event without introducing an unsafe collective.
+
+Two compiler fixes support these transfers. Floating-point local accesses use
+bitcasts around the underlying 32-bit storage, including accesses at offset
+zero. The non-dispatchable packaged image reserves enough placeholder storage
+for statically known local accesses to pass DXIL validation; actual allocation
+sizes still come from the runtime specialization inputs. Constant accesses
+beyond a requested allocation are rejected rather than silently increasing its
+size.
+
+The native regression covers both entrypoints and directions, contiguous and
+strided transfers, const sources, empty/single-element/non-multiple counts,
+multiple workgroups, 1D/2D/3D shapes, integer/float data, unchanged input,
+allocation guards and untouched stride gaps. It also checks multiple returned
+events, variadic waits, and a wait performed by just one lane.
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\workgroup_copy.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\workgroup-copy.exe" /Fo:"%CTS_BUILD%\workgroup-copy.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+for %D in (0 1 2) do "%CTS_BUILD%\workgroup-copy.exe" %D
+```
+
+The copy regression passes on NVIDIA, AMD, and Intel, as do the local-accessor,
+pointer/barrier, buffer, and workgroup-specialization regressions. Eleven focused
+compiler tests, copy barrier-count/host-rejection checks, 50 DirectX unit tests,
+28 queue unit tests, and seven measurement-reporting unit tests pass.
+
+The unchanged `test_device_event` category now passes on all three vendors:
+**1/1 test case per vendor**. Its original success path reports zero Catch2
+assertions and uses `FAIL` if the copied sample is incorrect; no CTS source or
+assertion was changed.
+
+The nine-category rebuild preserves all earlier passing categories and advances
+the confirmed count from **6/97 to 7/97**, with **110/110 cases and
+12,562/12,562 assertions per vendor**. Group and ND-item still fail compilation
+and execute no tests. Their remaining blockers include `sycl::byte`, broader
+vector/local-accessor support, over-aligned buffers, and hierarchical group
+execution. The other 88 configured categories were not measured; this is not
+a full-suite conformance result.
+
+Rebuild the earlier passing categories and remeasure the complete group/ND-item
+prerequisites without excluding their broader copy tests:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\cooperative-copy-final" ^
+  --targets test_device_event test_group test_nd_item test_item test_id ^
     test_error test_header test_range test_nd_range ^
   --devices NVIDIA AMD Intel --jobs 2 --timeout 900
 ```

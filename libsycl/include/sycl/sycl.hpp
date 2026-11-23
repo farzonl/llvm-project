@@ -22,6 +22,7 @@
 #include <sycl/__impl/buffer.hpp>
 #include <sycl/__impl/context.hpp>
 #include <sycl/__impl/device.hpp>
+#include <sycl/__impl/device_event.hpp>
 #include <sycl/__impl/device_selector.hpp>
 #include <sycl/__impl/event.hpp>
 #include <sycl/__impl/exception.hpp>

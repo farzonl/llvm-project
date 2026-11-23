@@ -158,7 +158,44 @@ public:
         __spirv::initBuiltInGlobalOffset<Dimensions, id<Dimensions>>());
   }
 
-  // TODO: add wait_for and async_work_group_copy once builtins are implemented.
+  template <typename Destination, typename Source>
+  detail::EnableGroupCopy<Destination, Source>
+  async_work_group_copy(decorated_local_ptr<Destination> Dest,
+                        decorated_global_ptr<Source> Src,
+                        std::size_t Count) const {
+    return get_group().async_work_group_copy(Dest, Src, Count);
+  }
+
+  template <typename Destination, typename Source>
+  detail::EnableGroupCopy<Destination, Source>
+  async_work_group_copy(decorated_global_ptr<Destination> Dest,
+                        decorated_local_ptr<Source> Src,
+                        std::size_t Count) const {
+    return get_group().async_work_group_copy(Dest, Src, Count);
+  }
+
+  template <typename Destination, typename Source>
+  detail::EnableGroupCopy<Destination, Source>
+  async_work_group_copy(decorated_local_ptr<Destination> Dest,
+                        decorated_global_ptr<Source> Src, std::size_t Count,
+                        std::size_t SourceStride) const {
+    return get_group().async_work_group_copy(Dest, Src, Count, SourceStride);
+  }
+
+  template <typename Destination, typename Source>
+  detail::EnableGroupCopy<Destination, Source>
+  async_work_group_copy(decorated_global_ptr<Destination> Dest,
+                        decorated_local_ptr<Source> Src, std::size_t Count,
+                        std::size_t DestinationStride) const {
+    return get_group().async_work_group_copy(Dest, Src, Count,
+                                             DestinationStride);
+  }
+
+  template <typename... Events>
+  std::enable_if_t<(std::is_same_v<Events, device_event> && ...)>
+  wait_for(Events... Copies) const {
+    get_group().wait_for(Copies...);
+  }
 
 protected:
   friend class detail::Builder;

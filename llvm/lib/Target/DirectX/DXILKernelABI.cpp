@@ -49,33 +49,47 @@ void fail(const Twine &Message) {
   reportFatalUsageError("DirectX C++ kernel ABI: " + Message);
 }
 
-bool checkLocalPointer(Value *Pointer, SmallPtrSetImpl<Value *> &Seen) {
-  if (!Seen.insert(Pointer).second)
-    return true;
-  for (User *Use : Pointer->users()) {
-    if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use)) {
-      if (!checkLocalPointer(Use, Seen))
-        return false;
-    } else if (auto *Load = dyn_cast<LoadInst>(Use)) {
-      if (Load->isAtomic() || Load->isVolatile() ||
-          (!Load->getType()->isIntegerTy(32) &&
-           !Load->getType()->isFloatTy())) {
-        fail("local accessors currently require non-atomic 32-bit scalar "
-             "accesses");
+bool checkLocalPointer(Value *Root, const DataLayout &Layout,
+                       uint64_t &MinimumBytes) {
+  SmallVector<Value *> Worklist{Root};
+  SmallPtrSet<Value *, 16> Seen;
+  while (!Worklist.empty()) {
+    Value *Pointer = Worklist.pop_back_val();
+    if (!Seen.insert(Pointer).second)
+      continue;
+    for (User *Use : Pointer->users()) {
+      if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use)) {
+        Worklist.push_back(Use);
+        continue;
+      } else if (auto *Load = dyn_cast<LoadInst>(Use)) {
+        if (Load->isAtomic() || Load->isVolatile() ||
+            (!Load->getType()->isIntegerTy(32) &&
+             !Load->getType()->isFloatTy())) {
+          fail("local accessors currently require non-atomic 32-bit scalar "
+               "accesses");
+          return false;
+        }
+      } else if (auto *Store = dyn_cast<StoreInst>(Use)) {
+        Type *Type = Store->getValueOperand()->getType();
+        if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
+            Store->isVolatile() ||
+            (!Type->isIntegerTy(32) && !Type->isFloatTy())) {
+          fail("local accessors currently require non-atomic 32-bit scalar "
+               "accesses");
+          return false;
+        }
+      } else {
+        fail("local accessor pointers may only be indexed, loaded, or stored");
         return false;
       }
-    } else if (auto *Store = dyn_cast<StoreInst>(Use)) {
-      Type *Type = Store->getValueOperand()->getType();
-      if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
-          Store->isVolatile() ||
-          (!Type->isIntegerTy(32) && !Type->isFloatTy())) {
-        fail("local accessors currently require non-atomic 32-bit scalar "
-             "accesses");
-        return false;
+      int64_t Offset = 0;
+      if (GetPointerBaseWithConstantOffset(Pointer, Offset, Layout) == Root) {
+        if (Offset < 0) {
+          fail("local accessor constant accesses precede the allocation");
+          return false;
+        }
+        MinimumBytes = std::max(MinimumBytes, uint64_t(Offset) + 4);
       }
-    } else {
-      fail("local accessor pointers may only be indexed, loaded, or stored");
-      return false;
     }
   }
   return true;
@@ -115,6 +129,20 @@ void replaceLocalPointer(Value *Old, Value *Pointer, const DataLayout &Layout) {
         Instruction->copyMetadata(*GEP);
       replaceLocalPointer(GEP, Address, Layout);
       GEP->eraseFromParent();
+    } else if (auto *Load = dyn_cast<LoadInst>(Use);
+               Load && Load->getType()->isFloatTy()) {
+      IRBuilder<> Builder(Load);
+      auto *Bits = Builder.CreateAlignedLoad(Builder.getInt32Ty(), Pointer,
+                                             Load->getAlign());
+      Bits->copyMetadata(*Load);
+      Load->replaceAllUsesWith(Builder.CreateBitCast(Bits, Load->getType()));
+      Load->eraseFromParent();
+    } else if (auto *Store = dyn_cast<StoreInst>(Use);
+               Store && Store->getValueOperand()->getType()->isFloatTy()) {
+      IRBuilder<> Builder(Store);
+      Store->setOperand(0, Builder.CreateBitCast(Store->getValueOperand(),
+                                                 Builder.getInt32Ty()));
+      Store->setOperand(1, Pointer);
     } else {
       Use->replaceUsesOfWith(Old, Pointer);
     }
@@ -579,7 +607,18 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   for (unsigned I = 0; I < NumFields; ++I) {
     if (!LocalAlignments[I] || Loads[I].empty())
       continue;
-    uint64_t Token = (uint64_t(LocalIndex + 1) << 32) | LocalAlignments[I];
+    uint64_t MinimumBytes = LocalAlignments[I];
+    for (auto *Load : Loads[I])
+      if (!checkLocalPointer(Load, Layout, MinimumBytes))
+        return nullptr;
+    if (MinimumBytes > 32768) {
+      fail("local accessor constant accesses exceed the 32768-byte limit");
+      return nullptr;
+    }
+    // The packaged image is never dispatched for local-bearing kernels, but
+    // constant accesses must still be in bounds for DXIL validation.
+    uint64_t Token = (uint64_t(LocalIndex + 1) << 32) |
+                     alignTo(MinimumBytes, LocalAlignments[I]);
     if (!LocalAllocations.empty()) {
       if (LocalIndex >= LocalAllocations.size()) {
         fail("local allocation count does not match captured slots");
@@ -617,10 +656,11 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       Global->setAlignment(Align(LocalAlignments[I]));
       Allocation = {Token, Global};
     }
+    if (Bytes < MinimumBytes) {
+      fail("local accessor constant accesses exceed the requested allocation");
+      return nullptr;
+    }
     for (auto *Load : Loads[I]) {
-      SmallPtrSet<Value *, 16> Seen;
-      if (!checkLocalPointer(Load, Seen))
-        return nullptr;
       IRBuilder<> Builder(Load);
       Value *Base = Builder.CreateInBoundsGEP(
           Allocation.second->getValueType(), Allocation.second,
