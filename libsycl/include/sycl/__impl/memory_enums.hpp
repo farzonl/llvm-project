@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 ///
 /// \file
-/// This file contains SYCL 2020 memory scope enumeration (3.8.3.2.).
+/// This file contains SYCL 2020 memory order and scope enumerations.
 ///
 //===----------------------------------------------------------------------===//
 
@@ -19,6 +19,20 @@
 #include <cstdint>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
+
+enum class memory_order : std::uint32_t {
+  relaxed,
+  acquire,
+  release,
+  acq_rel,
+  seq_cst
+};
+
+inline constexpr auto memory_order_relaxed = memory_order::relaxed;
+inline constexpr auto memory_order_acquire = memory_order::acquire;
+inline constexpr auto memory_order_release = memory_order::release;
+inline constexpr auto memory_order_acq_rel = memory_order::acq_rel;
+inline constexpr auto memory_order_seq_cst = memory_order::seq_cst;
 
 enum class memory_scope : std::uint32_t {
   work_item = 0,

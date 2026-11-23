@@ -275,8 +275,9 @@ tests enabled, and the configuration above:
 These are category-build counts, not individual test-case results or a
 conformance percentage. Missing public libsycl APIs prevent CTS headers from
 compiling before DXIL generation. Observed prerequisites include `sycl::access`,
-`memory_order`, `target`, `access_mode`, `kernel`, `half`, scalar floating-point
-traits, and function objects.
+`memory_order`, `target`, `access_mode`, `kernel`, `half`, and function objects.
+Missing `half` also prevents the CTS's own floating-point traits from forming;
+those traits are not additional public SYCL APIs.
 
 The first inventory also exposed an adapter identity-registration omission in
 five categories. The registration patch now recognizes LibSYCL in the CTS's
@@ -291,6 +292,32 @@ requirements, with their real semantics, then remeasuring simple header and
 geometry categories. Empty compatibility stubs would not establish support.
 Workgroup/local-memory specialization remains a separate compiler/runtime
 milestone described below.
+
+### API foundation follow-up
+
+The first implementation increment adds the access/address-space/decorated
+enumerations and legacy aliases, memory-order enumerations and aliases, and
+all nine scalar function objects with typed and deduced operand forms.
+These declarations do not enable accessors, atomics, or new device aspects.
+Vector and `marray` function-object support still requires those types.
+
+Focused tests validate host-side promotion and return types, logical
+short-circuiting, and first-argument preservation for equivalent minimum/maximum
+operands. Compiler-generated integer and floating-point kernels validate all
+nine operators, including signed-zero selection, on NVIDIA, AMD, and Intel.
+As in the existing examples, submission helpers are compiled for both sides
+while host-only I/O and verification are excluded from device compilation.
+This does not establish support for unrestricted host library code in device
+translation units.
+
+The header, range, NDRange, and function-object CTS categories were remeasured
+without changing their assertions or configuration. All four still fail to
+compile and execute no CTS tests, but the missing enumeration errors are gone.
+The newly visible shared prerequisites include `kernel`, `half`, `vec`,
+`marray`, vector aliases, and deprecated compiler/linker availability queries.
+Linking a kernel-free executable with the DirectX `-fsycl` pipeline is also
+currently rejected; host-only function-object tests do not use device linking.
+These are remaining implementation tasks, not passing or skipped CTS results.
 
 ### Adapter validation
 

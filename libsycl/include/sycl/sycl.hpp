@@ -14,6 +14,7 @@
 #ifndef _LIBSYCL_SYCL_HPP
 #define _LIBSYCL_SYCL_HPP
 
+#include <sycl/__impl/access_enums.hpp>
 #include <sycl/__impl/aspect.hpp>
 #include <sycl/__impl/async_handler.hpp>
 #include <sycl/__impl/backend.hpp>
@@ -22,6 +23,7 @@
 #include <sycl/__impl/device_selector.hpp>
 #include <sycl/__impl/event.hpp>
 #include <sycl/__impl/exception.hpp>
+#include <sycl/__impl/functional.hpp>
 #include <sycl/__impl/group.hpp>
 #include <sycl/__impl/group_barrier.hpp>
 #include <sycl/__impl/handler.hpp>
