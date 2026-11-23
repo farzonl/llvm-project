@@ -299,7 +299,8 @@ The first implementation increment adds the access/address-space/decorated
 enumerations and legacy aliases, memory-order enumerations and aliases, and
 all nine scalar function objects with typed and deduced operand forms.
 These declarations do not enable accessors, atomics, or new device aspects.
-Vector and `marray` function-object support still requires those types.
+Complete vector and `marray` function-object support remains a separate step
+from the scalar operator validation.
 
 Focused tests validate host-side promotion and return types, logical
 short-circuiting, and first-argument preservation for equivalent minimum/maximum
@@ -318,6 +319,28 @@ The newly visible shared prerequisites include `kernel`, `half`, `vec`,
 Linking a kernel-free executable with the DirectX `-fsycl` pipeline is also
 currently rejected; host-only function-object tests do not use device linking.
 These are remaining implementation tasks, not passing or skipped CTS results.
+
+### Numeric value-type checkpoint
+
+The next prerequisite increment supplies binary16 `half` storage/conversion
+and numeric limits, `bit_cast`, and core vector/marray value operations and
+aliases. Binary16 conversion rounds directly from double inputs to avoid
+double-rounding, preserves signed zero, and handles subnormals, infinities,
+and NaNs. Vector comparisons produce signed all-bits-set masks, whereas marray
+comparisons produce boolean elements; three-element vectors use four-element
+storage alignment.
+
+Focused host tests cover binary16 round trips, midpoint/overflow/subnormal
+boundaries, composed constructors, arithmetic, masks, and bit reinterpretation.
+The runtime rebuild and existing scalar GPU kernels also pass on all three
+vendors. These checks do not establish device-side half/vector storage,
+complete vector/marray APIs, or a new FP16 aspect.
+
+The unchanged CTS error category still fails to compile, with the numeric
+header errors removed. Its first remaining diagnostics are the missing kernel
+type and the deprecated compiler/linker availability queries. No CTS tests
+have executed at this checkpoint; executable kernel/bundle support and
+host-only DirectX compiler/linking fixes remain prerequisites.
 
 ### Adapter validation
 

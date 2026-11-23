@@ -18,6 +18,7 @@
 #include <sycl/__impl/aspect.hpp>
 #include <sycl/__impl/async_handler.hpp>
 #include <sycl/__impl/backend.hpp>
+#include <sycl/__impl/bit_cast.hpp>
 #include <sycl/__impl/context.hpp>
 #include <sycl/__impl/device.hpp>
 #include <sycl/__impl/device_selector.hpp>
@@ -39,5 +40,6 @@
 #include <sycl/__impl/sub_group.hpp>
 #include <sycl/__impl/usm_alloc_type.hpp>
 #include <sycl/__impl/usm_functions.hpp>
+#include <sycl/__impl/value_types.hpp>
 
 #endif // _LIBSYCL_SYCL_HPP
