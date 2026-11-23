@@ -13,6 +13,15 @@
 using namespace llvm;
 using namespace llvm::object;
 
+TEST(OffloadingTest, EmptyPackage) {
+  auto Buffer = MemoryBuffer::getMemBufferCopy(OffloadBinary::write({}));
+  auto Binaries = OffloadBinary::create(*Buffer);
+  ASSERT_THAT_EXPECTED(Binaries, Succeeded());
+  EXPECT_TRUE(Binaries->empty());
+  auto Indexed = OffloadBinary::create(*Buffer, 0);
+  EXPECT_THAT_EXPECTED(Indexed, Failed());
+}
+
 TEST(OffloadingTest, checkOffloadingBinary) {
   // Create random data to fill the image.
   std::mt19937 Rng(std::random_device{}());

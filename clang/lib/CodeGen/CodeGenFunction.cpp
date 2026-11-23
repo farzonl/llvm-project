@@ -357,12 +357,6 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
   assert(DeferredDeactivationCleanupStack.empty() &&
          "mismatched activate/deactivate of cleanups!");
 
-  if (CGM.shouldEmitConvergenceTokens()) {
-    ConvergenceTokenStack.pop_back();
-    assert(ConvergenceTokenStack.empty() &&
-           "mismatched push/pop in convergence stack!");
-  }
-
   bool OnlySimpleReturnStmts = NumSimpleReturnExprs > 0
     && NumSimpleReturnExprs == NumReturnExprs
     && ReturnBlock.getBlock()->use_empty();
@@ -435,6 +429,12 @@ void CodeGenFunction::FinishFunction(SourceLocation EndLoc) {
 
   assert(EHStack.empty() &&
          "did not remove all scopes from cleanup stack!");
+
+  if (CGM.shouldEmitConvergenceTokens()) {
+    ConvergenceTokenStack.pop_back();
+    assert(ConvergenceTokenStack.empty() &&
+           "mismatched push/pop in convergence stack!");
+  }
 
   // If someone did an indirect goto, emit the indirect goto block at the end of
   // the function.

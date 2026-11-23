@@ -274,6 +274,7 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   ComPtr<ID3D12Device> Device;
   PFN_D3D12_SERIALIZE_ROOT_SIGNATURE SerializeRootSignature;
   std::string Name;
+  std::string ShaderModelVersion;
   std::mutex ContextsMutex;
   SmallVector<DirectXPluginContextTy *> Contexts;
   std::mutex SynchronousQueueMutex;
@@ -321,6 +322,21 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   Error initImpl(GenericPluginTy &, GenericProfilerTy *) override {
     MaxBlockSharedMemSize =
         uint64_t{D3D12_CS_TGSM_REGISTER_COUNT} * sizeof(uint32_t);
+    D3D12_FEATURE_DATA_SHADER_MODEL ShaderModel{};
+    HRESULT ShaderStatus = E_INVALIDARG;
+    for (unsigned Requested = 0x68; Requested >= 0x60; --Requested) {
+      ShaderModel.HighestShaderModel = static_cast<D3D_SHADER_MODEL>(Requested);
+      ShaderStatus = Device->CheckFeatureSupport(
+          D3D12_FEATURE_SHADER_MODEL, &ShaderModel, sizeof(ShaderModel));
+      if (ShaderStatus != E_INVALIDARG)
+        break;
+    }
+    if (auto Err = check(ShaderStatus,
+                         "ID3D12Device::CheckFeatureSupport(ShaderModel)"))
+      return Err;
+    unsigned Model = static_cast<unsigned>(ShaderModel.HighestShaderModel);
+    ShaderModelVersion =
+        formatv("Shader Model {0}.{1}", Model >> 4, Model & 15).str();
     return Error::success();
   }
   Error deinitImpl() override {
@@ -334,11 +350,14 @@ struct DirectXDeviceTy final : GenericDeviceTy {
   }
   Error setContext() override { return Error::success(); }
   uint32_t getDriverId() const override { return getDeviceId(); }
+  std::string getComputeUnitKind() const override { return ShaderModelVersion; }
 
   Expected<InfoTreeNode> obtainInfoImpl() override {
     InfoTreeNode Info;
     Info.add("Name", Name, "", DeviceInfo::NAME);
     Info.add("Product name", Name, "", DeviceInfo::PRODUCT_NAME);
+    Info.add("Shader model", ShaderModelVersion, "",
+             DeviceInfo::COMPUTE_UNIT_KIND);
     uint32_t Vendor = 0;
     bool HasVendor = false;
     if (Adapter->IsPropertySupported(DXCoreAdapterProperty::HardwareIDParts)) {

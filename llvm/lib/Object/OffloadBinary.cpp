@@ -333,7 +333,6 @@ OffloadBinary::create(MemoryBufferRef Buf, std::optional<uint64_t> Index) {
 
 SmallString<0> OffloadBinary::write(ArrayRef<OffloadingImage> OffloadingData) {
   uint64_t EntriesCount = OffloadingData.size();
-  assert(EntriesCount > 0 && "At least one offloading image is required");
 
   // Create a null-terminated string table with all the used strings.
   // Also calculate total size of images.

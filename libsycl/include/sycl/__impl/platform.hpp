@@ -19,10 +19,12 @@
 #include <sycl/__impl/backend.hpp>
 #include <sycl/__impl/detail/config.hpp>
 #include <sycl/__impl/detail/obj_utils.hpp>
+#include <sycl/__impl/device.hpp>
 #include <sycl/__impl/info/device_type.hpp>
 #include <sycl/__impl/info/platform.hpp>
 
 #include <functional>
+#include <type_traits>
 #include <vector>
 
 #define SYCL_KHR_DEFAULT_CONTEXT 1
@@ -40,6 +42,16 @@ class PlatformImpl;
 /// platform on which kernel functions may be executed.
 class _LIBSYCL_EXPORT platform {
 public:
+  platform() : platform(default_selector_v) {}
+
+  template <
+      typename DeviceSelector,
+      typename = std::enable_if_t<
+          !std::is_same_v<DeviceSelector, detail::PlatformImpl>>,
+      typename = detail::EnableIfDeviceSelectorIsInvocable<DeviceSelector>>
+  explicit platform(const DeviceSelector &Selector)
+      : platform(device(Selector).get_platform()) {}
+
   // The platform class provides the common reference semantics (SYCL
   // 2020 4.5.2).
   platform(const platform &rhs) = default;

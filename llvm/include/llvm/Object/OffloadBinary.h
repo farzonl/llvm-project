@@ -143,7 +143,7 @@ public:
   create(MemoryBufferRef Buf, std::optional<uint64_t> Index = std::nullopt);
 
   /// Serialize the contents of \p OffloadingData to a binary buffer to be read
-  /// later.
+  /// later. An empty image list produces a valid package with zero entries.
   LLVM_ABI static SmallString<0>
   write(ArrayRef<OffloadingImage> OffloadingData);
 

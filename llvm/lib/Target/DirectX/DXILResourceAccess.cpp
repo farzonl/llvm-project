@@ -99,6 +99,7 @@ static Value *traverseGEPOffsets(const DataLayout &DL, IRBuilder<> &Builder,
     } else
       llvm_unreachable("Unhandled GEP structure for resource access");
 
+    GEPOffset = Builder.CreateSExtOrTrunc(GEPOffset, Builder.getInt32Ty());
     uint64_t ElemSize = AccessSize;
     if (!(IndexScale % ElemSize)) {
       // If our scale is an exact multiple of the access size, adjust the

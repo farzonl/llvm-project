@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
 
@@ -66,6 +67,24 @@ struct vendor : detail::info_desc_tag<vendor, sycl::device> {
 };
 struct driver_version : detail::info_desc_tag<driver_version, sycl::device> {
   using return_type = std::string;
+};
+struct version : detail::info_desc_tag<version, sycl::device> {
+  using return_type = std::string;
+};
+struct is_compiler_available
+    : detail::info_desc_tag<is_compiler_available, sycl::device> {
+  using return_type = bool;
+};
+struct is_linker_available
+    : detail::info_desc_tag<is_linker_available, sycl::device> {
+  using return_type = bool;
+};
+struct max_work_group_size
+    : detail::info_desc_tag<max_work_group_size, sycl::device> {
+  using return_type = std::size_t;
+};
+struct sub_group_sizes : detail::info_desc_tag<sub_group_sizes, sycl::device> {
+  using return_type = std::vector<std::size_t>;
 };
 struct platform : detail::info_desc_tag<platform, sycl::device> {
   using return_type = sycl::platform;

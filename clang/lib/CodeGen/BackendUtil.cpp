@@ -1630,6 +1630,12 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
     std::string DLDesc = M->getDataLayout().getStringRepresentation();
     std::string TDesc = M->getTargetTriple().computeDataLayout(
         AsmHelper.TM->getTargetABIName(*M));
+    // SYCL device IR retains host capture pointers until device-link ABI
+    // lowering. Executable DXIL still uses the native target layout.
+    if (CI.getLangOpts().SYCLIsDevice &&
+        M->getTargetTriple().getArch() == llvm::Triple::dxil &&
+        (Action == Backend_EmitLL || Action == Backend_EmitBC))
+      TDesc = CI.getTarget().getDataLayoutString();
     if (DLDesc != TDesc)
       Diags.Report(diag::err_data_layout_mismatch) << DLDesc << TDesc;
   }

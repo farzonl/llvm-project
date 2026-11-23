@@ -103,7 +103,6 @@ void ProgramAndKernelManager::registerFatBin(const void *BinaryStart,
                           "Failed to parse OffloadBinary: " +
                               llvm::toString(BinOrErr.takeError()));
   }
-  assert(!BinOrErr->empty() && "OffloadBinary must contain at least one entry");
 
   DeviceImageManagerVec Images;
   Images.reserve(BinOrErr->size());
@@ -233,6 +232,22 @@ bool ProgramAndKernelManager::hasCompatibleImage(const DeviceImpl &Device) {
   }
 
   return false;
+}
+
+std::vector<std::string> ProgramAndKernelManager::getKernelNames() {
+  std::lock_guard<std::mutex> Guard(MDataCollectionMutex);
+  std::vector<std::string> Names;
+  for (const auto &[Name, Info] : MDeviceKernelInfoMap)
+    Names.emplace_back(Name);
+  return Names;
+}
+
+bool ProgramAndKernelManager::isKernelCompatible(std::string_view Name,
+                                                 const DeviceImpl &Device) {
+  std::lock_guard<std::mutex> Guard(MDataCollectionMutex);
+  auto It = MDeviceKernelInfoMap.find(Name);
+  return It != MDeviceKernelInfoMap.end() &&
+         isImageCompatible(It->second.getDeviceImage(), Device);
 }
 
 } // namespace detail

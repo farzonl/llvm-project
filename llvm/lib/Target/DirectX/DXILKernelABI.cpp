@@ -522,6 +522,7 @@ bool lowerKernel(Module &M) {
     }
     Size->eraseFromParent();
   }
+  M.setDataLayout(M.getTargetTriple().computeDataLayout());
   return true;
 }
 

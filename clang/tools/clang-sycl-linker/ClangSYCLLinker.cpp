@@ -1082,7 +1082,7 @@ static Error runSYCLLink(ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs,
       llvm::none_of(Result.LinkedModule->functions(), [](const Function &F) {
         return isEntryPoint(F, /*EmitOnlyKernelsAsEntryPoints=*/true);
       }))
-    return createStringError("DirectX SYCL device link contains no kernels");
+    return linkDirectXImages({}, Result.TargetTriple, Args);
 
   // TODO: Expose this as a command-line option and default it to false when
   // device-image dynamic linking is supported, so that sycl_external functions

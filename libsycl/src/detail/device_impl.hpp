@@ -100,7 +100,10 @@ public:
         Map::M<device_type>{OL_DEVICE_INFO_TYPE},
         Map::M<name>{OL_DEVICE_INFO_PRODUCT_NAME},
         Map::M<vendor>{OL_DEVICE_INFO_VENDOR},
-        Map::M<driver_version>{OL_DEVICE_INFO_DRIVER_VERSION});
+        Map::M<driver_version>{OL_DEVICE_INFO_DRIVER_VERSION},
+        Map::M<version>{OL_DEVICE_INFO_COMPUTE_UNIT_KIND},
+        Map::M<max_work_group_size>{OL_DEVICE_INFO_MAX_WORK_GROUP_SIZE},
+        Map::M<sub_group_sizes>{OL_DEVICE_INFO_NUM_LANES});
 
     size_t ExpectedSize = 0;
     callAndThrow(olGetDeviceInfoSize, MOffloadDevice, OLInfo, &ExpectedSize);
@@ -123,6 +126,15 @@ public:
       callAndThrow(olGetDeviceInfo, MOffloadDevice, OLInfo, sizeof(OLType),
                    &OLType);
       return convertDeviceTypeToSYCL(OLType);
+    } else if constexpr (std::is_same_v<Param, max_work_group_size> ||
+                         std::is_same_v<Param, sub_group_sizes>) {
+      std::uint32_t Value = 0;
+      callAndThrow(olGetDeviceInfo, MOffloadDevice, OLInfo, sizeof(Value),
+                   &Value);
+      if constexpr (std::is_same_v<Param, sub_group_sizes>)
+        return {Value};
+      else
+        return Value;
     } else {
       static_assert(AlwaysFalse<Param>,
                     "Info descriptor is not properly supported");

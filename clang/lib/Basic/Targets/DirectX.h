@@ -86,6 +86,22 @@ public:
       PtrDiffType = Aux->getPtrDiffType(LangAS::Default);
       VaListKind = Aux->getBuiltinVaListKind();
       resetDataLayout();
+      // Intermediate SYCL IR contains host-side declarations and capture
+      // tokens. Keep their pointer layout consistent with the AST until ABI
+      // lowering removes captures and restores the native DXIL layout.
+      SmallVector<StringRef> Parts;
+      StringRef(DataLayoutString).split(Parts, '-');
+      std::string Layout;
+      for (StringRef Part : Parts) {
+        if (Part.starts_with("p:"))
+          continue;
+        if (!Layout.empty())
+          Layout += '-';
+        Layout += Part;
+      }
+      Layout += "-p:" + std::to_string(PointerWidth) + ":" +
+                std::to_string(PointerAlign);
+      resetDataLayout(Layout);
     }
     // The static values this addresses do not apply outside of the same thread
     // This protection is neither available nor needed

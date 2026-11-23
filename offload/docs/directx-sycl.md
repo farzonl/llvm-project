@@ -316,9 +316,9 @@ without changing their assertions or configuration. All four still fail to
 compile and execute no CTS tests, but the missing enumeration errors are gone.
 The newly visible shared prerequisites include `kernel`, `half`, `vec`,
 `marray`, vector aliases, and deprecated compiler/linker availability queries.
-Linking a kernel-free executable with the DirectX `-fsycl` pipeline is also
-currently rejected; host-only function-object tests do not use device linking.
-These are remaining implementation tasks, not passing or skipped CTS results.
+At that measurement, linking a kernel-free executable with the DirectX
+`-fsycl` pipeline was also rejected; host-only function-object tests do not
+use device linking. These were implementation gaps, not skipped CTS results.
 
 ### Numeric value-type checkpoint
 
@@ -336,11 +336,70 @@ The runtime rebuild and existing scalar GPU kernels also pass on all three
 vendors. These checks do not establish device-side half/vector storage,
 complete vector/marray APIs, or a new FP16 aspect.
 
-The unchanged CTS error category still fails to compile, with the numeric
-header errors removed. Its first remaining diagnostics are the missing kernel
+At the numeric checkpoint, the unchanged CTS error category failed to compile,
+with the numeric header errors removed. Its first remaining diagnostics were
+the missing kernel
 type and the deprecated compiler/linker availability queries. No CTS tests
-have executed at this checkpoint; executable kernel/bundle support and
-host-only DirectX compiler/linking fixes remain prerequisites.
+had executed at that checkpoint; executable kernel/bundle support and
+host-only DirectX compiler/linking fixes remained prerequisites.
+
+### First unchanged CTS passes
+
+The next increment supplies registered kernel identities, runtime-backed
+executable bundles and kernel objects, platform selection, and legacy
+compiler/linker availability queries. Availability reflects existing aspects;
+this does not introduce an online compiler or linker. Input/object bundles
+explicitly report unsupported functionality. Executable bundles validate context
+devices and image compatibility and prepare kernels through existing native
+program caches.
+
+This is the initial executable-bundle API surface, not complete kernel/program
+or device-information conformance.
+
+DirectX device compilation now keeps host pointer widths in intermediate SYCL
+IR, then restores native DXIL layout during capture ABI lowering. Destructor
+cleanup retains its convergence token, and resource GEP indices are normalized
+to DXIL's address width. Kernel-free links produce a valid empty offload package,
+not a placeholder shader; runtime registration accepts that package.
+
+With the same upstream CTS revision and configuration, four unchanged
+categories were remeasured:
+
+| Category | Build | Result with each NVIDIA/AMD/Intel device filter |
+|---|---|---|
+| `test_error` | Passed | 1 test case passed |
+| `test_header` | Passed | 2 test cases and 2 assertions passed |
+| `test_range` | Failed | No execution; buffers/accessors are missing |
+| `test_nd_range` | Failed | No execution; default construction and buffers/accessors are missing |
+
+These first two categories check host/header APIs, **not GPU kernel
+conformance**. The error test performs a class-type check but has no Catch2
+assertion counter; it is not a zero-test executable. No CTS assertions or test
+sources were weakened. The other 93 configured categories were not remeasured,
+and these results do not establish a conformance percentage.
+
+Separate compiler-generated GPU tests validate executable-bundle lookup,
+rejected bundle requests, captured scalar/buffer arguments, and integer and
+floating-point kernels on all three vendors. The standalone vector-add example
+also verifies 65,537 elements on each vendor after the pointer-layout changes.
+Native device-version queries
+report discovered shader models: 6.8 on the tested NVIDIA/AMD devices and 6.7
+on Intel. No additional FP16, FP64, subgroup, or online capabilities are
+advertised.
+
+Reproduce the targeted measurement after rebuilding the compiler and runtime:
+
+```bat
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\first-passes" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+The command returns nonzero because the two geometry categories still fail.
+Their next major prerequisite is genuine buffer/accessor storage, scheduling,
+capture lowering, and lifetime/writeback semantics; compatibility declarations
+alone would not satisfy their device-execution tests.
 
 ### Adapter validation
 

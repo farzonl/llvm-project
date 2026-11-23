@@ -1,10 +1,11 @@
 ; RUN: opt -S -dxil-kernel-abi %s | FileCheck %s
-; RUN: llc -filetype=obj %s -o %t.dxil
+; RUN: opt -S -dxil-kernel-abi %s -o %t.ll
+; RUN: llc -filetype=obj %t.ll -o %t.dxil
 
-target datalayout = "e-p:32:32-i64:64"
+target datalayout = "e-p:64:64-i64:64"
 target triple = "dxil-pc-shadermodel6.0-compute"
 
-%Capture = type { float, i32, ptr addrspace(4), [4 x i8] }
+%Capture = type { float, i32, ptr addrspace(4) }
 
 define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
   %token = call token @llvm.experimental.convergence.entry()
@@ -33,6 +34,7 @@ attributes #0 = { convergent "dx.kernel" "hlsl.numthreads"="64,1,1" }
 !2 = !{i32 4, i32 4}
 !3 = !{i32 8, i32 8}
 
+; CHECK: target datalayout = "{{.*}}p:32:32{{.*}}"
 ; CHECK: %__dx_kernel_args = type <{ float, i32 }>
 ; CHECK-LABEL: define void @capture()
 ; CHECK-NOT: !dx.capture.layout

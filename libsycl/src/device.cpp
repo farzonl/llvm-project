@@ -76,6 +76,18 @@ template _LIBSYCL_EXPORT std::vector<device> device::create_sub_devices<
 
 bool device::has(aspect asp) const { return impl->has(asp); }
 
+template <>
+_LIBSYCL_EXPORT bool
+device::get_info<info::device::is_compiler_available>() const {
+  return has(aspect::online_compiler);
+}
+
+template <>
+_LIBSYCL_EXPORT bool
+device::get_info<info::device::is_linker_available>() const {
+  return has(aspect::online_linker);
+}
+
 template <typename Param>
 detail::is_device_info_desc_t<Param> device::get_info() const {
   return impl->getInfo<Param>();
@@ -96,6 +108,9 @@ _LIBSYCL_EXPORT_GET_INFO(device_type)
 _LIBSYCL_EXPORT_GET_INFO(name)
 _LIBSYCL_EXPORT_GET_INFO(vendor)
 _LIBSYCL_EXPORT_GET_INFO(driver_version)
+_LIBSYCL_EXPORT_GET_INFO(version)
+_LIBSYCL_EXPORT_GET_INFO(max_work_group_size)
+_LIBSYCL_EXPORT_GET_INFO(sub_group_sizes)
 #undef _LIBSYCL_EXPORT_GET_INFO
 
 _LIBSYCL_END_NAMESPACE_SYCL

@@ -93,6 +93,7 @@ set(LIBSYCL_SOURCES
     "device.cpp"
     "device_selector.cpp"
     "handler.cpp"
+    "kernel_bundle.cpp"
     "platform.cpp"
     "queue.cpp"
     "usm_functions.cpp"

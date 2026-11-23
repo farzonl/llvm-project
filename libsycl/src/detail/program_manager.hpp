@@ -109,6 +109,8 @@ public:
   /// \return true if and only if at least one registered device image is
   /// compatible with the given device.
   bool hasCompatibleImage(const DeviceImpl &Device);
+  std::vector<std::string> getKernelNames();
+  bool isKernelCompatible(std::string_view Name, const DeviceImpl &Device);
 
 protected:
   ProgramAndKernelManager() = default;
