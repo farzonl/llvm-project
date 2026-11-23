@@ -1197,8 +1197,9 @@ including the accesses used by cooperative copies. Values are split into two
 32-bit groupshared words and reconstructed without losing either sign or high
 bits. This does not require or implement 64-bit shared-memory atomics:
 concurrent accesses still need ordinary SYCL data-race avoidance and barriers.
-Narrow/vector local operations, volatile/atomic local operations, and 64-bit
-floating-point operations remain unsupported.
+Narrow local operations, volatile/atomic local operations, and 64-bit
+floating-point operations remain unsupported. Limited vector local support is
+described below.
 
 Each split access retains valid word alignment, memory alias metadata, and debug
 locations. Whole-value range metadata is not copied onto the individual words.
@@ -1259,8 +1260,8 @@ semantics.
 This removes a storage prerequisite, **not all vector-memory restrictions**.
 The native test executes scalar component accesses in buffers of
 `vec<int, 4>` and `vec<float, 16>`, plus an `alignas(256)` aggregate. It does
-not claim general whole-vector operations, vector local accessors, or
-cooperative vector-copy conformance.
+not claim general whole-vector operations or cooperative vector-copy
+conformance. The subsequent local-vector increment is described below.
 
 Rebuild the runtime/public headers together and use the Windows variables above:
 
@@ -1306,8 +1307,77 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 
 Only these three categories were remeasured in this run. The previously
 confirmed count remains **7/97**, with no new full-category pass claimed.
-The group/ND-item prerequisites still include narrow/vector local operations,
-legacy interfaces, and hierarchical group execution.
+The group/ND-item prerequisites still include narrow types, broader local
+alignment, legacy interfaces, and hierarchical group execution.
+
+### Vector local storage and cooperative copies
+
+Local accessors now accept trivially copyable SYCL `vec` and `marray` value
+arrays, even when their default constructor is not trivial. Like scalar local
+storage, their device contents are not initialized by constructing the accessor.
+The existing mutable-element, trivial-destruction, **16-byte alignment**, and
+**32768-byte total workgroup storage** limits remain in force.
+
+The compiler accepts fixed-vector accesses of 32/64-bit integers and 32-bit
+floats in both buffer and local memory. It splits them into scalar accesses
+before pointer validation/remapping, retaining scalar alignment, alias metadata,
+and debug locations. Local 64-bit components use the existing word-pair lowering.
+Constant nonvolatile memory copies with four-byte-aligned operands and a size
+that is a multiple of four, at most 32768 bytes, are also expanded into word
+loads/stores. This handles compiler-generated vector assignments without a
+special vector-copy path in `group`; all words are loaded first so overlapping
+`memmove` remains correct. Address-space casts are preserved until remapping.
+Atomic and volatile accesses, narrow components, 64-bit floating point, and
+larger local alignments are not enabled by this increment.
+
+Cooperative-copy synchronization and eager event completion are unchanged.
+The existing native regression now includes `vec<int, 4>`, padded
+`vec<float, 3>`, `vec<long long, 2>`, and `marray<int, 3>`, with distinct component
+values, both directions, contiguous/strided transfers, zero and partial counts,
+guard objects, neighbor-lane visibility, and completed-event waits. The largest
+16-byte-vector cases use two 1024-element allocations, including guards, exactly
+**32768 bytes**. It passes on NVIDIA, AMD, and Intel, as do the existing aligned
+buffer, multidimensional buffer, local-accessor, pointer/barrier, and
+workgroup-specialization binaries.
+
+Rebuild the compiler tools and runtime/public headers together, then use the
+existing `workgroup_copy.cpp` Windows build/run command above:
+
+```bat
+cmake --build "%COMPILER_BUILD%" --target clang opt llc
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL
+```
+
+Twelve focused ABI compiler tests pass, including scalarized vector loads/stores,
+casted global-to-local copies, overlapping word copies, full constant-access
+bounds, and rejection of partial-word copies and volatile vector loads. A
+broader selection also exposes a pre-existing diagnostic mismatch in
+`cpp-kernel-capture-invalid.test`: its dynamic-index expectation differs from
+the diagnostic already present before this increment. That unrelated test is
+not changed or counted as passing.
+
+The unchanged five-category CTS remeasurement passes header, error, and
+device-event tests: **4/4 cases and 2/2 assertions per vendor**. Full group and
+ND-item still fail compilation and execute no tests; no CTS source or assertion
+is changed, and failed categories are retained in the report. Diagnostics now
+include `sycl::byte`, over-16-byte local alignments, scalar `half` local-accessor
+construction, and missing hierarchical group submission. Further narrow-type,
+legacy-interface, and execution prerequisites remain.
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\vector-local-final" ^
+  --targets test_device_event test_group test_nd_item test_header test_error ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The runner exits with failure because group and ND-item do not compile; it does
+not run stale executables for those categories. The previously confirmed count
+remains **7/97**, not a new group/ND-item category pass or full SYCL conformance.
 
 ### Adapter validation
 

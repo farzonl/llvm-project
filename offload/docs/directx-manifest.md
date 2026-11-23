@@ -123,10 +123,16 @@ offsets are not specialization inputs. Each produced image is reflected and
 validated again, including its total static groupshared storage and the
 32768-byte limit; local allocations do not bypass existing shader validation.
 Current lowering supports non-atomic, nonvolatile 32/64-bit integer and 32-bit
-float scalar accesses, including such fields in trivial aggregates. A 64-bit
+float scalar and fixed-vector accesses, including such fields in trivial
+aggregates. Fixed vectors are scalarized before pointer remapping. A 64-bit
 integer access is split into two 32-bit groupshared words without changing the
-allocation-token ABI. Narrow, vector, 64-bit floating-point and general escaping
-local-pointer operations remain unsupported.
+allocation-token ABI. Constant, nonvolatile word-aligned memory copies up to
+32768 bytes are expanded into 32-bit accesses; all source words are read before
+the destination is written to preserve overlapping `memmove` semantics.
+Copy expansion preserves the original address-space cast chains so all pointer
+users are validated and remapped. Narrow, 64-bit floating-point and general
+escaping local-pointer operations remain unsupported. Local slot alignment
+remains limited to 16 bytes.
 
 DirectX SYCL splitting keeps globals reachable from the kernel rather than
 rooting every non-discardable host global. Constructors/destructors that can

@@ -49,6 +49,75 @@ void fail(const Twine &Message) {
   reportFatalUsageError("DirectX C++ kernel ABI: " + Message);
 }
 
+void scalarizeVectorAccess(Instruction &Access, FixedVectorType *VectorType,
+                           const DataLayout &Layout) {
+  auto *Load = dyn_cast<LoadInst>(&Access);
+  auto *Store = dyn_cast<StoreInst>(&Access);
+  Value *Pointer =
+      Load ? Load->getPointerOperand() : Store->getPointerOperand();
+  Align Alignment = Load ? Load->getAlign() : Store->getAlign();
+  Type *ElementType = VectorType->getElementType();
+  uint64_t ElementBytes = Layout.getTypeStoreSize(ElementType).getFixedValue();
+  IRBuilder<> Builder(&Access);
+  Value *Result = PoisonValue::get(VectorType);
+  for (unsigned I = 0; I < VectorType->getNumElements(); ++I) {
+    uint64_t Offset = I * ElementBytes;
+    Value *Address =
+        Builder.CreateConstGEP1_64(Builder.getInt8Ty(), Pointer, Offset);
+    if (Load) {
+      auto *Part = Builder.CreateAlignedLoad(
+          ElementType, Address, commonAlignment(Alignment, Offset));
+      copyMetadataForLoad(*Part, *Load);
+      Part->setAAMetadata(
+          Load->getAAMetadata().adjustForAccess(Offset, ElementBytes));
+      Part->setMetadata(LLVMContext::MD_range, nullptr);
+      Result = Builder.CreateInsertElement(Result, Part, I);
+    } else {
+      auto *Part = Builder.CreateAlignedStore(
+          Builder.CreateExtractElement(Store->getValueOperand(), I), Address,
+          commonAlignment(Alignment, Offset));
+      Part->copyMetadata(*Store);
+      Part->setAAMetadata(
+          Store->getAAMetadata().adjustForAccess(Offset, ElementBytes));
+    }
+  }
+  if (Load)
+    Load->replaceAllUsesWith(Result);
+  Access.eraseFromParent();
+}
+
+void scalarizeWordCopy(MemTransferInst &Copy) {
+  auto *Length = dyn_cast<ConstantInt>(Copy.getLength());
+  if (Copy.isVolatile() || !Length || Length->getLimitedValue() > 32768 ||
+      Length->getZExtValue() % 4 ||
+      Copy.getSourceAlign().valueOrOne() < Align(4) ||
+      Copy.getDestAlign().valueOrOne() < Align(4))
+    fail("memory copies require a constant word-aligned size within "
+         "the 32768-byte limit");
+  IRBuilder<> Builder(&Copy);
+  SmallVector<Value *> Words;
+  for (uint64_t Offset = 0; Offset < Length->getZExtValue(); Offset += 4) {
+    auto *Word = Builder.CreateAlignedLoad(
+        Builder.getInt32Ty(),
+        Builder.CreateConstGEP1_64(Builder.getInt8Ty(), Copy.getRawSource(),
+                                   Offset),
+        commonAlignment(Copy.getSourceAlign().valueOrOne(), Offset));
+    Word->setAAMetadata(Copy.getAAMetadata().adjustForAccess(Offset, 4));
+    Words.push_back(Word);
+  }
+  // Read all words before writing to preserve overlapping memmove semantics.
+  for (auto [I, Word] : enumerate(Words)) {
+    uint64_t Offset = I * 4;
+    auto *Store = Builder.CreateAlignedStore(
+        Word,
+        Builder.CreateConstGEP1_64(Builder.getInt8Ty(), Copy.getRawDest(),
+                                   Offset),
+        commonAlignment(Copy.getDestAlign().valueOrOne(), Offset));
+    Store->setAAMetadata(Copy.getAAMetadata().adjustForAccess(Offset, 4));
+  }
+  Copy.eraseFromParent();
+}
+
 bool checkLocalPointer(Value *Root, const DataLayout &Layout,
                        uint64_t &MinimumBytes) {
   SmallVector<Value *> Worklist{Root};
@@ -57,27 +126,39 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
     Value *Pointer = Worklist.pop_back_val();
     if (!Seen.insert(Pointer).second)
       continue;
-    for (User *Use : Pointer->users()) {
+    for (User *Use : make_early_inc_range(Pointer->users())) {
       if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use)) {
         Worklist.push_back(Use);
         continue;
-      } else if (auto *Load = dyn_cast<LoadInst>(Use)) {
+      }
+      if (auto *Copy = dyn_cast<MemTransferInst>(Use)) {
+        scalarizeWordCopy(*Copy);
+        Seen.erase(Pointer);
+        Worklist.push_back(Pointer);
+        break;
+      }
+      Type *AccessType = nullptr;
+      if (auto *Load = dyn_cast<LoadInst>(Use)) {
+        AccessType = Load->getType();
         if (Load->isAtomic() || Load->isVolatile() ||
-            (!Load->getType()->isIntegerTy(32) &&
-             !Load->getType()->isIntegerTy(64) &&
-             !Load->getType()->isFloatTy())) {
+            (!AccessType->getScalarType()->isIntegerTy(32) &&
+             !AccessType->getScalarType()->isIntegerTy(64) &&
+             !AccessType->getScalarType()->isFloatTy()) ||
+            isa<ScalableVectorType>(AccessType)) {
           fail("local accessors require non-atomic 32/64-bit integer or "
-               "32-bit float scalar accesses");
+               "32-bit float scalar or fixed-vector accesses");
           return false;
         }
       } else if (auto *Store = dyn_cast<StoreInst>(Use)) {
-        Type *Type = Store->getValueOperand()->getType();
+        AccessType = Store->getValueOperand()->getType();
         if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
             Store->isVolatile() ||
-            (!Type->isIntegerTy(32) && !Type->isIntegerTy(64) &&
-             !Type->isFloatTy())) {
+            (!AccessType->getScalarType()->isIntegerTy(32) &&
+             !AccessType->getScalarType()->isIntegerTy(64) &&
+             !AccessType->getScalarType()->isFloatTy()) ||
+            isa<ScalableVectorType>(AccessType)) {
           fail("local accessors require non-atomic 32/64-bit integer or "
-               "32-bit float scalar accesses");
+               "32-bit float scalar or fixed-vector accesses");
           return false;
         }
       } else {
@@ -90,14 +171,15 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
           fail("local accessor constant accesses precede the allocation");
           return false;
         }
-        Type *AccessType =
-            isa<LoadInst>(Use)
-                ? cast<LoadInst>(Use)->getType()
-                : cast<StoreInst>(Use)->getValueOperand()->getType();
         MinimumBytes =
             std::max(MinimumBytes,
                      uint64_t(Offset) +
                          Layout.getTypeStoreSize(AccessType).getFixedValue());
+      }
+      if (auto *VectorType = dyn_cast<FixedVectorType>(AccessType)) {
+        scalarizeVectorAccess(*cast<Instruction>(Use), VectorType, Layout);
+        Seen.erase(Pointer);
+        Worklist.push_back(Pointer);
       }
     }
   }
@@ -230,6 +312,16 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
         Worklist.push_back(Pointer);
         continue;
       }
+      if (auto *Copy = dyn_cast<MemTransferInst>(U)) {
+        if (ReadOnly && Copy->getRawDest() == Pointer) {
+          fail("buffer pointer escape or unsupported store");
+          return false;
+        }
+        scalarizeWordCopy(*Copy);
+        Seen.erase(Pointer);
+        Worklist.push_back(Pointer);
+        break;
+      }
       Type *Ty = nullptr;
       if (auto *Load = dyn_cast<LoadInst>(U)) {
         if (Load->isAtomic() || Load->isVolatile()) {
@@ -252,10 +344,18 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
       bool Is64BitInteger =
           Ty->isIntegerTy(64) ||
           (VectorTy && VectorTy->getElementType()->isIntegerTy(64));
-      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(32) && !Ty->isFloatTy() &&
-          !Is64BitInteger) {
+      if (isa<ScalableVectorType>(Ty) ||
+          (!Ty->isIntegerTy(8) && !Ty->getScalarType()->isIntegerTy(32) &&
+           !Ty->getScalarType()->isFloatTy() && !Is64BitInteger)) {
         fail("buffer accesses must use 8/32/64-bit integers or floats");
         return false;
+      }
+      if (VectorTy) {
+        scalarizeVectorAccess(
+            *cast<Instruction>(U), VectorTy,
+            cast<Instruction>(U)->getModule()->getDataLayout());
+        Seen.erase(Pointer);
+        Worklist.push_back(Pointer);
       }
       Accessed = true;
     }

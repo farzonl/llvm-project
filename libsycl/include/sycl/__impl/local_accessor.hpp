@@ -10,6 +10,7 @@
 #define _LIBSYCL___IMPL_LOCAL_ACCESSOR_HPP
 
 #include <sycl/__impl/buffer.hpp>
+#include <sycl/__impl/value_types.hpp>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
 
@@ -17,10 +18,12 @@ template <typename T, int Dimensions = 1> class local_accessor {
   static_assert(Dimensions >= 1 && Dimensions <= 3,
                 "Local accessors require one, two, or three dimensions");
   static_assert(std::is_trivially_copyable_v<T> &&
-                    std::is_trivially_default_constructible_v<T> &&
+                    (std::is_trivially_default_constructible_v<T> ||
+                     detail::IsValueArray<T>::value) &&
                     std::is_trivially_destructible_v<T> &&
                     !std::is_const_v<T> && alignof(T) <= 16,
-                "Local accessors require mutable trivial elements "
+                "Local accessors require mutable trivial elements or "
+                "trivially copyable SYCL value arrays "
                 "with alignment at most 16");
   using DecoratedElement = typename detail::DecoratedElement<
       T, access::address_space::local_space>::type;
