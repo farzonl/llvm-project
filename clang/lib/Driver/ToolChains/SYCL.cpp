@@ -129,6 +129,10 @@ void SYCLToolChain::addClangTargetOptions(
     const llvm::opt::ArgList &DriverArgs, llvm::opt::ArgStringList &CC1Args,
     BoundArch BA, Action::OffloadKind DeviceOffloadingKind) const {
   HostTC.addClangTargetOptions(DriverArgs, CC1Args, BA, DeviceOffloadingKind);
+  if (getTriple().isDXIL()) {
+    CC1Args.append({"-D_WIN32", "-D_WIN64", "-D_MT", "-D_DLL",
+                    "-D_CRT_USE_BUILTIN_OFFSETOF"});
+  }
 
   // Compilations that stop at or before the compile phase (e.g. -E,
   // -fsyntax-only) emit no IR, so they need no device libraries.

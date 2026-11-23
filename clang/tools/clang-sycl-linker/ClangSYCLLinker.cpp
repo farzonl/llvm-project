@@ -56,6 +56,7 @@
 #include "llvm/Support/TimeProfiler.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/IPO/StripDeadPrototypes.h"
 #include "llvm/Transforms/Utils/SplitModuleByCategory.h"
 
 #include <mutex>
@@ -409,6 +410,8 @@ static Expected<ResolvedInputs> resolveArchiveMembers(
   // Resolve the target triple: use --triple= if provided, otherwise infer from
   // the first non-archive input with a non-empty triple.
   llvm::Triple TargetTriple(TargetTripleArgValue);
+  if (TargetTriple.isDXIL())
+    TargetTriple = llvm::Triple(TargetTriple.normalize());
   StringRef TripleSource = TargetTriple.empty() ? "" : "--triple=";
 
   if (TargetTriple.empty()) {
@@ -799,7 +802,7 @@ struct SplitModule {
 static bool isEntryPoint(const Function &F, bool EmitOnlyKernelsAsEntryPoints) {
   if (F.isDeclaration())
     return false;
-  if (F.hasKernelCallingConv())
+  if (F.hasKernelCallingConv() || F.hasFnAttribute("dx.kernel"))
     return true;
   if (EmitOnlyKernelsAsEntryPoints)
     return false;
@@ -873,6 +876,12 @@ splitDeviceCode(std::unique_ptr<Module> M, StringRef LinkedBitcodeFile,
   EntryPointCategorizer Categorizer(Mode, EmitOnlyKernelsAsEntryPoints);
 
   auto SplitCallback = [&](std::unique_ptr<Module> Part) -> Error {
+    if (Part->getTargetTriple().isDXIL()) {
+      // Other kernels become unused declarations after splitting, but the
+      // restricted DXIL ABI requires exactly one kernel in each module.
+      ModuleAnalysisManager MAM;
+      StripDeadPrototypesPass().run(*Part, MAM);
+    }
     Expected<StringRef> BitcodeFileOrErr =
         createTempFile(Args, sys::path::filename(OutputFile), "bc");
     if (!BitcodeFileOrErr)
@@ -948,11 +957,90 @@ static Error aotCompileSplitModules(SmallVectorImpl<SplitModule> &SplitModules,
   return Error::success();
 }
 
+static Error linkDirectXImages(ArrayRef<SplitModule> Modules,
+                               const Triple &TargetTriple,
+                               const ArgList &Args) {
+  SmallVector<OffloadingImage> Images;
+  BumpPtrAllocator Alloc;
+  StringSaver Saver(Alloc);
+  std::string ToolDir = getMainExecutable(Executable);
+  StringRef Paths[] = {ToolDir};
+  for (const auto &Part : Modules) {
+    auto KernelFile = createTempFile(Args, "sycl-dxil-kernel", "bc");
+    if (!KernelFile)
+      return KernelFile.takeError();
+    std::string Kernel = KernelFile->str();
+    auto UnsignedFile = createTempFile(Args, "sycl-dxil-unsigned", "dxil");
+    if (!UnsignedFile)
+      return UnsignedFile.takeError();
+    std::string Unsigned = UnsignedFile->str();
+    auto SignedFile = createTempFile(Args, "sycl-dxil-signed", "dxil");
+    if (!SignedFile)
+      return SignedFile.takeError();
+    std::string Signed = SignedFile->str();
+    auto PackageFile = createTempFile(Args, "sycl-dxil-package", "bin");
+    if (!PackageFile)
+      return PackageFile.takeError();
+    std::string Package = PackageFile->str();
+
+    auto Run = [&](StringRef Name, ArrayRef<StringRef> Arguments) -> Error {
+      auto Program = findProgram(Args, Name, Paths);
+      if (!Program)
+        return Program.takeError();
+      SmallVector<StringRef> Command{*Program};
+      llvm::append_range(Command, Arguments);
+      return executeCommands(*Program, Command);
+    };
+    if (Error E =
+            Run("opt", {"-dxil-kernel-abi", Part.ModuleFilePath, "-o", Kernel}))
+      return E;
+    if (Error E = Run("llc", {"-filetype=obj", Kernel, "-o", Unsigned}))
+      return E;
+    std::string ValidatorOutput = "-o=" + Signed;
+    if (Error E = Run(Args.getLastArgValue(OPT_dxil_validator_EQ, "dxv"),
+                      {ValidatorOutput, Unsigned}))
+      return E;
+    std::string ImageArg = "--image=file=" + Signed +
+                           ",kind=sycl,triple=" + TargetTriple.str() +
+                           ",directx-metadata=" + Kernel;
+    if (Error E = Run("llvm-offload-binary", {"-o", Package, ImageArg}))
+      return E;
+    if (DryRun)
+      continue;
+
+    auto Buffer = MemoryBuffer::getFile(Package);
+    if (!Buffer)
+      return createFileError(Package, Buffer.getError());
+    auto Entries = OffloadBinary::create((*Buffer)->getMemBufferRef());
+    if (!Entries)
+      return Entries.takeError();
+    if (Entries->size() != 1)
+      return createStringError("expected one packaged DirectX kernel");
+    const auto &Entry = *Entries->front();
+    OffloadingImage Image;
+    Image.TheImageKind = Entry.getImageKind();
+    Image.TheOffloadKind = Entry.getOffloadKind();
+    Image.Flags = Entry.getFlags();
+    for (const auto &[Key, Value] : Entry.strings())
+      Image.StringData[Saver.save(Key)] = Saver.save(Value);
+    Image.Image = MemoryBuffer::getMemBufferCopy(Entry.getImage());
+    Images.push_back(std::move(Image));
+  }
+  if (DryRun)
+    return Error::success();
+  auto Binary = OffloadBinary::write(Images);
+  auto Output = FileOutputBuffer::create(OutputFile, Binary.size());
+  if (!Output)
+    return Output.takeError();
+  llvm::copy(Binary, (*Output)->getBufferStart());
+  return (*Output)->commit();
+}
+
 /// Performs the following steps:
 /// 1. Link all input bitcode files together with library files.
 /// 2. Optionally split the linked module according to the requested
 ///    IRSplitMode.
-/// 3. Run SPIR-V code generation on each (split) module.
+/// 3. Generate SPIR-V or signed DXIL for each (split) module.
 /// 4. Optionally run AOT compilation when targeting an Intel HW arch.
 /// 5. Pack the resulting images into a single OffloadBinary written to the
 ///    output file.
@@ -971,7 +1059,14 @@ static Error runSYCLLink(ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs,
   LinkResult &Result = *LinkedOrErr;
 
   // Determine the requested module split mode.
-  IRSplitMode SplitMode = IRSplitMode::SPLIT_PER_TU;
+  bool IsDirectX = Result.TargetTriple.isDXIL();
+  if (IsDirectX && (Result.TargetTriple.getOS() != Triple::ShaderModel ||
+                    Result.TargetTriple.getEnvironment() != Triple::Compute ||
+                    Result.TargetTriple.getOSVersion() < VersionTuple(6, 0)))
+    return createStringError("DirectX SYCL requires a shader-model-6.0 or "
+                             "newer compute target");
+  IRSplitMode SplitMode =
+      IsDirectX ? IRSplitMode::SPLIT_PER_KERNEL : IRSplitMode::SPLIT_PER_TU;
   if (Arg *A = Args.getLastArg(OPT_module_split_mode_EQ)) {
     std::optional<IRSplitMode> ModeOrNone =
         convertStringToSplitMode(A->getValue());
@@ -980,6 +1075,14 @@ static Error runSYCLLink(ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs,
           "module-split-mode value isn't recognized: {0}", A->getValue()));
     SplitMode = *ModeOrNone;
   }
+  if (IsDirectX && SplitMode != IRSplitMode::SPLIT_PER_KERNEL)
+    return createStringError(
+        "DirectX SYCL requires --module-split-mode=kernel");
+  if (IsDirectX &&
+      llvm::none_of(Result.LinkedModule->functions(), [](const Function &F) {
+        return isEntryPoint(F, /*EmitOnlyKernelsAsEntryPoints=*/true);
+      }))
+    return createStringError("DirectX SYCL device link contains no kernels");
 
   // TODO: Expose this as a command-line option and default it to false when
   // device-image dynamic linking is supported, so that sycl_external functions
@@ -1001,6 +1104,9 @@ static Error runSYCLLink(ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs,
 
     SplitModules = std::move(*SplitModulesOrErr);
   }
+
+  if (IsDirectX)
+    return linkDirectXImages(SplitModules, Result.TargetTriple, Args);
 
   bool IsAOTCompileNeeded =
       StringToOffloadArch(Args.getLastArgValue(OPT_arch_EQ)).isIntel();

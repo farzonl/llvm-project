@@ -17,6 +17,7 @@
 
 _LIBSYCL_SUPPRESS_EXTRA_WARNINGS_BEGIN
 #include <llvm/Frontend/Offloading/Utility.h>
+#include <llvm/TargetParser/Triple.h>
 _LIBSYCL_SUPPRESS_EXTRA_WARNINGS_END
 
 #include <cassert>
@@ -85,7 +86,7 @@ checkDeviceImageValidity(const llvm::object::OffloadBinary &OB) {
   return (OB.getOffloadKind() == llvm::object::OFK_SYCL) &&
          (OB.getImageKind() == llvm::object::IMG_SPIRV ||
           (OB.getImageKind() == llvm::object::IMG_DXIL &&
-           OB.getTriple().starts_with("dxil-") &&
+           llvm::Triple(OB.getTriple()).isDXIL() &&
            !OB.getString("directx.manifest").empty()));
 }
 
@@ -179,7 +180,7 @@ static bool isImageCompatible(const DeviceImageManager &Image,
   bool IsSPIRV = Image.getTargetArch() == DeviceBinaryArchSPIRV64 &&
                  Device.getBackend() == sycl::backend::level_zero;
   bool IsDirectX =
-      Image.getTargetArch() == "dxil" &&
+      llvm::Triple(Image.getOffloadBinary().getTriple()).isDXIL() &&
       Image.getOffloadBinary().getImageKind() == llvm::object::IMG_DXIL &&
       Device.getBackend() == sycl::backend::ext_llvm_directx;
   if (!IsSPIRV && !IsDirectX)

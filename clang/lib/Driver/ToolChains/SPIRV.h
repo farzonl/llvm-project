@@ -48,7 +48,9 @@ public:
 
 class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
 public:
-  Linker(const ToolChain &TC) : Tool("SPIR-V::Linker", "spirv-link", TC) {}
+  Linker(const ToolChain &TC)
+      : Tool(TC.getTriple().isDXIL() ? "SYCL::Linker" : "SPIR-V::Linker",
+             TC.getTriple().isDXIL() ? "clang-sycl-linker" : "spirv-link", TC) {}
   bool hasIntegratedCPP() const override { return false; }
   bool isLinkJob() const override { return true; }
   void ConstructJob(Compilation &C, const JobAction &JA,

@@ -142,9 +142,9 @@ static bool addExceptionArgs(const ArgList &Args, types::ID InputType,
                              ArgStringList &CmdArgs) {
   const llvm::Triple &Triple = TC.getTriple();
 
-  if (KernelOrKext) {
-    // -mkernel and -fapple-kext imply no exceptions, so claim exception related
-    // arguments now to avoid warnings about unused arguments.
+  if (KernelOrKext || (IsDeviceOffloadAction && Triple.isDXIL())) {
+    // Kernel and DirectX device code have no exception runtime. Claim these
+    // arguments to avoid warnings about unused arguments.
     Args.ClaimAllArgs(options::OPT_fexceptions);
     Args.ClaimAllArgs(options::OPT_fno_exceptions);
     Args.ClaimAllArgs(options::OPT_fobjc_exceptions);
@@ -8995,8 +8995,9 @@ void Clang::AddClangCLArgs(const ArgList &Args, types::ID InputType,
 
   // This controls whether or not we emit stack-protector instrumentation.
   // In MSVC, Buffer Security Check (/GS) is on by default.
-  if (!isNVPTX && Args.hasFlag(options::OPT__SLASH_GS, options::OPT__SLASH_GS_,
-                               /*Default=*/true)) {
+  if (!isNVPTX && !getToolChain().getTriple().isDXIL() &&
+      Args.hasFlag(options::OPT__SLASH_GS, options::OPT__SLASH_GS_,
+                   /*Default=*/true)) {
     CmdArgs.push_back("-stack-protector");
     CmdArgs.push_back(Args.MakeArgString(Twine(LangOptions::SSPStrong)));
   }
@@ -9005,7 +9006,8 @@ void Clang::AddClangCLArgs(const ArgList &Args, types::ID InputType,
 
   bool IsWindowsMSVC = getToolChain().getTriple().isWindowsMSVCEnvironment();
   EHFlags EH = parseClangCLEHFlags(D, Args, IsWindowsMSVC);
-  if (!isNVPTX && (EH.Synch || EH.Asynch)) {
+  if (!isNVPTX && !getToolChain().getTriple().isDXIL() &&
+      (EH.Synch || EH.Asynch)) {
     if (types::isCXX(InputType))
       CmdArgs.push_back("-fcxx-exceptions");
     CmdArgs.push_back("-fexceptions");

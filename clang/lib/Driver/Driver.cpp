@@ -1181,6 +1181,17 @@ void Driver::CreateOffloadingDeviceToolChains(Compilation &C,
 
     // Certain options are not allowed when combined with SYCL compilation.
     if (Kinds.contains(Action::OFK_SYCL)) {
+      if (Target.isDXIL() &&
+          (Target.getEnvironment() != llvm::Triple::Compute ||
+           Target.getOS() != llvm::Triple::ShaderModel ||
+           Target.getOSVersion() < VersionTuple(6, 0) ||
+           C.getDefaultToolChain().getTriple().getArch() !=
+               llvm::Triple::x86_64 ||
+           !C.getDefaultToolChain().getTriple().isWindowsMSVCEnvironment())) {
+        Diag(diag::err_drv_invalid_or_unsupported_offload_target)
+            << Target.str();
+        continue;
+      }
       for (auto ID :
            {options::OPT_static_libstdcxx, options::OPT_ffreestanding})
         if (Arg *IncompatArg = C.getInputArgs().getLastArg(ID))
@@ -3893,8 +3904,9 @@ void Driver::BuildActions(Compilation &C, DerivedArgList &Args,
   }
 
   llvm::Triple TargetTriple(C.getDriver().getTargetTriple());
-  if (TargetTriple.getOS() == llvm::Triple::Vulkan ||
-      TargetTriple.getOS() == llvm::Triple::ShaderModel) {
+  if (!Args.hasArg(options::OPT_sycl_link) &&
+      (TargetTriple.getOS() == llvm::Triple::Vulkan ||
+       TargetTriple.getOS() == llvm::Triple::ShaderModel)) {
     const auto &TC =
         static_cast<const toolchains::HLSLToolChain &>(C.getDefaultToolChain());
 
@@ -5771,7 +5783,9 @@ const char *Driver::GetNamedOutputPath(Compilation &C, const JobAction &JA,
 
   // Output to a temporary file?
   if ((!AtTopLevel && !isSaveTempsEnabled() &&
-       !C.getArgs().hasArg(options::OPT__SLASH_Fo)) ||
+       (!C.getArgs().hasArg(options::OPT__SLASH_Fo) ||
+        JA.getOffloadingDeviceKind() != Action::OFK_None ||
+        isa<OffloadPackagerJobAction>(JA))) ||
       CCGenDiagnostics) {
     StringRef Name = llvm::sys::path::filename(BaseInput);
     return CreateTempOutputPath(Name.split('.').first);
@@ -6198,6 +6212,11 @@ const ToolChain &Driver::getOffloadToolChain(
   if (!TC) {
     // Detect the toolchain based off of the target architecture if that failed.
     switch (Target.getArch()) {
+    case llvm::Triple::dxil:
+      if (Kind == Action::OFK_SYCL)
+        TC = std::make_unique<toolchains::SYCLToolChain>(*this, Target, *HostTC,
+                                                         Args);
+      break;
     case llvm::Triple::amdgpu:
     case llvm::Triple::r600:
       TC = std::make_unique<toolchains::AMDGPUToolChain>(*this, Target, Args,
@@ -6385,9 +6404,12 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       break;
     case llvm::Triple::Vulkan:
     case llvm::Triple::ShaderModel:
-      if ((Target.getArch() == llvm::Triple::spirv32 ||
-           Target.getArch() == llvm::Triple::spirv64) &&
-          !usesInput(Args, types::isHLSL))
+      // Reuse SYCL's LLVM linker orchestration, not HLSL postprocessing, when
+      // finalizing DirectX device bitcode.
+      if ((Target.isDXIL() && Args.hasArg(options::OPT_sycl_link)) ||
+          ((Target.getArch() == llvm::Triple::spirv32 ||
+            Target.getArch() == llvm::Triple::spirv64) &&
+           !usesInput(Args, types::isHLSL)))
         TC = std::make_unique<toolchains::SPIRVToolChain>(*this, Target, Args);
       else
         TC = std::make_unique<toolchains::HLSLToolChain>(*this, Target, Args);

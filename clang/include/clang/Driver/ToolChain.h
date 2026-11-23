@@ -905,6 +905,10 @@ public:
   // We want to expand the shortened versions of the triples passed in to
   // the values used for the bitcode libraries.
   static void normalizeOffloadTriple(llvm::Triple &TT) {
+    if (TT.isDXIL()) {
+      TT = llvm::Triple(TT.normalize());
+      return;
+    }
     if (TT.isNVPTX()) {
       if (TT.getVendor() == llvm::Triple::UnknownVendor)
         TT.setVendor(llvm::Triple::NVIDIA);

@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
   Core
   FrontendOffloading
   IRReader
+  IPO
   Linker
   MC
   Option

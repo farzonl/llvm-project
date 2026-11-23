@@ -73,6 +73,10 @@ def opencl_aot_options_EQ : Joined<["--", "-"], "opencl-aot-options=">,
   Flags<[LinkerOnlyOption]>,
   HelpText<"Options passed to opencl-aot for Intel CPU AOT compilation">;
 
+def dxil_validator_EQ : Joined<["--", "-"], "dxil-validator=">,
+  Flags<[LinkerOnlyOption]>, MetaVarName<"<path>">,
+  HelpText<"DXIL validator executable (defaults to dxv on the tool search path)">;
+
 def module_split_mode_EQ : Joined<["--", "-"], "module-split-mode=">,
   Flags<[LinkerOnlyOption]>, MetaVarName<"<mode>">,
   HelpText<"SYCL device code module split mode. Valid values:\n"

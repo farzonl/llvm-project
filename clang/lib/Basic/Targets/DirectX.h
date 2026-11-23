@@ -28,6 +28,8 @@ static constexpr LangASMap DirectXAddrSpaceMap = {
 };
 
 class LLVM_LIBRARY_VISIBILITY DirectXTargetInfo : public TargetInfo {
+  BuiltinVaListKind VaListKind = TargetInfo::VoidPtrBuiltinVaList;
+
 public:
   DirectXTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
       : TargetInfo(Triple) {
@@ -70,9 +72,7 @@ public:
     return {};
   }
 
-  BuiltinVaListKind getBuiltinVaListKind() const override {
-    return TargetInfo::VoidPtrBuiltinVaList;
-  }
+  BuiltinVaListKind getBuiltinVaListKind() const override { return VaListKind; }
 
   void adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
               const TargetInfo *Aux) override {
@@ -84,6 +84,7 @@ public:
       PointerAlign = Aux->getPointerAlign(LangAS::Default);
       SizeType = Aux->getSizeType();
       PtrDiffType = Aux->getPtrDiffType(LangAS::Default);
+      VaListKind = Aux->getBuiltinVaListKind();
       resetDataLayout();
     }
     // The static values this addresses do not apply outside of the same thread
