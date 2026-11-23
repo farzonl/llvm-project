@@ -151,6 +151,26 @@ TEST(DirectXWorkgroupTest, RequiresSYCLCapture) {
               "SYCL capture");
 }
 
+TEST(DirectXWorkgroupTest, ValidatesLocalAllocationRecipeFields) {
+  std::string IR = Recipe.str();
+  IR.replace(IR.find("\"dx.workgroup.specializable\""),
+             StringRef("\"dx.workgroup.specializable\"").size(),
+             "\"dx.local.specializable\"");
+  IR.replace(IR.find("!1 = !{i32 0, i32 8}"),
+             StringRef("!1 = !{i32 0, i32 8}").size(),
+             "!1 = !{i32 0, i32 8, i32 2, i32 4}");
+  auto Manifest = manifest();
+  Manifest.Arguments.clear();
+  Manifest.Capture->Offsets.clear();
+  Manifest.Capture->Local.push_back({0, 4, (uint64_t(1) << 32) | 4});
+  std::string Encoded = encodeBase64(recipeBitcode(IR));
+  auto Result = readRecipe(Encoded, Manifest);
+  ASSERT_TRUE(static_cast<bool>(Result)) << toString(Result.takeError());
+  Manifest.Capture->Local[0].Alignment = 16;
+  expectError(readRecipe(Encoded, Manifest), error::ErrorCode::INVALID_BINARY,
+              "local allocation");
+}
+
 TEST(DirectXWorkgroupTest, RejectsMismatchedImageIdentity) {
   std::string Encoded = encodeBase64(recipeBitcode());
   auto Manifest = manifest();

@@ -162,6 +162,43 @@ TEST(DirectXManifestTest, AcceptsUnusedCaptureFields) {
               error::ErrorCode::INVALID_BINARY, "nonempty record");
 }
 
+TEST(DirectXManifestTest, ValidatesLocalCaptureSlotsAndAliases) {
+  auto Object = emptyManifest();
+  auto Slot = [](unsigned Offset, unsigned Alignment, uint64_t Allocation) {
+    return json::Object{{"offset", Offset},
+                        {"alignment", Alignment},
+                        {"allocation", int64_t(Allocation)}};
+  };
+  constexpr uint64_t Token = (uint64_t(1) << 32) | 64;
+  Object["capture"] = json::Object{
+      {"size", 24},
+      {"pointer_size", 8},
+      {"offsets", json::Array{}},
+      {"local", json::Array{Slot(0, 4, Token), Slot(8, 4, Token)}}};
+  auto Manifest = DirectXManifestTy::parse(encode(Object));
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  ASSERT_EQ(Manifest->Capture->Local.size(), 2u);
+  EXPECT_EQ(Manifest->Capture->Local[1].Allocation, Token);
+  for (auto Slots :
+       {json::Array{Slot(1, 4, Token)}, json::Array{Slot(24, 4, Token)},
+        json::Array{Slot(0, 3, Token)}, json::Array{Slot(0, 4, 64)},
+        json::Array{Slot(0, 4, uint64_t(1) << 32)},
+        json::Array{Slot(0, 4, Token), Slot(0, 4, Token)},
+        json::Array{Slot(0, 4, Token), Slot(8, 4, Token + 4)},
+        json::Array{Slot(0, 4, (uint64_t(1) << 32) | 32768),
+                    Slot(8, 4, (uint64_t(2) << 32) | 4)}}) {
+    (*Object.getObject("capture"))["local"] = std::move(Slots);
+    auto Result = DirectXManifestTy::parse(encode(Object));
+    ASSERT_FALSE(static_cast<bool>(Result));
+    consumeError(Result.takeError());
+  }
+  (*Object.getObject("capture"))["local"] = json::Array{Slot(0, 4, Token)};
+  (*Object.getObject("capture"))["offsets"] = json::Array{0};
+  Object["arguments"] = json::Array{buffer(0, "uav")};
+  expectError(DirectXManifestTy::parse(encode(Object)),
+              error::ErrorCode::INVALID_BINARY, "overlaps");
+}
+
 TEST(DirectXManifestTest, ValidatesNarrowCaptureSourceSizes) {
   auto Object = emptyManifest();
   Object["constants"] = constants(8);

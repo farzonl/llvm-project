@@ -16,8 +16,10 @@
 #include "llvm/BinaryFormat/DXContainer.h"
 #include "llvm/Object/OffloadBinary.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <limits>
+#include <map>
 #include <set>
 #include <tuple>
 #include <utility>
@@ -286,7 +288,8 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
     if (!Block)
       return invalid("capture must be an object");
     if (auto Err = checkKeys(
-            *Block, {"size", "pointer_size", "offsets", "sizes"}, "capture"))
+            *Block, {"size", "pointer_size", "offsets", "sizes", "local"},
+            "capture"))
       return std::move(Err);
     auto Size = readU32(Block->get("size"), "capture.size");
     if (!Size)
@@ -333,6 +336,52 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
       End = *Offset + Width;
       Layout.Offsets.push_back(*Offset);
       Layout.Sizes.push_back(Width);
+    }
+    if (const auto *LocalValue = Block->get("local")) {
+      const auto *Local = LocalValue->getAsArray();
+      if (!Local || Local->empty())
+        return invalid("capture.local must be a nonempty array");
+      uint32_t LocalEnd = 0;
+      std::map<uint32_t, std::pair<uint32_t, uint32_t>> Allocations;
+      uint64_t Total = 0;
+      for (const auto &Value : *Local) {
+        const auto *Slot = Value.getAsObject();
+        if (!Slot)
+          return invalid("capture.local requires allocation objects");
+        if (auto Err = checkKeys(*Slot, {"offset", "alignment", "allocation"},
+                                 "capture.local"))
+          return std::move(Err);
+        auto Offset = readU32(Slot->get("offset"), "local.offset");
+        if (!Offset)
+          return Offset.takeError();
+        auto Alignment = readU32(Slot->get("alignment"), "local.alignment");
+        if (!Alignment)
+          return Alignment.takeError();
+        auto Allocation = Slot->getInteger("allocation");
+        if (!Allocation || *Allocation <= 0 || !(uint64_t(*Allocation) >> 32) ||
+            !uint32_t(*Allocation) || uint32_t(*Allocation) > 32768 ||
+            !isPowerOf2_32(*Alignment) || *Alignment < 4 || *Alignment > 16 ||
+            uint32_t(*Allocation) % *Alignment || *Offset % 8 ||
+            *Offset < LocalEnd || *Offset > *Size || 8 > *Size - *Offset)
+          return invalid(
+              "invalid local capture allocation, alignment or offset");
+        for (unsigned I = 0; I < Layout.Offsets.size(); ++I)
+          if (*Offset < Layout.Offsets[I] + Layout.Sizes[I] &&
+              Layout.Offsets[I] < *Offset + 8)
+            return invalid("local capture overlaps a resource or scalar");
+        LocalEnd = *Offset + 8;
+        auto [It, Inserted] = Allocations.emplace(
+            uint64_t(*Allocation) >> 32,
+            std::make_pair(uint32_t(*Allocation), *Alignment));
+        if (!Inserted &&
+            It->second != std::make_pair(uint32_t(*Allocation), *Alignment))
+          return invalid("inconsistent aliased local capture allocations");
+        if (Inserted)
+          Total += uint32_t(*Allocation);
+        if (Total > 32768)
+          return invalid("local capture allocations exceed 32768 bytes");
+        Layout.Local.push_back({*Offset, *Alignment, uint64_t(*Allocation)});
+      }
     }
     Manifest.Capture = std::move(Layout);
   }

@@ -27,6 +27,7 @@
 #include <sycl/__impl/index_space_classes.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -194,6 +195,8 @@ private:
   detail::HandlerImpl &MImpl;
 
   void *requireBuffer(detail::BufferImpl *Buffer, access_mode Mode);
+  std::uint64_t requireLocal(std::size_t Bytes);
+  template <typename, int> friend class local_accessor;
   template <typename, int, access_mode, target> friend class accessor;
 
   friend sycl::detail::ImplUtils;

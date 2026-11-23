@@ -20,7 +20,8 @@ readWorkgroupIR(const object::OffloadBinary &Image,
                 const DirectXManifestTy &Manifest);
 
 Expected<std::unique_ptr<MemoryBuffer>>
-compileWorkgroup(StringRef IR, const std::array<uint32_t, 3> &Shape);
+compileWorkgroup(StringRef IR, const std::array<uint32_t, 3> &Shape,
+                 ArrayRef<uint64_t> LocalAllocations = {});
 
 } // namespace llvm::omp::target::plugin::directx
 

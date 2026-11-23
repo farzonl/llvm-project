@@ -69,8 +69,9 @@ llvm::omp::target::plugin::directx::readWorkgroupIR(
   Function *Kernel = (*Module)->getFunction(Manifest.Entry);
   if (!Kernel || Kernel->isDeclaration() ||
       !Kernel->hasFnAttribute("dx.kernel") ||
-      !Kernel->hasFnAttribute(
-          offloading::directx::WorkgroupSpecializableAttr) ||
+      (!Kernel->hasFnAttribute(
+           offloading::directx::WorkgroupSpecializableAttr) &&
+       !Kernel->hasFnAttribute(offloading::directx::LocalSpecializableAttr)) ||
       !Kernel->hasFnAttribute("hlsl.numthreads") ||
       Kernel->getFnAttribute("hlsl.numthreads").getValueAsString() !=
           shapeString(Manifest.NumThreads))
@@ -124,12 +125,31 @@ llvm::omp::target::plugin::directx::readWorkgroupIR(
     if (!Found)
       return Invalid("capture field does not match the image");
   }
+  for (const auto &Local : Manifest.Capture->Local) {
+    bool Found = false;
+    for (unsigned I = 2; I < Layout->getNumOperands(); ++I) {
+      auto *Field = dyn_cast<MDNode>(Layout->getOperand(I));
+      if (!Field || Field->getNumOperands() != 4)
+        continue;
+      auto *Offset = mdconst::dyn_extract<ConstantInt>(Field->getOperand(0));
+      auto *Width = mdconst::dyn_extract<ConstantInt>(Field->getOperand(1));
+      auto *Marker = mdconst::dyn_extract<ConstantInt>(Field->getOperand(2));
+      auto *Alignment = mdconst::dyn_extract<ConstantInt>(Field->getOperand(3));
+      Found |= Offset && Width && Marker && Alignment &&
+               Offset->getZExtValue() == Local.Offset &&
+               Width->getZExtValue() == 8 && Marker->getZExtValue() == 2 &&
+               Alignment->getZExtValue() == Local.Alignment;
+    }
+    if (!Found)
+      return Invalid("local allocation does not match the capture recipe");
+  }
   return Buffer;
 }
 
 Expected<std::unique_ptr<MemoryBuffer>>
 llvm::omp::target::plugin::directx::compileWorkgroup(
-    StringRef IR, const std::array<uint32_t, 3> &Shape) {
+    StringRef IR, const std::array<uint32_t, 3> &Shape,
+    ArrayRef<uint64_t> LocalAllocations) {
   uint64_t Product = 1;
   for (unsigned I = 0; I < 3; ++I) {
     if (!Shape[I] || Shape[I] > (I == 2 ? 64u : 1024u))
@@ -140,6 +160,19 @@ llvm::omp::target::plugin::directx::compileWorkgroup(
   if (Product > 1024)
     return error::createOffloadError(error::ErrorCode::INVALID_ARGUMENT,
                                      "DirectX workgroup exceeds 1024 threads");
+  LLVMContext Context;
+  auto Module = parseBitcodeFile(MemoryBufferRef(IR, "workgroup"), Context);
+  if (!Module)
+    return error::createOffloadError(error::ErrorCode::BACKEND_FAILURE,
+                                     "DirectX workgroup recipe failed: %s",
+                                     toString(Module.takeError()).c_str());
+  Function *Entry = nullptr;
+  for (Function &F : **Module)
+    if (F.hasFnAttribute("dx.kernel"))
+      Entry = &F;
+  if (!Entry)
+    return error::createOffloadError(error::ErrorCode::INVALID_BINARY,
+                                     "workgroup recipe has no kernel");
   SmallVector<StringRef> Paths;
   if (const char *Path = std::getenv("OFFLOAD_DIRECTX_COMPILER_PATH"))
     Paths.push_back(Path);
@@ -229,17 +262,26 @@ llvm::omp::target::plugin::directx::compileWorkgroup(
         Tool.c_str(), Status, Message.c_str(), Diagnostics.c_str());
   };
   std::string Option = "-dxil-kernel-numthreads=" + shapeString(Shape);
-  if (auto Err = Run(*Opt, {"-dxil-kernel-abi", Option, Input, "-o", Kernel}))
+  std::string LocalOption = "-dxil-kernel-local-allocations=";
+  for (uint64_t Token : LocalAllocations) {
+    if (LocalOption.back() != '=')
+      LocalOption += ',';
+    LocalOption += std::to_string(Token);
+  }
+  SmallVector<StringRef> Options{"-dxil-kernel-abi"};
+  if (Entry->getFnAttribute("hlsl.numthreads").getValueAsString() !=
+      shapeString(Shape))
+    Options.push_back(Option);
+  if (!LocalAllocations.empty())
+    Options.push_back(LocalOption);
+  Options.append({Input, "-o", Kernel});
+  if (auto Err = Run(*Opt, Options))
     return std::move(Err);
   if (auto Err = Run(*LLC, {"-filetype=obj", Kernel, "-o", Unsigned}))
     return std::move(Err);
   std::string ValidatorOutput = "-o=" + Signed;
   if (auto Err = Run(*Validator, {ValidatorOutput, Unsigned}))
     return std::move(Err);
-  LLVMContext Context;
-  auto Module = parseBitcodeFile(MemoryBufferRef(IR, "workgroup"), Context);
-  if (!Module)
-    return Module.takeError();
   std::string Image = "--image=file=" + Signed + ",kind=sycl,triple=" +
                       (*Module)->getTargetTriple().str() +
                       ",directx-metadata=" + Kernel;

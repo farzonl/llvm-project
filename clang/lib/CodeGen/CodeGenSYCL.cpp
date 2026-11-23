@@ -202,11 +202,20 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
             llvm::SmallVector<llvm::Metadata *> FieldLayout{
                 Integer(Base),
                 Integer(Ctx.getTypeSizeInChars(Type).getQuantity())};
-            if (Field)
+            if (Field) {
               for (const auto *Annotation :
                    Field->specific_attrs<AnnotateAttr>())
                 if (Annotation->getAnnotation() == "sycl.accessor.pointer")
                   FieldLayout.push_back(Integer(1));
+                else if (Annotation->getAnnotation() == "sycl.local.pointer") {
+                  FieldLayout.push_back(Integer(2));
+                  FieldLayout.push_back(
+                      Integer(Ctx.getTypeAlignInChars(Type->getPointeeType())
+                                  .getQuantity()));
+                  Fn->addFnAttr(
+                      llvm::offloading::directx::LocalSpecializableAttr);
+                }
+            }
             Layout.push_back(llvm::MDNode::get(getLLVMContext(), FieldLayout));
           }
         };

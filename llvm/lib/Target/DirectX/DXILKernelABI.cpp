@@ -41,8 +41,84 @@ cl::list<unsigned> WorkgroupSize(
     cl::desc(
         "Specialize an eligible DirectX kernel to x,y,z workgroup dimensions"));
 
+cl::list<uint64_t> LocalAllocations(
+    "dxil-kernel-local-allocations", cl::CommaSeparated, cl::Hidden,
+    cl::desc("Specialize captured local allocations (identity:32, bytes:32)"));
+
 void fail(const Twine &Message) {
   reportFatalUsageError("DirectX C++ kernel ABI: " + Message);
+}
+
+bool checkLocalPointer(Value *Pointer, SmallPtrSetImpl<Value *> &Seen) {
+  if (!Seen.insert(Pointer).second)
+    return true;
+  for (User *Use : Pointer->users()) {
+    if (isa<GetElementPtrInst, AddrSpaceCastInst>(Use)) {
+      if (!checkLocalPointer(Use, Seen))
+        return false;
+    } else if (auto *Load = dyn_cast<LoadInst>(Use)) {
+      if (Load->isAtomic() || Load->isVolatile() ||
+          (!Load->getType()->isIntegerTy(32) &&
+           !Load->getType()->isFloatTy())) {
+        fail("local accessors currently require non-atomic 32-bit scalar "
+             "accesses");
+        return false;
+      }
+    } else if (auto *Store = dyn_cast<StoreInst>(Use)) {
+      Type *Type = Store->getValueOperand()->getType();
+      if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
+          Store->isVolatile() ||
+          (!Type->isIntegerTy(32) && !Type->isFloatTy())) {
+        fail("local accessors currently require non-atomic 32-bit scalar "
+             "accesses");
+        return false;
+      }
+    } else {
+      fail("local accessor pointers may only be indexed, loaded, or stored");
+      return false;
+    }
+  }
+  return true;
+}
+
+void replaceLocalPointer(Value *Old, Value *Pointer, const DataLayout &Layout) {
+  for (User *Use : make_early_inc_range(Old->users())) {
+    if (auto *Cast = dyn_cast<AddrSpaceCastInst>(Use)) {
+      replaceLocalPointer(Cast, Pointer, Layout);
+      Cast->eraseFromParent();
+    } else if (auto *GEP = dyn_cast<GetElementPtrInst>(Use)) {
+      unsigned Bits = Layout.getIndexSizeInBits(GEP->getPointerAddressSpace());
+      APInt ConstantOffset(Bits, 0);
+      SmallMapVector<Value *, APInt, 4> Variables;
+      if (!GEP->collectOffset(Layout, Bits, Variables, ConstantOffset) ||
+          !ConstantOffset.srem(APInt(Bits, 4)).isZero() ||
+          llvm::any_of(Variables, [Bits](const auto &Variable) {
+            return !Variable.second.srem(APInt(Bits, 4)).isZero();
+          }))
+        fail("local accessor indexing requires four-byte-aligned strides");
+      IRBuilder<> Builder(GEP);
+      Value *Index =
+          Builder.getInt32(ConstantOffset.sdiv(APInt(Bits, 4)).getSExtValue());
+      for (auto &[Variable, Scale] : Variables)
+        Index = Builder.CreateAdd(
+            Index,
+            Builder.CreateMul(
+                Builder.CreateIntCast(Variable, Builder.getInt32Ty(), true),
+                Builder.getInt32(Scale.sdiv(APInt(Bits, 4)).getSExtValue())));
+      Value *Address;
+      if (auto *Global = dyn_cast<GlobalVariable>(Pointer))
+        Address = Builder.CreateGEP(Global->getValueType(), Global,
+                                    {Builder.getInt32(0), Index});
+      else
+        Address = Builder.CreateGEP(Builder.getInt32Ty(), Pointer, Index);
+      if (auto *Instruction = dyn_cast<llvm::Instruction>(Address))
+        Instruction->copyMetadata(*GEP);
+      replaceLocalPointer(GEP, Address, Layout);
+      GEP->eraseFromParent();
+    } else {
+      Use->replaceUsesOfWith(Old, Pointer);
+    }
+  }
 }
 
 bool checkPointer(Value &Arg, bool ReadOnly) {
@@ -173,6 +249,7 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   SmallVector<uint32_t> FieldOffsets;
   SmallVector<uint32_t> FieldSizes;
   SmallVector<Type *> FieldTypes;
+  SmallVector<uint32_t> LocalAlignments(NumFields, 0);
   SmallVector<std::pair<uint32_t, ArrayType *>> CaptureArrays;
   json::Array Offsets;
   json::Array Sizes;
@@ -180,7 +257,7 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   for (unsigned I = 0; I < NumFields; ++I) {
     auto *Field = dyn_cast<MDNode>(MD->getOperand(I + 2));
     bool ValidField =
-        Field && (Field->getNumOperands() == 2 || Field->getNumOperands() == 3);
+        Field && Field->getNumOperands() >= 2 && Field->getNumOperands() <= 4;
     auto Offset = ValidField ? Integer(Field->getOperand(0)) : std::nullopt;
     auto Size = ValidField ? Integer(Field->getOperand(1)) : std::nullopt;
     if (!Offset || !Size || *Offset < End || *Offset >= *Bytes ||
@@ -226,7 +303,17 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       fail("capture layout does not match record field offsets");
       return nullptr;
     }
-    if (Field->getNumOperands() == 3) {
+    if (Field->getNumOperands() == 4) {
+      auto Marker = Integer(Field->getOperand(2));
+      auto Alignment = Integer(Field->getOperand(3));
+      if (!Marker || *Marker != 2 || !Alignment || !isPowerOf2_32(*Alignment) ||
+          *Alignment < 4 || *Alignment > 16 || !Ty->isPointerTy() ||
+          Ty->getPointerAddressSpace() != 3 || *Size != 8 || *Offset % 8) {
+        fail("local captures require an aligned 64-bit local pointer field");
+        return nullptr;
+      }
+      LocalAlignments[I] = *Alignment;
+    } else if (Field->getNumOperands() == 3) {
       auto AccessorPointer = Integer(Field->getOperand(2));
       if (!AccessorPointer || *AccessorPointer != 1 || !Ty->isPointerTy()) {
         fail("accessor capture marker requires a pointer field");
@@ -416,7 +503,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   SmallVector<Value *> Worklist{Kernel.getArg(0)};
   for (Instruction &I : make_early_inc_range(instructions(Kernel)))
     if (auto *Annotation = dyn_cast<IntrinsicInst>(&I))
-      removePointerAnnotation(*Annotation, "sycl.accessor.pointer");
+      if (!removePointerAnnotation(*Annotation, "sycl.accessor.pointer"))
+        removePointerAnnotation(*Annotation, "sycl.local.pointer");
   SmallVector<Instruction *> Addresses;
   SmallPtrSet<Value *, 16> Seen;
   while (!Worklist.empty()) {
@@ -448,7 +536,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       Type *Ty = Load->getType();
       if (Ty->isPointerTy()) {
         unsigned AS = Ty->getPointerAddressSpace();
-        if ((AS != 0 && AS != 4) || FieldSizes[Field] != 8 || Offset % 8) {
+        if ((!LocalAlignments[Field] && AS != 0 && AS != 4) ||
+            FieldSizes[Field] != 8 || Offset % 8) {
           fail("captured buffers require 64-bit default or generic pointers");
           return nullptr;
         }
@@ -462,6 +551,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
         return nullptr;
       }
       Loads[Field].push_back(Load);
+      if (LocalAlignments[Field])
+        continue;
       if (Load->getType()->isPointerTy()) {
         if (!checkPointer(*Load, false))
           return nullptr;
@@ -481,6 +572,71 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     }
   }
   SmallVector<unsigned> UsedFields;
+  json::Array Locals;
+  DenseMap<uint32_t, std::pair<uint64_t, GlobalVariable *>> Allocations;
+  unsigned LocalIndex = 0;
+  uint64_t LocalBytes = 0;
+  for (unsigned I = 0; I < NumFields; ++I) {
+    if (!LocalAlignments[I] || Loads[I].empty())
+      continue;
+    uint64_t Token = (uint64_t(LocalIndex + 1) << 32) | LocalAlignments[I];
+    if (!LocalAllocations.empty()) {
+      if (LocalIndex >= LocalAllocations.size()) {
+        fail("local allocation count does not match captured slots");
+        return nullptr;
+      }
+      Token = LocalAllocations[LocalIndex];
+    }
+    ++LocalIndex;
+    uint32_t Identity = Token >> 32;
+    uint32_t Bytes = uint32_t(Token);
+    if (!Identity || !Bytes || Bytes > 32768 || Bytes % LocalAlignments[I]) {
+      fail("local allocations require an identity and aligned nonzero bytes "
+           "within the 32768-byte workgroup limit");
+      return nullptr;
+    }
+    auto &Allocation = Allocations[Identity];
+    if (Allocation.second &&
+        (Allocation.first != Token ||
+         Allocation.second->getAlign() != Align(LocalAlignments[I]))) {
+      fail("aliased local allocation sizes and alignments must match");
+      return nullptr;
+    }
+    if (!Allocation.second) {
+      LocalBytes = alignTo(LocalBytes, LocalAlignments[I]) + Bytes;
+      if (LocalBytes > 32768) {
+        fail("local allocations exceed the 32768-byte workgroup limit");
+        return nullptr;
+      }
+      auto *Ty =
+          ArrayType::get(Type::getInt32Ty(Kernel.getContext()), Bytes / 4);
+      auto *Global = new GlobalVariable(
+          *Kernel.getParent(), Ty, false, GlobalValue::InternalLinkage,
+          PoisonValue::get(Ty), "sycl.local", nullptr,
+          GlobalValue::NotThreadLocal, 3);
+      Global->setAlignment(Align(LocalAlignments[I]));
+      Allocation = {Token, Global};
+    }
+    for (auto *Load : Loads[I]) {
+      SmallPtrSet<Value *, 16> Seen;
+      if (!checkLocalPointer(Load, Seen))
+        return nullptr;
+      IRBuilder<> Builder(Load);
+      Value *Base = Builder.CreateInBoundsGEP(
+          Allocation.second->getValueType(), Allocation.second,
+          {Builder.getInt32(0), Builder.getInt32(0)});
+      replaceLocalPointer(Load, Base, Layout);
+      Load->eraseFromParent();
+    }
+    Loads[I].clear();
+    Locals.push_back(json::Object{{"offset", FieldOffsets[I]},
+                                  {"alignment", LocalAlignments[I]},
+                                  {"allocation", int64_t(Token)}});
+  }
+  if (!LocalAllocations.empty() && LocalAllocations.size() != LocalIndex) {
+    fail("local allocation count does not match captured slots");
+    return nullptr;
+  }
   bool HasNarrowIntegers = false;
   for (unsigned I = 0; I < NumFields; ++I) {
     if (Loads[I].empty())
@@ -536,6 +692,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       {"size", *Bytes}, {"pointer_size", 8}, {"offsets", std::move(Offsets)}};
   if (HasNarrowIntegers)
     Capture["sizes"] = std::move(Sizes);
+  if (!Locals.empty())
+    Capture["local"] = std::move(Locals);
   Kernel.eraseFromParent();
   return Flat;
 }
@@ -683,6 +841,7 @@ bool lowerKernel(Module &M) {
       M.getContext(), Kernel->getAttributes().getFnAttrs(), {}, {}));
   Entry->removeFnAttr("dx.kernel");
   Entry->removeFnAttr(offloading::directx::WorkgroupSpecializableAttr);
+  Entry->removeFnAttr(offloading::directx::LocalSpecializableAttr);
   // Resource-backed memory is no longer accessed through function arguments.
   Entry->removeFnAttr(Attribute::Memory);
   Entry->copyMetadata(Kernel, 0);

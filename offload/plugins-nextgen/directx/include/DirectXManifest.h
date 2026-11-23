@@ -56,9 +56,15 @@ struct DirectXConstantBindingTy {
 };
 
 struct DirectXCaptureLayoutTy {
+  struct LocalAllocation {
+    uint32_t Offset;
+    uint32_t Alignment;
+    uint64_t Allocation;
+  };
   uint32_t Size = 0;
   SmallVector<uint32_t> Offsets;
   SmallVector<uint32_t> Sizes{};
+  SmallVector<LocalAllocation> Local{};
 
   uint32_t getFieldSize(unsigned Index, uint32_t LegacySize) const {
     return Sizes.empty() ? LegacySize : Sizes[Index];

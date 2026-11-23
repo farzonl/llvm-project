@@ -66,6 +66,7 @@ struct HandlerImpl {
     bool Writes;
   };
   std::vector<BufferRequirement> MBufferRequirements;
+  uint32_t MLocalAllocations = 0;
 };
 
 } // namespace detail

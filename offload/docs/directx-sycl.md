@@ -1020,6 +1020,88 @@ and seven measurement-reporting unit tests pass. The next workgroup milestone
 is real local-accessor allocation and its compiler/runtime ABI, followed by
 copy/event and scheduling support.
 
+### Runtime-sized local-accessor execution
+
+One-, two-, and three-dimensional `local_accessor` objects now carry checked
+ranges and opaque allocation tokens. Device captures retain true local-address-
+space pointers. Compiler-assigned capture slots transport requested bytes and
+element alignment separately from buffer resources and root constants.
+Copies alias the same allocation; independent accessors remain disjoint.
+Host dereferencing is explicitly rejected.
+
+The existing prepared-IR specialization path now also compiles actual requested
+local allocations into static groupshared arrays. Its cache key includes
+workgroup shape and the ordered allocation sizes/identities. Every new variant
+is compiled, signed, reflected, and checked against the portable 32 KiB limit,
+including static storage already in the shader. Local slots always require a
+matching variant; the minimally sized packaged image is never a fallback for
+an allocation-bearing submission. Fixed workgroup kernels can specialize local
+storage without allowing their workgroup dimensions to change.
+
+Supported element types are mutable trivial types aligned from 4 through
+16 bytes; supported memory operations are nonvolatile, non-atomic 32-bit
+integer/float scalar accesses, including fields of trivial aggregates.
+General vectors, narrow/wide local operations, nontrivial construction, the
+zero-dimensional API, properties, and complete local-accessor conformance
+remain outside this increment. Submissions require `nd_range`; single-task
+and implicit-range kernels are rejected. This allocation implementation is
+currently DirectX-only and does not change other backends.
+
+The native test exercises 1D/2D/3D storage, independent integer/float/16-byte-
+aligned aggregate allocations, copied-accessor aliasing, cross-lane barriers,
+multiple workgroups, changing local sizes and storage sizes, and fixed-shape
+kernels. It checks the exact 32768-byte boundary, empty/overflowing/oversized
+allocations, aggregate limits, invalid single-task use, cached launches with
+compiler tools deliberately unavailable, and explicit failure for an uncached
+allocation with those tools unavailable.
+
+Rebuild the compiler, public headers, and paired runtime DLLs together, then
+use the Windows build variables above:
+
+```bat
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\local_accessor.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\local-accessor.exe" /Fo:"%CTS_BUILD%\local-accessor.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+for %D in (0 1 2) do "%CTS_BUILD%\local-accessor.exe" %D
+```
+
+The next workgroup tasks are device events, asynchronous group copies and waits,
+and hierarchical group execution. Their CTS assertions are not replaced with
+smoke tests or excluded to claim a category pass.
+
+The native local-accessor regression passes on NVIDIA, AMD, and Intel, as do
+the existing buffer, pointer/barrier, and workgroup-specialization regressions.
+Nine focused compiler tests, 50 DirectX argument/manifest/shader/recipe unit
+tests, 28 queue unit tests, and seven measurement-reporting unit tests pass.
+
+The unchanged eight-category CTS rebuild preserves **109/109 cases and
+12,562/12,562 assertions per vendor** across the six previously passing
+categories. Group and ND-item still fail compilation and execute no tests.
+Their diagnostics now reach missing `async_work_group_copy`, `wait_for`,
+`sycl::byte`, and, for group tests, `parallel_for_work_group`.
+The confirmed fully passing category count remains **6/97**; the other 89
+configured categories were not measured in this run.
+
+Refresh the paired DLLs and reproduce this measurement with:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\local-accessor-final" ^
+  --targets test_group test_nd_item test_item test_id ^
+    test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
@@ -1048,8 +1130,9 @@ without reporting those results as CTS passes.
 
 ## Workgroup and local-memory specialization requirements
 
-Uniform local-shape regeneration is implemented by the bounded prepared-IR
-recipe above. This section describes the remaining general local-memory and
+Uniform local-shape and bounded local-allocation regeneration are implemented
+by the prepared-IR recipe above. This section describes the remaining general
+local-memory and
 deployment contract, **not a claim that all specialization features work**.
 
 ### Preserve fixed AOT execution
@@ -1084,7 +1167,8 @@ specializable workgroup dimensions, the specialization input, and the supported
 target requirements. Non-executable templates must never be passed to the
 current executable-only program loader.
 
-Local accessors and future OpenCL local-memory arguments need stable
+The local-accessor slots above establish the bounded SYCL path. Future OpenCL
+local-memory arguments and broader local-element support need stable
 compiler-assigned allocation slots. A slot carries requested bytes and required
 alignment; the compiler determines its device-local layout. Host accessor
 implementation pointers must not be mistaken for device allocation tokens or

@@ -47,6 +47,9 @@ void handler::submitKernelImpl(detail::DeviceKernelInfo &KernelInfo,
 }
 
 void handler::setKernelRange(const detail::UnifiedRangeView &Range) {
+  if (MImpl.MLocalAllocations && !Range.MLocalSize)
+    throw exception(make_error_code(errc::invalid),
+                    "Local accessors require an nd_range kernel");
   MImpl.MRange = detail::convertToOlRange(Range, MImpl.MQueue.getBackend());
 }
 
@@ -107,6 +110,16 @@ void handler::fillImpl(void *Ptr, const void *Pattern, std::size_t PatternSize,
     return MImpl.MQueue.fill(Ptr, MImpl.MFillPattern.data(), PatternSize, Count,
                              detail::getSyclObjImpls(MDepEvents));
   };
+}
+
+std::uint64_t handler::requireLocal(std::size_t Bytes) {
+  if (MImpl.MQueue.getBackend() != backend::ext_llvm_directx)
+    throw exception(make_error_code(errc::feature_not_supported),
+                    "Local accessor allocation requires the DirectX backend");
+  if (!Bytes || Bytes > 32768 || MImpl.MLocalAllocations == INT32_MAX)
+    throw exception(make_error_code(errc::invalid),
+                    "Invalid local accessor allocation size or count");
+  return (std::uint64_t(++MImpl.MLocalAllocations) << 32) | Bytes;
 }
 
 _LIBSYCL_END_NAMESPACE_SYCL

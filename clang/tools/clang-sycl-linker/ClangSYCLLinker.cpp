@@ -884,8 +884,10 @@ splitDeviceCode(std::unique_ptr<Module> M, StringRef LinkedBitcodeFile,
     if (Part->getTargetTriple().isDXIL()) {
       for (Function &F : *Part) {
         for (Instruction &I : make_early_inc_range(instructions(F)))
-          if (auto *Annotation = dyn_cast<IntrinsicInst>(&I))
-            removePointerAnnotation(*Annotation, "sycl.accessor.pointer");
+          if (auto *Annotation = dyn_cast<IntrinsicInst>(&I)) {
+            if (!removePointerAnnotation(*Annotation, "sycl.accessor.pointer"))
+              removePointerAnnotation(*Annotation, "sycl.local.pointer");
+          }
         if (!F.isDeclaration() && !F.hasFnAttribute("dx.kernel") &&
             !F.hasFnAttribute(Attribute::NoInline) &&
             !F.hasFnAttribute("dontcall-error"))
@@ -1053,7 +1055,8 @@ static Error linkDirectXImages(ArrayRef<SplitModule> Modules,
     if (!PreparedModule)
       return PreparedModule.takeError();
     for (Function &F : **PreparedModule)
-      if (F.hasFnAttribute(offloading::directx::WorkgroupSpecializableAttr))
+      if (F.hasFnAttribute(offloading::directx::WorkgroupSpecializableAttr) ||
+          F.hasFnAttribute(offloading::directx::LocalSpecializableAttr))
         Image.StringData[offloading::directx::WorkgroupIRKey] =
             Saver.save(encodeBase64((*PreparedBuffer)->getBuffer()));
     Image.Image = MemoryBuffer::getMemBufferCopy(Entry.getImage());

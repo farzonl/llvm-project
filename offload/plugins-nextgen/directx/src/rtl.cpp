@@ -30,6 +30,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <vector>
 
 namespace llvm::omp::target::plugin {
 namespace {
@@ -174,13 +175,13 @@ struct DirectXKernelTy final : GenericKernelTy {
   DirectXImageTy *Program = nullptr;
   uint32_t NumThreads = 0;
   mutable std::mutex VariantsMutex;
-  mutable std::map<std::array<uint32_t, 3>,
-                   std::shared_ptr<DirectXWorkgroupVariantTy>>
+  using VariantKey = std::pair<std::array<uint32_t, 3>, std::vector<uint64_t>>;
+  mutable std::map<VariantKey, std::shared_ptr<DirectXWorkgroupVariantTy>>
       Variants;
 
   Expected<std::shared_ptr<DirectXWorkgroupVariantTy>>
-  getVariant(DirectXDeviceTy &Device,
-             const std::array<uint32_t, 3> &Shape) const;
+  getVariant(DirectXDeviceTy &Device, const std::array<uint32_t, 3> &Shape,
+             const std::vector<uint64_t> &LocalAllocations) const;
 
   DirectXKernelTy(StringRef Name) : GenericKernelTy(Name) {}
 
@@ -1076,16 +1077,18 @@ struct DirectXPluginContextTy final : PluginContextTy {
 };
 
 Expected<std::shared_ptr<DirectXWorkgroupVariantTy>>
-DirectXKernelTy::getVariant(DirectXDeviceTy &Device,
-                            const std::array<uint32_t, 3> &Shape) const {
+DirectXKernelTy::getVariant(
+    DirectXDeviceTy &Device, const std::array<uint32_t, 3> &Shape,
+    const std::vector<uint64_t> &LocalAllocations) const {
   if (!Program->WorkgroupIR)
     return Plugin::error(ErrorCode::INVALID_ARGUMENT,
                          "DirectX group size must match compiled numthreads");
   std::lock_guard<std::mutex> Lock(VariantsMutex);
-  if (auto It = Variants.find(Shape); It != Variants.end())
+  VariantKey Key{Shape, LocalAllocations};
+  if (auto It = Variants.find(Key); It != Variants.end())
     return It->second;
-  auto Package =
-      directx::compileWorkgroup(Program->WorkgroupIR->getBuffer(), Shape);
+  auto Package = directx::compileWorkgroup(Program->WorkgroupIR->getBuffer(),
+                                           Shape, LocalAllocations);
   if (!Package)
     return Package.takeError();
   auto Data = readProgram((*Package)->getBuffer());
@@ -1093,10 +1096,23 @@ DirectXKernelTy::getVariant(DirectXDeviceTy &Device,
     return Data.takeError();
   if (Data->Manifest.Entry != Program->Manifest.Entry ||
       Data->Manifest.NumThreads != Shape || !Data->Manifest.Capture ||
-      Data->Manifest.Capture->Size != Program->Manifest.Capture->Size)
+      Data->Manifest.Capture->Size != Program->Manifest.Capture->Size ||
+      Data->Manifest.Capture->Offsets != Program->Manifest.Capture->Offsets ||
+      Data->Manifest.Capture->Sizes != Program->Manifest.Capture->Sizes ||
+      Data->Manifest.Capture->Local.size() != LocalAllocations.size())
     return Plugin::error(ErrorCode::INVALID_BINARY,
                          "specialized DirectX image does not match the kernel");
-  if (Data->StaticSharedMemory != Program->StaticSharedMemory)
+  for (unsigned I = 0; I < LocalAllocations.size(); ++I) {
+    const auto &Local = Data->Manifest.Capture->Local[I];
+    const auto &Original = Program->Manifest.Capture->Local[I];
+    if (Local.Offset != Original.Offset ||
+        Local.Alignment != Original.Alignment ||
+        Local.Allocation != LocalAllocations[I])
+      return Plugin::error(ErrorCode::INVALID_BINARY,
+                           "specialized DirectX local allocation mismatch");
+  }
+  if (LocalAllocations.empty() &&
+      Data->StaticSharedMemory != Program->StaticSharedMemory)
     return unsupported(
         "specialization that changes static shared-memory usage");
   if (auto Err = directx::checkDeviceCapabilities(Data->Manifest,
@@ -1118,7 +1134,7 @@ DirectXKernelTy::getVariant(DirectXDeviceTy &Device,
   if (!Variant->Pipeline)
     return Plugin::error(ErrorCode::BACKEND_FAILURE,
                          "DirectX device returned no specialized pipeline");
-  Variants.emplace(Shape, Variant);
+  Variants.emplace(std::move(Key), Variant);
   return Variant;
 }
 
@@ -1156,8 +1172,38 @@ Error DirectXKernelTy::launchImpl(GenericDeviceTy &Device,
   ComPtr<ID3D12RootSignature> LaunchRoot = Program->RootSignature;
   std::shared_ptr<DirectXWorkgroupVariantTy> Variant;
   std::array<uint32_t, 3> Shape{NumThreads[0], NumThreads[1], NumThreads[2]};
-  if (Shape != Program->Manifest.NumThreads) {
-    auto Result = getVariant(DXDevice, Shape);
+  std::vector<uint64_t> LocalAllocations;
+  if (Program->Manifest.Capture && !Program->Manifest.Capture->Local.empty()) {
+    if (!Args.Args[0] || Args.ArgSizes[0] != Program->Manifest.Capture->Size)
+      return Plugin::error(
+          ErrorCode::INVALID_SIZE,
+          "local allocations require a complete capture record");
+    std::map<uint32_t, std::pair<uint32_t, uint32_t>> Unique;
+    uint64_t Total = 0;
+    for (const auto &Local : Program->Manifest.Capture->Local) {
+      uint64_t Token;
+      std::memcpy(&Token,
+                  static_cast<const char *>(Args.Args[0]) + Local.Offset, 8);
+      uint32_t Identity = Token >> 32, Bytes = uint32_t(Token);
+      if (!Identity || !Bytes || Bytes > 32768 || Bytes % Local.Alignment)
+        return Plugin::error(
+            ErrorCode::INVALID_SIZE,
+            "invalid DirectX local allocation size or identity");
+      auto [It, Inserted] =
+          Unique.emplace(Identity, std::make_pair(Bytes, Local.Alignment));
+      if (!Inserted && It->second != std::make_pair(Bytes, Local.Alignment))
+        return Plugin::error(ErrorCode::INVALID_ARGUMENT,
+                             "inconsistent aliased DirectX local allocations");
+      if (Inserted)
+        Total = alignTo(Total, Local.Alignment) + Bytes;
+      if (Total > 32768)
+        return Plugin::error(ErrorCode::INVALID_SIZE,
+                             "DirectX local allocations exceed 32768 bytes");
+      LocalAllocations.push_back(Token);
+    }
+  }
+  if (Shape != Program->Manifest.NumThreads || !LocalAllocations.empty()) {
+    auto Result = getVariant(DXDevice, Shape, LocalAllocations);
     if (!Result)
       return Result.takeError();
     Variant = std::move(*Result);

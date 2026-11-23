@@ -84,6 +84,47 @@ forces UAV bindings so read/write aliases can share a resource. This marker
 and its recognized pointer annotation are removed before DXIL emission; they
 do not change the manifest ABI.
 
+Local accessors use separate capture-field metadata
+`!{i32 offset, i32 8, i32 2, i32 alignment}`. These fields contain opaque
+64-bit allocation tokens, not resource addresses. The upper 32 bits identify
+an allocation within the command group; the lower 32 bits request its byte
+size. Copies retain their allocation identity and therefore alias the same
+groupshared storage. Independent accessors have distinct identities even
+when their sizes match. Alignment comes from the device element type and is
+currently restricted to powers of two from 4 through 16.
+
+The optional `capture.local` array records the used slots in capture-offset
+order, independently of resource/scalar `offsets`:
+
+```json
+"local": [{"offset": 0, "alignment": 4, "allocation": 4294967360}]
+```
+
+Here identity 1 requests 64 bytes. Local slots must be aligned eight-byte
+capture fields, ordered, disjoint, and outside resource/scalar fields.
+Aliased slots must agree on size and alignment. The runtime validates the
+complete capture before reading these tokens; it never resolves them as
+buffer allocations or copies them into root constants.
+
+`dx.local.specializable` retains prepared IR even for a fixed workgroup.
+`-dxil-kernel-local-allocations=` specializes the ordered used slots into
+separate groupshared arrays, coalescing aliases. The initial packaged image
+uses minimal aligned allocations and is never dispatched for a kernel with
+local slots: a matching compiled/signed variant is mandatory even when its
+workgroup shape equals the packaged shape. Missing compiler tools fail
+explicitly. Fixed workgroup dimensions remain fixed; local-size changes do
+not permit workgroup reshaping.
+
+Variant cache keys include native workgroup dimensions and the ordered local
+tokens, so different allocation sizes or alias relationships cannot reuse an
+incompatible image. Resource addresses, ordinary scalars, global ranges, and
+offsets are not specialization inputs. Each produced image is reflected and
+validated again, including its total static groupshared storage and the
+32768-byte limit; local allocations do not bypass existing shader validation.
+Current lowering supports non-atomic, nonvolatile 32-bit integer/float scalar
+accesses, including such fields in trivial aggregates. Narrow, wide, vector
+and general escaping local-pointer operations remain unsupported.
+
 DirectX SYCL splitting keeps globals reachable from the kernel rather than
 rooting every non-discardable host global. Constructors/destructors that can
 affect those globals, their associated data, and transitive dependencies are
