@@ -142,7 +142,8 @@ static void checkEventsPlatformMatch(const std::vector<EventImplPtr> &Events,
 
 void QueueImpl::setKernelLaunchParams(std::vector<EventImplPtr> &&Events,
                                       const detail::UnifiedRangeView &Range) {
-  setKernelLaunchParams(std::move(Events), convertToOlRange(Range));
+  setKernelLaunchParams(std::move(Events),
+                        convertToOlRange(Range, getBackend()));
   MCurrentSubmitInfo.GlobalOffset = convertToOlOffset(Range);
 }
 

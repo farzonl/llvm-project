@@ -15,6 +15,84 @@ import subprocess
 import sys
 
 
+def parse_test_totals(text):
+    passed = re.search(
+        r"^All tests passed \((\d+) assertions? in (\d+) test cases?\)[ \t]*\r?$",
+        text, re.MULTILINE,
+    )
+    if passed:
+        assertions, cases = map(int, passed.groups())
+        return {
+            name: {"total": count, "passed": count, "failed": 0,
+                   "failed_as_expected": 0}
+            for name, count in (("assertions", assertions), ("test_cases", cases))
+        }
+    totals = {}
+    for label, body in re.findall(
+        r"^(test cases|assertions):\s*([^\n]+)", text, re.MULTILINE
+    ):
+        columns = [column.strip() for column in body.split("|")]
+        counts = {"passed": 0, "failed": 0, "failed_as_expected": 0}
+        if columns[0] == "- none -":
+            counts["total"] = 0
+        elif columns[0].isdigit():
+            counts["total"] = int(columns[0])
+        else:
+            return None
+        for column in columns[1:]:
+            match = re.fullmatch(r"(\d+) (passed|failed|failed as expected)", column)
+            if not match:
+                return None
+            counts[match[2].replace(" ", "_")] = int(match[1])
+        if counts["total"] != sum(counts[key] for key in
+                                  ("passed", "failed", "failed_as_expected")):
+            return None
+        totals[label.replace(" ", "_")] = counts
+    return totals if set(totals) == {"test_cases", "assertions"} else None
+
+
+def summarize(results, configured, devices):
+    summary = {
+        "compiled_categories": sum(
+            entry["compile"]["status"] == "passed" for entry in results
+        ),
+        "executable_categories": sum(
+            entry.get("executable_build", {}).get("status") == "passed"
+            for entry in results
+        ),
+        "categories_passing_all_devices": sum(
+            len(entry["runs"]) == len(devices) and
+            all(run["status"] == "passed" for run in entry["runs"])
+            for entry in results
+        ),
+        "unmeasured_categories": configured - len(results),
+        "per_device": {},
+    }
+    for device in devices:
+        runs = [run for entry in results for run in entry["runs"]
+                if run["device"] == device]
+        known = [run["test_totals"] for run in runs if run.get("test_totals")]
+        summary["per_device"][device] = {
+            "categories_passed": sum(run["status"] == "passed" for run in runs),
+            "categories_failed": sum(run["status"] == "failed" for run in runs),
+            "infrastructure_failures": sum(
+                run["status"] == "infrastructure_failure" for run in runs
+            ),
+            "categories_not_run": len(results) - len(runs),
+            "runs_with_totals": len(known),
+            "runs_without_totals": len(runs) - len(known),
+            "counts_complete": bool(runs) and len(known) == len(runs),
+            **{
+                name: {
+                    key: sum(totals[name][key] for totals in known)
+                    for key in ("total", "passed", "failed", "failed_as_expected")
+                }
+                for name in ("test_cases", "assertions")
+            },
+        }
+    return summary
+
+
 def run_command(command, log, timeout=None):
     try:
         with log.open("w", encoding="utf-8") as output:
@@ -85,6 +163,10 @@ def measure(manifest, build_dir, report_dir, targets, devices, jobs, timeout):
                     log,
                     timeout,
                 )
+                result["test_totals"] = (
+                    parse_test_totals(log.read_text(encoding="utf-8", errors="replace"))
+                    if log.exists() else None
+                )
                 entry["runs"].append(
                     {"device": device, "log": str(log), **result}
                 )
@@ -149,6 +231,7 @@ def main(argv=None):
             "selected_targets": len(targets),
             "devices": args.devices,
             "results": results,
+            "summary": summarize(results, len(available), args.devices),
         }
         destination = report_dir / "baseline.json"
         destination.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

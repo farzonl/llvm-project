@@ -39,6 +39,13 @@ signed, validated, and cached by the runtime through
 First use of a new shape requires compiler/validator tools and blocks enqueue;
 the default shape and cached variants need no tool invocation. Local-accessor
 allocation and general local-memory specialization remain future work.
+Implicit `parallel_for(range)` kernels retain their logical extents in the
+capture record and cover them with overflow-safe GPU strided loops. Oversized
+ranges select a 64-thread variant along their largest axis and cap native
+dispatch counts at 65,535 groups per axis. Small ranges keep the default AOT
+shape. This does not widen explicit `nd_range` group counts or change its
+workgroup/barrier geometry; large implicit ranges require an eligible
+specializable kernel and the tools needed for its first shape variant.
 
 SYCL registration can contain multiple images, but each DirectX image describes
 one kernel, and libsycl loads each as a separate program. Default relocatable
@@ -261,6 +268,10 @@ The measurement script:
   as well as host/device linking; its failure is not automatically a linker bug.
 - Records the CTS revision, selected/configured target counts, and full,
   deprecated-feature, and interoperability test settings.
+- Records Catch2 test-case/assertion totals for each executed vendor run and
+  aggregates compiled, executable, fully passing, and unmeasured categories.
+  Missing or incomplete Catch2 totals are explicitly `null`; aggregate counts
+  identify runs without totals and are not claimed complete.
 - Returns nonzero for measured failures and a separate infrastructure-error
   exit status. A report containing compilation failures is not a passing CTS run.
 
@@ -268,6 +279,17 @@ Use `--targets test_range test_nd_range`, for example, for a targeted
 remeasurement; omitted categories are not counted as passing. Device filters
 must match the machine's adapter names. The runtime timeout applies to individual
 test executables, not compiler builds.
+
+Category pass counts alone hide progress inside a still-failing category.
+For example, uniform workgroup support increased Range's passing assertions
+from 126 to 8,946 (8,820 additional checks), without changing its 4/5 case
+result. Shared allocation then exposed the large-range limit before another
+assertion could complete. Report those changes alongside the category count.
+At the shared-USM checkpoint, three confirmed passing categories out of 97
+configured executables was a lower-bound inventory, not a freshly measured
+full-suite conformance rate.
+Remeasure additional affected categories rather than assuming the other 93
+remain unchanged or counting them as passing.
 
 ### Initial measured baseline
 
@@ -704,6 +726,88 @@ Confirmed fully passing categories remain **3/97 (about 3.1%)**, not a new
 full-suite pass rate; the other 93 categories were not remeasured. Large-range
 execution, local accessors/barriers, unrestricted resource-backed pointers,
 and complete USM/public-library APIs remain separate prerequisites.
+
+### Large logical ranges and granular CTS progress
+
+Implicit range kernels now capture the original logical extent alongside the
+callable, subject to the existing capture ABI limits. Native lanes iterate
+over logical IDs using the actual physical grid as their stride and construct
+fresh `item` arguments with the original extent and offset. The loop checks
+remaining distance before incrementing to avoid `size_t` overflow. It neither
+truncates work nor substitutes a dummy kernel. Ordinary compiler optimizations
+remain applicable to the user body.
+Rebuild applications against the updated headers and runtime together: the
+implicit range capture record now includes that logical extent.
+
+Above 65,535 work-items on any axis, the runtime requests an existing
+compiler-backed 64-thread workgroup variant along the largest axis, rounds
+that physical axis up, and bounds native group counts. Logical bounds prevent
+padding lanes from invoking the user body. This avoids the severe
+single-lane workgroup underutilization that caused the first wide-ID test to
+time out on Intel. Small-range signed AOT execution remains compiler-free.
+Explicit `nd_range` submissions retain their geometry and existing count
+limits; this is not a wide-group-ID or cross-dispatch barrier implementation.
+
+The native test `libsycl/test/basic/large-range.cpp` verifies every output and
+a suffix guard for a 1D extent larger than the entire bounded physical grid,
+as well as 2D/3D extents beyond the per-axis limit. A sparse-output kernel
+checks the high and low words of a logical ID, extent, and linear ID above
+`UINT32_MAX`; it uses supported 32-bit buffer stores, not new 64-bit buffer
+access support. Queue and handler submission paths are covered.
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\large-range.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\large-range.exe" /Fo:"%CTS_BUILD%\large-range.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+for %D in (0 1 2) do "%CTS_BUILD%\large-range.exe" %D
+```
+
+The unchanged full-conformance Range category now passes **5/5 cases and
+8,949/8,949 assertions on NVIDIA, AMD, and Intel**, including its more-than-32-bit
+and approximately 8.7-trillion-work-item submissions. Together with header,
+error, and NDRange, the targeted measurement reports **14/14 cases and
+9,509/9,509 assertions per vendor**. The confirmed category count advances
+from **3/97 to 4/97**; this is still not a full-suite conformance rate.
+
+An additional eight-category build measurement explains why earlier commits
+did not unlock more categories:
+
+| Categories | First outstanding compilation prerequisites |
+|---|---|
+| `test_id` | Buffer constructors, access tags, and `host_accessor` |
+| `test_item` | Multidimensional buffers/accessors and `get_access` |
+| `test_group`, `test_nd_item` | `multi_ptr` and workgroup-copy APIs |
+| `test_usm` | `usm_allocator` and remaining public USM APIs |
+| Three `test_get_kernel_ids_*` categories | Legacy image target names referenced by shared CTS utilities; declarations alone would not establish image support or category passes |
+
+Those categories executed no tests; their failures must not be counted as
+passing assertions. Another 85 configured categories remain unmeasured after
+the twelve-category breadth check. The JSON report now distinguishes passing
+categories, compilation failures, execution/infrastructure failures, and
+known versus missing case/assertion totals. Earlier commits added 8,820 passing
+Range assertions while leaving its all-or-nothing category status failed;
+shared USM then uncovered the large-range blocker. Both granular and category
+metrics are needed to show that progression honestly.
+
+Refresh the paired DLLs as above and reproduce the current passing subset:
+
+```bat
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\large-range-final" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+The existing buffer, executable-bundle, shared-USM, uniform-workgroup, and
+65,537-element vector-add tests were rebuilt and passed on all three vendors.
+The full queue unit suite and focused measurement-reporting tests also pass.
 
 ### Adapter validation
 

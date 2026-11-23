@@ -99,6 +99,70 @@ class MeasurementTest(unittest.TestCase):
             report["results"][0]["compile"]["status"], "infrastructure_failure",
         )
 
+    def test_parses_passed_failed_and_zero_assertion_totals(self):
+        passed = measure.parse_test_totals(
+            "All tests passed (558 assertions in 6 test cases)\n"
+        )
+        self.assertEqual(passed["test_cases"]["passed"], 6)
+        self.assertEqual(passed["assertions"]["passed"], 558)
+        failed = measure.parse_test_totals(
+            "test cases:    5 |    4 passed | 1 failed\n"
+            "assertions: 8947 | 8946 passed | 1 failed\n"
+        )
+        self.assertEqual(failed["assertions"]["passed"], 8946)
+        self.assertEqual(failed["test_cases"]["failed"], 1)
+        empty = measure.parse_test_totals(
+            "test cases: 1 | 1 passed\nassertions: - none -\n"
+        )
+        self.assertEqual(empty["assertions"]["total"], 0)
+        self.assertIsNone(measure.parse_test_totals("crashed before summary\n"))
+        self.assertIsNone(measure.parse_test_totals(
+            "test cases: 5 | 4 passed\nassertions: 3 | 3 passed\n"
+        ))
+        expected = measure.parse_test_totals(
+            "test cases: 2 | 1 passed | 1 failed as expected\r\n"
+            "assertions: 3 | 2 passed | 1 failed as expected\r\n"
+        )
+        self.assertEqual(expected["assertions"]["failed_as_expected"], 1)
+
+    def test_summary_distinguishes_partial_execution_and_unmeasured_categories(self):
+        totals = measure.parse_test_totals(
+            "All tests passed (2 assertions in 1 test case)"
+        )
+        results = [
+            {"compile": {"status": "passed"},
+             "executable_build": {"status": "passed"}, "runs": [
+                 {"device": "NVIDIA", "status": "passed", "test_totals": totals},
+                 {"device": "AMD", "status": "failed", "test_totals": None},
+             ]},
+            {"compile": {"status": "failed"}, "runs": []},
+        ]
+        summary = measure.summarize(results, 97, ["NVIDIA", "AMD"])
+        self.assertEqual(summary["categories_passing_all_devices"], 0)
+        self.assertEqual(summary["unmeasured_categories"], 95)
+        self.assertEqual(summary["per_device"]["NVIDIA"]["assertions"]["passed"], 2)
+        self.assertEqual(summary["per_device"]["NVIDIA"]["categories_not_run"], 1)
+        self.assertFalse(summary["per_device"]["AMD"]["counts_complete"])
+        self.assertEqual(summary["per_device"]["AMD"]["runs_without_totals"], 1)
+        not_run = measure.summarize(results[1:], 97, ["NVIDIA"])
+        self.assertFalse(not_run["per_device"]["NVIDIA"]["counts_complete"])
+
+    def test_runtime_logs_attach_totals_without_inventing_missing_counts(self):
+        def run(command, log, timeout=None):
+            if timeout:
+                if command[2] == "NVIDIA":
+                    log.write_text("All tests passed (2 assertions in 1 test case)\n")
+                else:
+                    log.write_text("aborted before summary\n")
+            return {"status": "passed", "returncode": 0}
+
+        with patch.object(measure, "run_command", side_effect=run):
+            results, _ = measure.measure(
+                self.manifest, self.root, self.root, {"test_example"},
+                ["NVIDIA", "AMD"], 1, 300,
+            )
+        self.assertEqual(results[0]["runs"][0]["test_totals"]["assertions"]["total"], 2)
+        self.assertIsNone(results[0]["runs"][1]["test_totals"])
 
 if __name__ == "__main__":
     unittest.main()

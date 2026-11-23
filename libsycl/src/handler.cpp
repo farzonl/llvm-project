@@ -47,7 +47,7 @@ void handler::submitKernelImpl(detail::DeviceKernelInfo &KernelInfo,
 }
 
 void handler::setKernelRange(const detail::UnifiedRangeView &Range) {
-  MImpl.MRange = detail::convertToOlRange(Range);
+  MImpl.MRange = detail::convertToOlRange(Range, MImpl.MQueue.getBackend());
 }
 
 void handler::memcpy(void *dest, const void *src, std::size_t numBytes) {

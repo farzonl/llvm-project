@@ -204,6 +204,25 @@ TEST(Queue, TransportsGlobalOffsetsAndResetsThemForSingleTask) {
   EXPECT_EQ(Captured.z, 0u);
 }
 
+TEST(Queue, BoundsOnlyDirectXImplicitRangeGeometry) {
+  size_t Global[3] = {65536, (size_t{1} << 32) + 17, 3};
+  sycl::range<3> Implicit{Global[0], Global[1], Global[2]};
+  detail::UnifiedRangeView View{Implicit};
+  auto Converted = detail::convertToOlRange(View, backend::ext_llvm_directx);
+  EXPECT_EQ(Converted.NumGroups.x, 3u);
+  EXPECT_EQ(Converted.NumGroups.y, 65535u);
+  EXPECT_EQ(Converted.NumGroups.z, 65535u);
+  EXPECT_EQ(Converted.GroupSize.x, 1u);
+  EXPECT_EQ(Converted.GroupSize.y, 64u);
+  EXPECT_THROW(detail::convertToOlRange(View, backend::level_zero),
+               sycl::exception);
+
+  sycl::nd_range<3> Explicit{sycl::range<3>{Global[0], Global[1], Global[2]},
+                             sycl::range<3>{1, 1, 1}};
+  EXPECT_THROW(detail::convertToOlRange(Explicit, backend::ext_llvm_directx),
+               sycl::exception);
+}
+
 TEST(Queue, RejectsUnrepresentableRangesAndOffsets) {
   size_t Global[] = {size_t{1} << 32};
   size_t Local[] = {1};

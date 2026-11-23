@@ -198,7 +198,9 @@ mapInfoDesc(typename InfoOLMapping<To>::template M<Ts>... Mappings) {
 
 /// Converts a UnifiedRangeView into the liboffload
 /// ol_kernel_launch_size_args_t format.
-ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range);
+ol_kernel_launch_size_args_t
+convertToOlRange(const UnifiedRangeView &Range,
+                 backend Backend = backend::level_zero);
 ol_kernel_global_offset_t convertToOlOffset(const UnifiedRangeView &Range);
 
 } // namespace detail

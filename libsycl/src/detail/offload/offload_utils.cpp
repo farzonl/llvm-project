@@ -8,6 +8,7 @@
 
 #include <detail/offload/offload_utils.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <limits>
@@ -117,7 +118,8 @@ ol_alloc_type_t getOlAllocType(usm::alloc USMKind) {
   }
 }
 
-ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range) {
+ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range,
+                                              backend Backend) {
   if (Range.MDims < 1 || Range.MDims > 3)
     throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
                           "Work dimension must be 1, 2, or 3.");
@@ -128,6 +130,18 @@ ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range) {
       GlobalSize[I] = Range.MGlobalSize[I];
 
   uint32_t GroupSize[3] = {1, 1, 1};
+  const bool DirectXRange =
+      Backend == backend::ext_llvm_directx && !Range.MLocalSize;
+  if (DirectXRange) {
+    size_t Axis = 0;
+    for (size_t I = 1; I < Range.MDims; ++I)
+      if (GlobalSize[I] > GlobalSize[Axis])
+        Axis = I;
+    // Keep existing small-range AOT shapes. Large ranges need enough lanes
+    // per workgroup to avoid serializing the logical loop onto single lanes.
+    if (GlobalSize[Axis] > 65535)
+      GroupSize[Axis] = 64;
+  }
   if (Range.MLocalSize) {
     for (size_t I = 0; I < Range.MDims; ++I) {
       if (!Range.MLocalSize[I] ||
@@ -150,10 +164,13 @@ ol_kernel_launch_size_args_t convertToOlRange(const UnifiedRangeView &Range) {
   }
   uint32_t NumGroups[3];
   for (unsigned I = 0; I < 3; ++I) {
-    if (GlobalSize[I] % GroupSize[I])
+    if (!DirectXRange && GlobalSize[I] % GroupSize[I])
       throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
                             "Global range must be divisible by local range.");
-    uint64_t Count = GlobalSize[I] / GroupSize[I];
+    uint64_t Count = GlobalSize[I] / GroupSize[I] +
+                     (DirectXRange && GlobalSize[I] % GroupSize[I] != 0);
+    if (DirectXRange)
+      Count = std::min(Count, uint64_t{65535});
     if (Count > std::numeric_limits<uint32_t>::max())
       throw sycl::exception(sycl::make_error_code(sycl::errc::nd_range),
                             "Group count exceeds the liboffload limit.");

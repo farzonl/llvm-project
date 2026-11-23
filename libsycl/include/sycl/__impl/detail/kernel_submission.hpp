@@ -41,6 +41,47 @@ void checkNDRangeAndThrow(const sycl::nd_range<Dims> &ExecutionRange) {
                           "evenly divisible by local size.");
 }
 
+template <typename KernelType, typename ElementType, int Dims>
+struct RangeKernelWrapper {
+  KernelType KernelFunc;
+  range<Dims> LogicalRange;
+
+  void operator()(ElementType NativeItem) const {
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
+    const id<Dims> Offset = __spirv::initBuiltInGlobalOffset<Dims, id<Dims>>();
+    const id<Dims> Start = NativeItem.get_id() - Offset;
+    const range<Dims> Stride =
+        __spirv::initBuiltInGlobalSize<Dims, range<Dims>>();
+    id<Dims> Index{};
+    invoke<0>(Index, Start, Stride, Offset);
+#else
+    KernelFunc(NativeItem);
+#endif
+  }
+
+#if defined(__SYCL_DEVICE_ONLY__) && defined(__DIRECTX__)
+private:
+  template <int Axis>
+  void invoke(id<Dims> &Index, const id<Dims> &Start, const range<Dims> &Stride,
+              const id<Dims> &Offset) const {
+    for (Index[Axis] = Start[Axis]; Index[Axis] < LogicalRange[Axis];) {
+      if constexpr (Axis + 1 < Dims) {
+        invoke<Axis + 1>(Index, Start, Stride, Offset);
+      } else if constexpr (std::is_same_v<ElementType, item<Dims>>) {
+        KernelFunc(Builder::createItem<Dims, true>(LogicalRange, Index + Offset,
+                                                   Offset));
+      } else {
+        KernelFunc(Builder::createItem<Dims, false>(LogicalRange, Index));
+      }
+      // Test the remaining distance before adding to avoid size_t overflow.
+      if (LogicalRange[Axis] - Index[Axis] <= Stride[Axis])
+        break;
+      Index[Axis] += Stride[Axis];
+    }
+  }
+#endif
+};
+
 template <typename DerivedT> class KernelSubmissionBase {
 protected:
   template <typename KernelName, typename KernelType>
@@ -74,8 +115,7 @@ protected:
 
   template <typename KernelName, int Dims, template <int> class Range,
             typename... Rest>
-  void parallelForImpl(const Range<Dims> & /*NumWorkItems*/,
-                       Rest &&...RestArgs) {
+  void parallelForImpl(const Range<Dims> &NumWorkItems, Rest &&...RestArgs) {
     if constexpr (sizeof...(Rest) != 1)
       throw sycl::exception(sycl::make_error_code(errc::feature_not_supported),
                             "Reductions are not supported");
@@ -112,8 +152,15 @@ protected:
 
     using NameT =
         typename detail::get_kernel_name_t<KernelName, KernelType>::name;
-    return submitParallelFor<NameT, TransformedLambdaArgType, KernelType>(
-        std::forward<Rest>(RestArgs)...);
+    if constexpr (IsNdRangeSubmission) {
+      return submitParallelFor<NameT, TransformedLambdaArgType, KernelType>(
+          std::forward<Rest>(RestArgs)...);
+    } else {
+      using Wrapper =
+          RangeKernelWrapper<KernelType, TransformedLambdaArgType, Dims>;
+      return submitParallelFor<NameT, TransformedLambdaArgType, Wrapper>(
+          Wrapper{std::forward<Rest>(RestArgs)..., NumWorkItems});
+    }
   }
 };
 
