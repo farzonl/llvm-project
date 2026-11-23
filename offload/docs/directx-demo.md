@@ -37,7 +37,8 @@ handling, and CPU verification remain in the example. This helper is example
 support, not a new public programming API or a replacement for SYCL.
 
 Kernels require a fixed `reqd_work_group_size`, return `void`, and accept buffer
-pointers with 32-bit integer/float accesses and 32-bit integer/float scalars.
+pointers with scalar 8-bit integer or 32-bit integer/float accesses and
+32-bit integer/float scalars.
 Scalar arguments are packed consecutively into root constants at `b0, space0`,
 up to 63 scalars (252 bytes). Const pointees use SRVs; writable pointees use UAVs.
 Unused arguments, pointer escapes, general pointer chasing, atomic/volatile

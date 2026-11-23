@@ -13,6 +13,7 @@
 #include <detail/event_impl.hpp>
 #include <detail/global_objects.hpp>
 #include <detail/queue_impl.hpp>
+#include <limits>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
 namespace detail {
@@ -71,11 +72,20 @@ void *BufferImpl::acquire(QueueImpl &Queue) {
     MNeedsUpload = true;
   }
   if (!MDevicePointer) {
+    std::size_t DeviceBytes = MStorage.size();
+    if (Queue.getBackend() == backend::ext_llvm_directx) {
+      // Raw views address whole words, including the final partial word.
+      std::size_t Padding = (4 - DeviceBytes % 4) % 4;
+      if (DeviceBytes > std::numeric_limits<std::size_t>::max() - Padding)
+        throw exception(make_error_code(errc::memory_allocation),
+                        "DirectX buffer allocation size overflow");
+      DeviceBytes += Padding;
+    }
     MQueue = Queue.shared_from_this();
     callAndThrow(Queue.getContext(), olMemAlloc,
                  Queue.getContext().getOLHandleRef(),
                  Queue.getDevice().getOLHandle(), OL_ALLOC_TYPE_DEVICE,
-                 MStorage.size(), &MDevicePointer);
+                 DeviceBytes, &MDevicePointer);
   }
   if (MNeedsUpload) {
     MLastEvent =

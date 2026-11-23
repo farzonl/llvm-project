@@ -63,8 +63,8 @@ bool checkPointer(Value &Arg, bool ReadOnly) {
         fail("buffer pointers may only be indexed, loaded, or stored");
         return false;
       }
-      if (!Ty->isIntegerTy(32) && !Ty->isFloatTy()) {
-        fail("buffer accesses must use 32-bit integers or floats");
+      if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(32) && !Ty->isFloatTy()) {
+        fail("buffer accesses must use 8-bit or 32-bit integers or floats");
         return false;
       }
       Accessed = true;

@@ -224,6 +224,39 @@ static void emitRawStore(IRBuilder<> &Builder, Value *Buffer, Value *Index,
                           {Buffer, Index, Offset, V});
 }
 
+static void emitByteStore(IRBuilder<> &Builder, StoreInst *SI, Value *Buffer,
+                          Value *Address) {
+  Value *WordAddress = Builder.CreateAnd(Address, Builder.getInt32(~3u));
+  Value *Shift = Builder.CreateShl(
+      Builder.CreateAnd(Address, Builder.getInt32(3)), Builder.getInt32(3));
+  Value *Mask =
+      Builder.CreateNot(Builder.CreateShl(Builder.getInt32(255), Shift));
+  Value *Byte = Builder.CreateShl(
+      Builder.CreateZExt(SI->getValueOperand(), Builder.getInt32Ty()), Shift);
+
+  BasicBlock *Before = SI->getParent();
+  Function *F = Before->getParent();
+  BasicBlock *After = Before->splitBasicBlock(SI, "byte.store.end");
+  BasicBlock *Loop =
+      BasicBlock::Create(F->getContext(), "byte.store.retry", F, After);
+  Before->getTerminator()->setSuccessor(0, Loop);
+  Builder.SetInsertPoint(Loop);
+  Builder.SetCurrentDebugLocation(SI->getDebugLoc());
+  PHINode *Expected = Builder.CreatePHI(Builder.getInt32Ty(), 2);
+  Expected->addIncoming(Builder.getInt32(0), Before);
+  Value *Updated = Builder.CreateOr(Builder.CreateAnd(Expected, Mask), Byte);
+  // Adjacent work-items may own different bytes of the same word. Retry an
+  // atomic replacement rather than losing their updates with a normal store.
+  Value *Original = Builder.CreateIntrinsic(
+      Builder.getInt32Ty(), Intrinsic::dx_resource_atomic_compare_exchange,
+      {Buffer, WordAddress, PoisonValue::get(Builder.getInt32Ty()),
+       PoisonValue::get(Builder.getInt32Ty()), Expected, Updated});
+  Expected->addIncoming(Original, Loop);
+  auto *Branch = Builder.CreateCondBr(Builder.CreateICmpEQ(Original, Expected),
+                                      After, Loop);
+  setExplicitlyUnknownBranchWeightsIfProfiled(*Branch, DEBUG_TYPE);
+}
+
 static void createRawStores(IntrinsicInst *II, StoreInst *SI,
                             dxil::ResourceTypeInfo &RTI) {
   const DataLayout &DL = SI->getDataLayout();
@@ -238,6 +271,12 @@ static void createRawStores(IntrinsicInst *II, StoreInst *SI,
   uint64_t AccessSize = 1;
   Value *Offset =
       traverseGEPOffsets(DL, Builder, SI->getPointerOperand(), AccessSize);
+
+  if (V->getType()->isIntegerTy(8) && !RTI.isStruct()) {
+    emitByteStore(Builder, SI, II->getOperand(0),
+                  Builder.CreateAdd(Index, Offset));
+    return;
+  }
 
   auto *VT = dyn_cast<FixedVectorType>(V->getType());
   if (VT && VT->getNumElements() > 4) {
@@ -692,7 +731,15 @@ static void createRawLoads(IntrinsicInst *II, LoadInst *LI,
          "Resource load should be scalar or vector type");
 
   Value *V;
-  if (auto *VT = dyn_cast<FixedVectorType>(LI->getType())) {
+  if (LI->getType()->isIntegerTy(8) && !RTI.isStruct()) {
+    Value *Address = Builder.CreateAdd(Index, Offset);
+    Value *WordAddress = Builder.CreateAnd(Address, Builder.getInt32(~3u));
+    Value *Shift = Builder.CreateShl(
+        Builder.CreateAnd(Address, Builder.getInt32(3)), Builder.getInt32(3));
+    Value *Word = emitRawLoad(Builder, Builder.getInt32Ty(), II->getOperand(0),
+                              WordAddress, Builder.getInt32(0), RTI);
+    V = Builder.CreateTrunc(Builder.CreateLShr(Word, Shift), LI->getType());
+  } else if (auto *VT = dyn_cast<FixedVectorType>(LI->getType())) {
     // Split into loads of at most 4 elements.
     Type *EltTy = VT->getElementType();
     Value *Stride = ConstantInt::get(Builder.getInt32Ty(),

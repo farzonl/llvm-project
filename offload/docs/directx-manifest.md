@@ -20,7 +20,8 @@ in `llvm.offload.manifest` intermediate bitcode metadata. The standalone demo's
 and adds feature declarations from the final DXIL
 container. The metadata is not embedded in executable DXIL: validation rejects
 unknown named metadata. This path currently accepts only indexed buffer-pointer
-arguments with 32-bit accesses, 32-bit integer/float scalar arguments packed
+arguments with scalar 8-bit integer or 32-bit integer/float accesses,
+32-bit integer/float scalar arguments packed
 into `b0, space0` root constants, and fixed workgroup sizes.
 See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
 
@@ -56,6 +57,15 @@ An optional third layout-metadata operand marks SYCL accessor pointers and
 forces UAV bindings so read/write aliases can share a resource. This marker
 and its recognized pointer annotation are removed before DXIL emission; they
 do not change the manifest ABI.
+
+Byte accesses retain their original byte offsets. Loads extract a byte from
+an aligned 32-bit word; stores use a masked atomic compare-exchange retry
+loop so independent writes to adjacent bytes cannot overwrite one another.
+Raw views still require a minimum four-byte allocation and a whole final
+word. libsycl buffers pad only their native allocation to a multiple of four;
+their logical byte size and host transfers are unchanged. This does not
+enable user-facing atomics, volatile accesses, vector byte accesses, or
+16-bit buffer accesses.
 
 The experimental libsycl DirectX backend accepts packaged SYCL DXIL images.
 `llvm-offload-binary` generates their binary SYCL symbol tables from the

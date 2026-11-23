@@ -45,6 +45,39 @@ void increment(sycl::queue &Queue, sycl::buffer<int> &Buffer) {
   });
 }
 
+template <typename T, unsigned Count> class BufferByteUpdate;
+
+template <typename T, unsigned Count>
+void updateBytes(sycl::queue &Queue, sycl::buffer<T> &Buffer) {
+  Queue.submit([&](sycl::handler &Handler) {
+    auto Access = Buffer.get_access(Handler);
+    Handler.parallel_for<BufferByteUpdate<T, Count>>(
+        sycl::nd_range<1>{sycl::range<1>{(Count + 63) / 64 * 64},
+                          sycl::range<1>{64}},
+        [=](sycl::nd_item<1> Item)
+            __attribute__((reqd_work_group_size(64, 1, 1))) {
+              size_t I = Item.get_global_linear_id();
+              if (I < Count) {
+                if constexpr (std::is_same_v<T, bool>)
+                  Access[I] = !Access[I];
+                else if (I % 4 != 3)
+                  Access[I] = static_cast<T>(Access[I] + I * 17 + 1);
+              }
+            });
+  });
+}
+
+template void updateBytes<bool, 1>(sycl::queue &, sycl::buffer<bool> &);
+template void updateBytes<bool, 5>(sycl::queue &, sycl::buffer<bool> &);
+template void updateBytes<unsigned char, 1>(sycl::queue &,
+                                            sycl::buffer<unsigned char> &);
+template void updateBytes<unsigned char, 5>(sycl::queue &,
+                                            sycl::buffer<unsigned char> &);
+template void updateBytes<unsigned char, 1025>(sycl::queue &,
+                                               sycl::buffer<unsigned char> &);
+template void updateBytes<signed char, 5>(sycl::queue &,
+                                          sycl::buffer<signed char> &);
+
 #ifndef __SYCL_DEVICE_ONLY__
 #  include <array>
 #  include <atomic>
@@ -52,6 +85,39 @@ void increment(sycl::queue &Queue, sycl::buffer<int> &Buffer) {
 #  include <iostream>
 #  include <optional>
 #  include <thread>
+
+template <typename T, unsigned Count>
+void checkBytes(sycl::queue &Queue, unsigned Repeats) {
+  struct {
+    unsigned char Before = 0xAB;
+    std::array<T, Count> Values{};
+    unsigned char After = 0xCD;
+  } Host;
+  for (unsigned I = 0; I < Count; ++I) {
+    if constexpr (std::is_same_v<T, bool>)
+      Host.Values[I] = I % 2 != 0;
+    else
+      Host.Values[I] = static_cast<T>(I % 2 ? 0x81 : 0xFE);
+  }
+  const auto Initial = Host.Values;
+  {
+    sycl::buffer<T> Buffer(Host.Values.data(), sycl::range<1>(Count));
+    assert(Buffer.byte_size() == Count);
+    for (unsigned I = 0; I < Repeats; ++I)
+      updateBytes<T, Count>(Queue, Buffer);
+  }
+  for (unsigned I = 0; I < Count; ++I) {
+    T Expected;
+    if constexpr (std::is_same_v<T, bool>)
+      Expected = Repeats % 2 ? !Initial[I] : Initial[I];
+    else
+      Expected = I % 4 == 3
+                     ? Initial[I]
+                     : static_cast<T>(Initial[I] + Repeats * (I * 17 + 1));
+    assert(Host.Values[I] == Expected);
+  }
+  assert(Host.Before == 0xAB && Host.After == 0xCD);
+}
 
 void run(int Argc, char **Argv) {
   auto Devices = sycl::device::get_devices(sycl::info::device_type::gpu);
@@ -69,6 +135,12 @@ void run(int Argc, char **Argv) {
   };
   sycl::queue First(Device, OnError);
   sycl::queue Second(First.get_context(), Device, OnError);
+  checkBytes<bool, 1>(First, 1);
+  checkBytes<bool, 5>(First, 3);
+  checkBytes<unsigned char, 1>(First, 2);
+  checkBytes<unsigned char, 5>(First, 3);
+  checkBytes<unsigned char, 1025>(First, 16);
+  checkBytes<signed char, 5>(First, 3);
   std::array<int, 8> Input{};
   std::array<float, 8> Output{};
   for (unsigned I = 0; I < 8; ++I)
@@ -168,7 +240,7 @@ void run(int Argc, char **Argv) {
       assert(Migrated[I] == static_cast<int>(I * 3 + 2));
   }
   std::cout << Device.get_info<sycl::info::device::name>()
-            << ": buffer dependencies and writeback passed\n";
+            << ": buffer dependencies, byte storage and writeback passed\n";
   assert(!AsyncFailed.load());
 }
 

@@ -448,9 +448,9 @@ for %D in (0 1 2) do "%CTS_BUILD%\buffer-foundation.exe" %D
 The indices above are the three tested hardware adapters; use the existing
 demo's `--list` output to check the mapping on another machine.
 
-The unchanged range and NDRange CTS categories now compile their objects but
-fail device linking on byte-sized `bool` accesses: DirectX buffer lowering
-currently accepts only 32-bit integers and floats. Neither category has run,
+At this checkpoint, the unchanged range and NDRange CTS categories compiled
+their objects but failed device linking on byte-sized `bool` accesses:
+DirectX buffer lowering accepted only 32-bit integers and floats. Neither category had run,
 and neither is a CTS pass. The previously passing header/error categories are
 retained separately.
 
@@ -466,13 +466,42 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 This command returns nonzero for the two device-link failures and records zero
 executions for them; it does not run stale executables.
 
-Next steps include real subword storage semantics (without substituting
+Remaining steps at that checkpoint included real subword storage semantics (without substituting
 32-bit boolean elements), wide captured scalars used by accessor size queries,
 multidimensional/subrange accessors, host/placeholder accessors, buffer
 properties and complete reference/API conformance. Only nonempty host-pointer
 buffers with the standard allocator are implemented in this increment.
 This does not advertise shared USM, atomics, FP16/FP64, or general workgroup
 specialization.
+
+### Byte-sized buffer execution
+
+Scalar `bool`, signed-byte, and unsigned-byte buffer loads/stores now lower
+without changing element layout. Byte loads extract from aligned words.
+Byte stores replace only the addressed byte with an atomic compare-exchange
+retry loop, preserving neighboring bytes even when adjacent work-items write
+concurrently. These internal operations do not advertise public SYCL atomic
+support.
+
+DirectX buffer allocations round up only their native backing size to a
+multiple of four. Upload and writeback still transfer exactly the logical byte
+count. The buffer test above now checks mixed boolean values, signed/unsigned
+byte arithmetic, one-byte and five-byte buffers, untouched neighboring bytes,
+host sentinels, and 16 repeated parallel updates over 1,025 byte elements on
+NVIDIA, AMD, and Intel. Byte vectors and 16-bit buffer accesses remain outside
+this increment.
+
+The same four unchanged CTS categories were remeasured. Header/error still
+pass; range/NDRange now get beyond byte-access validation but fail device
+linking when the ABI restores the native 32-bit pointer layout. Split modules
+retain unrelated host-library functions and global constructors; host-width
+`ptrtoaddr` results then violate the device layout. Neither geometry category
+executes, and no new CTS pass is claimed.
+
+Reproduce this measurement with the command above, using a fresh
+`--report-dir "%CTS_BUILD%\byte-verified"`. The next compiler task is to isolate
+the actual device program from host-only initialization/dependencies without
+discarding initialization that a kernel genuinely requires.
 
 ### Adapter validation
 
