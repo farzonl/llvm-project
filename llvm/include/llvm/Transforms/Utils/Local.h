@@ -15,6 +15,7 @@
 #define LLVM_TRANSFORMS_UTILS_LOCAL_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
@@ -41,6 +42,7 @@ class DIBuilder;
 class DomTreeUpdater;
 class Function;
 class Instruction;
+class IntrinsicInst;
 class InvokeInst;
 class LoadInst;
 class MDNode;
@@ -49,6 +51,11 @@ class PHINode;
 class StoreInst;
 class TargetLibraryInfo;
 class TargetTransformInfo;
+
+/// Remove a ptr.annotation intrinsic only if its annotation string matches
+/// Name.
+LLVM_ABI bool removePointerAnnotation(IntrinsicInst &Annotation,
+                                      StringRef Name);
 
 //===----------------------------------------------------------------------===//
 //  Local constant propagation.

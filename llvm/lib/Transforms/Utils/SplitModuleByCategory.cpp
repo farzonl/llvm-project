@@ -12,6 +12,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -194,25 +195,131 @@ void collectFunctionsAndGlobalVariablesToExtract(
   for (const Function *F : ModuleEntryPoints.Functions)
     GVs.insert(F);
 
-  // Non-discardable global variables are also include into the initial set
-  for (const GlobalVariable &GV : M.globals())
-    if (!GV.isDiscardableIfUnused())
-      GVs.insert(&GV);
+  // DXIL images contain only a kernel's device dependencies, not host globals
+  // and their initialization imported by single-source compilation.
+  if (!M.getTargetTriple().isDXIL())
+    for (const GlobalVariable &GV : M.globals())
+      if (!GV.isDiscardableIfUnused())
+        GVs.insert(&GV);
 
   // GVs has SetVector type. This type inserts a value only if it is not yet
   // present there. So, recursion is not expected here.
   size_t Idx = 0;
-  while (Idx < GVs.size()) {
-    const GlobalValue *Obj = GVs[Idx++];
+  auto Expand = [&] {
+    while (Idx < GVs.size()) {
+      const GlobalValue *Obj = GVs[Idx++];
 
-    for (const GlobalValue *Dep : DG.dependencies(Obj)) {
-      if (const auto *Func = dyn_cast<const Function>(Dep)) {
-        if (!Func->isDeclaration())
-          GVs.insert(Func);
-      } else {
-        GVs.insert(Dep); // Global variables are added unconditionally
+      for (const GlobalValue *Dep : DG.dependencies(Obj)) {
+        if (const auto *Func = dyn_cast<const Function>(Dep)) {
+          if (!Func->isDeclaration())
+            GVs.insert(Func);
+        } else {
+          GVs.insert(Dep);
+        }
       }
     }
+  };
+  Expand();
+  if (!M.getTargetTriple().isDXIL())
+    return;
+
+  size_t PreviousSize;
+  do {
+    PreviousSize = GVs.size();
+    bool HasMutableGlobal = llvm::any_of(GVs, [](const GlobalValue *GV) {
+      const auto *Variable = dyn_cast<GlobalVariable>(GV);
+      return Variable && !Variable->isConstant();
+    });
+    for (StringRef Name : {"llvm.global_ctors", "llvm.global_dtors"}) {
+      const auto *List = M.getGlobalVariable(Name);
+      if (!List || !List->hasInitializer())
+        continue;
+      const auto *Entries = dyn_cast<ConstantArray>(List->getInitializer());
+      if (!Entries) {
+        if (!List->getInitializer()->isNullValue())
+          GVs.insert(List);
+        continue;
+      }
+      for (const Use &Entry : Entries->operands()) {
+        const auto *Record = cast<Constant>(Entry.get());
+        const auto *Callee = Record->getAggregateElement(1u);
+        if (Callee->isNullValue())
+          continue;
+        const auto *Initializer =
+            dyn_cast<Function>(Callee->stripPointerCasts());
+        if (!Initializer) {
+          GVs.insert(List);
+          continue;
+        }
+        if (GVs.contains(Initializer))
+          continue;
+
+        const auto *Associated = Record->getAggregateElement(2u);
+        const auto *AssociatedGV =
+            dyn_cast<GlobalValue>(Associated->stripPointerCasts());
+        bool Needed = AssociatedGV && GVs.contains(AssociatedGV);
+        SmallVector<const GlobalValue *> Worklist{Initializer};
+        SmallPtrSet<const GlobalValue *, 16> Seen;
+        while (!Worklist.empty() && !Needed) {
+          const GlobalValue *Object = Worklist.pop_back_val();
+          if (!Seen.insert(Object).second)
+            continue;
+          if (const auto *Fn = dyn_cast<Function>(Object);
+              Fn && Fn->isDeclaration() && !Fn->doesNotAccessMemory()) {
+            // An opaque initializer can affect any reachable mutable global.
+            Needed = HasMutableGlobal;
+          } else if (const auto *Variable = dyn_cast<GlobalVariable>(Object);
+                     Variable && !Variable->isConstant() &&
+                     GVs.contains(Variable)) {
+            Needed = true;
+          }
+          append_range(Worklist, DG.dependencies(Object));
+        }
+        if (Needed) {
+          GVs.insert(Initializer);
+          if (AssociatedGV)
+            GVs.insert(AssociatedGV);
+        }
+      }
+    }
+    Expand();
+  } while (GVs.size() != PreviousSize);
+}
+
+void filterDXILInitializers(const Module &M, Module &SubM,
+                            const SetVector<const GlobalValue *> &GVs) {
+  for (StringRef Name : {"llvm.global_ctors", "llvm.global_dtors"}) {
+    const auto *Original = M.getGlobalVariable(Name);
+    auto *Cloned = SubM.getGlobalVariable(Name);
+    if (!Original || !Cloned || !Original->hasInitializer() ||
+        GVs.contains(Original))
+      continue;
+    const auto *Entries = dyn_cast<ConstantArray>(Original->getInitializer());
+    if (!Entries) {
+      if (Original->getInitializer()->isNullValue())
+        Cloned->eraseFromParent();
+      continue;
+    }
+    SmallVector<Constant *> Kept;
+    for (unsigned I = 0; I < Entries->getNumOperands(); ++I) {
+      const auto *Callee = Entries->getOperand(I)->getAggregateElement(1u);
+      const auto *Initializer = dyn_cast<Function>(Callee->stripPointerCasts());
+      if (Initializer && GVs.contains(Initializer))
+        Kept.push_back(Cloned->getInitializer()->getAggregateElement(I));
+    }
+    if (Kept.empty()) {
+      Cloned->eraseFromParent();
+      continue;
+    }
+    auto *Type =
+        ArrayType::get(Entries->getType()->getElementType(), Kept.size());
+    auto *Replacement = new GlobalVariable(SubM, Type, Cloned->isConstant(),
+                                           Cloned->getLinkage(),
+                                           ConstantArray::get(Type, Kept));
+    Replacement->copyAttributesFrom(Cloned);
+    Replacement->takeName(Cloned);
+    Cloned->replaceAllUsesWith(Replacement);
+    Cloned->eraseFromParent();
   }
 }
 
@@ -222,8 +329,14 @@ ModuleDesc extractSubModule(const Module &M,
   ValueToValueMapTy VMap;
   // Clone definitions only for needed globals. Others will be added as
   // declarations and removed later.
-  std::unique_ptr<Module> SubM = CloneModule(
-      M, VMap, [&](const GlobalValue *GV) { return GVs.contains(GV); });
+  std::unique_ptr<Module> SubM =
+      CloneModule(M, VMap, [&](const GlobalValue *GV) {
+        return GVs.contains(GV) || (M.getTargetTriple().isDXIL() &&
+                                    (GV->getName() == "llvm.global_ctors" ||
+                                     GV->getName() == "llvm.global_dtors"));
+      });
+  if (M.getTargetTriple().isDXIL())
+    filterDXILInitializers(M, *SubM, GVs);
   // Replace entry points with cloned ones.
   EntryPointSet NewEPs;
   const EntryPointSet &EPs = ModuleEntryPoints.Functions;

@@ -89,6 +89,17 @@ using namespace llvm::PatternMatch;
 
 #define DEBUG_TYPE "local"
 
+bool llvm::removePointerAnnotation(IntrinsicInst &Annotation, StringRef Name) {
+  StringRef ActualName;
+  if (Annotation.getIntrinsicID() != Intrinsic::ptr_annotation ||
+      !getConstantStringInfo(Annotation.getArgOperand(1), ActualName) ||
+      ActualName != Name)
+    return false;
+  Annotation.replaceAllUsesWith(Annotation.getArgOperand(0));
+  Annotation.eraseFromParent();
+  return true;
+}
+
 STATISTIC(NumRemoved, "Number of unreachable basic blocks removed");
 STATISTIC(NumPHICSEs, "Number of PHI's that got CSE'd");
 

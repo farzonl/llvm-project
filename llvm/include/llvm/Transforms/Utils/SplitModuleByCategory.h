@@ -55,6 +55,10 @@ class Function;
 ///
 /// Recursion and other cycles in the input Module (e.g. directly or mutually
 /// recursive functions, or self-referencing global variables) are supported.
+/// DXIL parts retain only globals reachable from their entry points and
+/// initialization/destruction that can affect those globals. Other targets
+/// also retain non-discardable globals as roots. Opaque initializers are
+/// retained conservatively when mutable globals are reachable.
 LLVM_ABI Error splitModuleTransitiveFromEntryPoints(
     std::unique_ptr<Module> M,
     function_ref<std::optional<int>(const Function &F)> EntryPointCategorizer,

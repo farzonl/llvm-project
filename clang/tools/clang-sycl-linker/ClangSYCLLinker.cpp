@@ -28,6 +28,8 @@
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/Frontend/Offloading/Utility.h"
 #include "llvm/IR/DiagnosticPrinter.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/LTO/LTO.h"
@@ -57,6 +59,7 @@
 #include "llvm/Support/WithColor.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/IPO/StripDeadPrototypes.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SplitModuleByCategory.h"
 
 #include <mutex>
@@ -877,6 +880,15 @@ splitDeviceCode(std::unique_ptr<Module> M, StringRef LinkedBitcodeFile,
 
   auto SplitCallback = [&](std::unique_ptr<Module> Part) -> Error {
     if (Part->getTargetTriple().isDXIL()) {
+      for (Function &F : *Part) {
+        for (Instruction &I : make_early_inc_range(instructions(F)))
+          if (auto *Annotation = dyn_cast<IntrinsicInst>(&I))
+            removePointerAnnotation(*Annotation, "sycl.accessor.pointer");
+        if (!F.isDeclaration() && !F.hasFnAttribute("dx.kernel") &&
+            !F.hasFnAttribute(Attribute::NoInline) &&
+            !F.hasFnAttribute("dontcall-error"))
+          F.addFnAttr(Attribute::AlwaysInline);
+      }
       // Other kernels become unused declarations after splitting, but the
       // restricted DXIL ABI requires exactly one kernel in each module.
       ModuleAnalysisManager MAM;
@@ -966,6 +978,10 @@ static Error linkDirectXImages(ArrayRef<SplitModule> Modules,
   std::string ToolDir = getMainExecutable(Executable);
   StringRef Paths[] = {ToolDir};
   for (const auto &Part : Modules) {
+    auto PreparedFile = createTempFile(Args, "sycl-dxil-prepared", "bc");
+    if (!PreparedFile)
+      return PreparedFile.takeError();
+    std::string Prepared = PreparedFile->str();
     auto KernelFile = createTempFile(Args, "sycl-dxil-kernel", "bc");
     if (!KernelFile)
       return KernelFile.takeError();
@@ -991,8 +1007,11 @@ static Error linkDirectXImages(ArrayRef<SplitModule> Modules,
       llvm::append_range(Command, Arguments);
       return executeCommands(*Program, Command);
     };
-    if (Error E =
-            Run("opt", {"-dxil-kernel-abi", Part.ModuleFilePath, "-o", Kernel}))
+    if (Error E = Run("opt", {"-passes=always-inline,sroa,instcombine,"
+                              "simplifycfg,globaldce,strip-dead-prototypes",
+                              Part.ModuleFilePath, "-o", Prepared}))
+      return E;
+    if (Error E = Run("opt", {"-dxil-kernel-abi", Prepared, "-o", Kernel}))
       return E;
     if (Error E = Run("llc", {"-filetype=obj", Kernel, "-o", Unsigned}))
       return E;

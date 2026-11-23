@@ -58,6 +58,21 @@ forces UAV bindings so read/write aliases can share a resource. This marker
 and its recognized pointer annotation are removed before DXIL emission; they
 do not change the manifest ABI.
 
+DirectX SYCL splitting keeps globals reachable from the kernel rather than
+rooting every non-discardable host global. Constructors/destructors that can
+affect those globals, their associated data, and transitive dependencies are
+retained. Opaque effects are handled conservatively. Required dynamic device
+initialization/destruction remains unsupported and produces an explicit
+diagnostic rather than being silently removed.
+
+Before capture lowering, the linker removes only the recognized accessor
+pointer annotation and runs inlining, scalar replacement, instruction/CFG
+simplification, and dead-code cleanup on each split image. Defined helpers
+are eligible for mandatory inlining unless explicitly `noinline` or marked
+with an unsupported-device-call diagnostic. This prepares private callable
+copies for the restricted ABI; it does not implement general out-of-line
+device calls.
+
 Byte accesses retain their original byte offsets. Loads extract a byte from
 an aligned 32-bit word; stores use a masked atomic compare-exchange retry
 loop so independent writes to adjacent bytes cannot overwrite one another.

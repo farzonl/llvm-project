@@ -23,6 +23,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 using namespace llvm;
 
@@ -179,16 +180,8 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   }
   SmallVector<Value *> Worklist{Kernel.getArg(0)};
   for (Instruction &I : make_early_inc_range(instructions(Kernel)))
-    if (auto *Annotation = dyn_cast<IntrinsicInst>(&I);
-        Annotation &&
-        Annotation->getIntrinsicID() == Intrinsic::ptr_annotation) {
-      StringRef Name;
-      if (getConstantStringInfo(Annotation->getArgOperand(1), Name) &&
-          Name == "sycl.accessor.pointer") {
-        Annotation->replaceAllUsesWith(Annotation->getArgOperand(0));
-        Annotation->eraseFromParent();
-      }
-    }
+    if (auto *Annotation = dyn_cast<IntrinsicInst>(&I))
+      removePointerAnnotation(*Annotation, "sycl.accessor.pointer");
   SmallVector<Instruction *> Addresses;
   SmallPtrSet<Value *, 16> Seen;
   while (!Worklist.empty()) {
@@ -308,6 +301,13 @@ bool lowerKernel(Module &M) {
   }
   if (!Kernel)
     return false;
+  for (StringRef Name : {"llvm.global_ctors", "llvm.global_dtors"})
+    if (const auto *Initializers = M.getGlobalVariable(Name);
+        Initializers && Initializers->hasInitializer() &&
+        !Initializers->getInitializer()->isNullValue()) {
+      fail("dynamic device initialization and destruction are not supported");
+      return false;
+    }
   if (!Kernel->getReturnType()->isVoidTy() || Kernel->isVarArg() ||
       !Kernel->use_empty()) {
     fail("kernel must return void and cannot be called or variadic");

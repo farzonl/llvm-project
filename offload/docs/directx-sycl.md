@@ -503,6 +503,42 @@ Reproduce this measurement with the command above, using a fresh
 the actual device program from host-only initialization/dependencies without
 discarding initialization that a kernel genuinely requires.
 
+### Kernel dependency isolation and first geometry execution
+
+DirectX split images now start from their kernel's dependencies instead of
+rooting every non-discardable global imported by single-source compilation.
+Constructors/destructors that can affect reachable globals, associated data,
+and transitive initialization dependencies remain in the image. Opaque effects
+are retained conservatively when mutable globals are reachable. Required
+dynamic device initialization/destruction is explicitly rejected; it is not
+discarded to make a shader compile. Other targets retain their existing global
+root policy.
+
+Each split image is then prepared for the restricted ABI using standard
+inlining, scalar replacement, instruction/CFG simplification, and dead-code
+cleanup. The recognized accessor-pointer annotation is removed before this
+step so private accessor copies can be scalarized. Explicit `noinline` and
+unsupported-device-call attributes are not overridden. This handles ordinary
+inlineable device helpers, not general out-of-line device calls.
+
+The unchanged range category now builds, signs, links, and executes on NVIDIA,
+AMD, and Intel: **4 of 5 test cases and 126 of 127 assertions pass** on each.
+The remaining `range_api` case requests a local shape that does not match the
+compiled `numthreads`, and fails with the real group-size diagnostic. It is
+not a passing category and does not use a forced one-thread fallback.
+
+Header/error still pass on all three filters. NDRange still fails device
+linking on aggregate captures containing arrays of 64-bit range components;
+it has no executions. Thus the count of fully passing categories remains
+two, although genuine geometry test cases now execute.
+
+Reproduce the four-category measurement with the existing command, using
+`--report-dir "%CTS_BUILD%\isolation-verified"`. The next prerequisites are
+array/64-bit capture transport and correct workgroup specialization, without
+weakening the CTS or changing only launch metadata. Native byte buffers,
+executable bundles, and vector-add remain regression-tested on all three
+hardware vendors.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
