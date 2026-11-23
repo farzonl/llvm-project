@@ -147,6 +147,21 @@ TEST(DirectXManifestTest, ValidatesCapturedArgumentLayouts) {
               error::ErrorCode::UNSUPPORTED, "64-bit pointer");
 }
 
+TEST(DirectXManifestTest, AcceptsUnusedCaptureFields) {
+  auto Object = emptyManifest();
+  Object["capture"] = json::Object{
+      {"size", 24}, {"pointer_size", 8}, {"offsets", json::Array{}}};
+  auto Manifest = DirectXManifestTy::parse(encode(Object));
+  ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
+  ASSERT_TRUE(Manifest->Capture);
+  EXPECT_TRUE(Manifest->Arguments.empty());
+  EXPECT_TRUE(Manifest->Capture->Offsets.empty());
+  EXPECT_EQ(Manifest->getNumLaunchArguments(), 1u);
+  (*Object.getObject("capture"))["size"] = 0;
+  expectError(DirectXManifestTy::parse(encode(Object)),
+              error::ErrorCode::INVALID_BINARY, "nonempty record");
+}
+
 TEST(DirectXManifestTest, AcceptsEmptyKernelsAndFullRootBudget) {
   auto Empty = DirectXManifestTy::parse(encode(emptyManifest()));
   ASSERT_TRUE(static_cast<bool>(Empty)) << toString(Empty.takeError());

@@ -22,8 +22,9 @@ element per work-item. Work-item IDs, local/global ranges, group IDs/ranges,
 linear IDs, and 64-bit global offsets use a reusable target/runtime
 [NDRange ABI](directx-manifest.md#ndrange-dispatch-abi), including 2D/3D
 dimension ordering. Subgroup builtins remain explicitly unsupported.
-The captured kernel accepts buffer pointers and 32-bit integer/float scalars,
-including loaded fields of nested accessor records, subject to the
+The captured kernel accepts buffer pointers, 32/64-bit integers, and 32-bit
+floats, including loaded fields of nested records, nonvirtual bases, and
+fixed-size arrays, subject to the
 [capture ABI restrictions](directx-manifest.md#restricted-capture-record-abi).
 The GNU `reqd_work_group_size(x,y,z)` attribute on a kernel lambda or functor's
 call operator fixes its native workgroup shape. Host local sizes must match;
@@ -527,10 +528,10 @@ The remaining `range_api` case requests a local shape that does not match the
 compiled `numthreads`, and fails with the real group-size diagnostic. It is
 not a passing category and does not use a forced one-thread fallback.
 
-Header/error still pass on all three filters. NDRange still fails device
-linking on aggregate captures containing arrays of 64-bit range components;
-it has no executions. Thus the count of fully passing categories remains
-two, although genuine geometry test cases now execute.
+At this checkpoint, header/error passed on all three filters. NDRange still
+failed device linking on aggregate captures containing arrays of 64-bit range
+components and had no executions. The fully passing category count was two,
+although genuine geometry test cases could execute.
 
 Reproduce the four-category measurement with the existing command, using
 `--report-dir "%CTS_BUILD%\isolation-verified"`. The next prerequisites are
@@ -538,6 +539,50 @@ array/64-bit capture transport and correct workgroup specialization, without
 weakening the CTS or changing only launch metadata. Native byte buffers,
 executable bundles, and vector-add remain regression-tested on all three
 hardware vendors.
+
+### Scalar array captures and first full GPU CTS category
+
+Clang now records scalar leaves of fixed-size arrays and nonvirtual bases,
+including the base-class arrays used by SYCL ranges. Capture lowering validates
+those offsets against the LLVM record and transports used 64-bit integers
+without truncation. Eight-byte root constants have eight-byte alignment;
+explicit `dx.Layout` size/offsets preserve gaps and the 252-byte root budget.
+The existing runtime already copies eight-byte scalar values without
+conversion. Byte-PHI legalization now also handles boolean merges and loop
+backedges using legal integer carriers, without widening buffer element
+storage.
+
+Optimized-away captures remain valid: a nonempty capture record can have zero
+used bindings. It still supplies one correctly sized host argument. This
+allows genuinely generated constructor kernels whose checks optimize away to
+remain executable; it does not substitute a dummy shader or alter CTS checks.
+
+The unchanged **NDRange category passes all six cases and 558 assertions** on
+NVIDIA, AMD, and Intel, including real GPU execution of captured range
+comparisons and member checks. Header/error continue to pass. This brings
+confirmed fully passing categories to **3 of 97 configured categories
+(about 3.1%)**; the other 93 categories were not remeasured in this increment.
+The selected four-category measurement passes three categories, not 75% of
+the full CTS. Range still executes with 4/5 cases and 126/127 assertions passing
+per vendor; its remaining failure requires genuine workgroup specialization.
+
+Rebuild device objects after changing the compiler's capture metadata, and
+refresh the CTS executable directory's runtime DLL before measuring:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\array-capture-verified" ^
+  --targets test_error test_header test_range test_nd_range ^
+  --devices NVIDIA AMD Intel --jobs 2
+```
+
+Native regressions also check distinct upper/lower 64-bit words, negative
+signed values, mixed scalar alignment, nested arrays, unused captures, and
+unchanged byte-buffer layout on all three vendors. Dynamic array indexing,
+general device aggregates, other scalar types, and runtime local-size
+specialization remain outside this checkpoint.
 
 ### Adapter validation
 

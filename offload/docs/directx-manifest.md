@@ -21,7 +21,7 @@ and adds feature declarations from the final DXIL
 container. The metadata is not embedded in executable DXIL: validation rejects
 unknown named metadata. This path currently accepts only indexed buffer-pointer
 arguments with scalar 8-bit integer or 32-bit integer/float accesses,
-32-bit integer/float scalar arguments packed
+32/64-bit integer and 32-bit float scalar arguments packed
 into `b0, space0` root constants, and fixed workgroup sizes.
 See the [C++ demo](directx-demo.md) for the supported subset and build pipeline.
 
@@ -48,10 +48,17 @@ AST capture-field offsets and sizes in `dx.capture.layout` function metadata.
 It requires an x64 auxiliary host target for captured pointers. The DirectX
 kernel ABI lowers a single by-value record into resources and root constants,
 and removes this metadata and the capture record before executable emission.
-Nested record captures are flattened to loaded leaf fields. Buffer pointers
-and 32-bit integers/floats are supported; unused fields, including host-only
-accessor ownership fields, do not produce bindings. Used wider scalars,
-dynamic field indexing, and pointer escapes remain unsupported.
+Nested records, nonvirtual bases, and fixed-size arrays are flattened to loaded
+leaf fields at their actual host offsets. Buffer pointers, 32/64-bit integers,
+and 32-bit floats are supported; unused fields, including host-only accessor
+ownership fields, do not produce bindings. A completely unused capture still
+requires one complete, nonempty host record, but has an empty `offsets` array
+and no bindings. Other scalar types, virtual bases, dynamic field indexing,
+and pointer escapes remain unsupported.
+Root constants align each scalar to its width, counting alignment gaps against
+the 252-byte budget. Kernels with 64-bit scalars use the existing `dx.Layout`
+type to describe the exact cbuffer byte size and offsets independently of the
+packed LLVM record. Dispatch constants follow the user scalar region.
 Ordinary buffer access instructions determine SRV versus UAV bindings.
 An optional third layout-metadata operand marks SYCL accessor pointers and
 forces UAV bindings so read/write aliases can share a resource. This marker

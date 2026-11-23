@@ -4,6 +4,11 @@
 # RUN: llc -filetype=obj %t/max.ll -o %t/max.dxil
 # RUN: %python %t/generate.py 64 > %t/over.ll
 # RUN: not opt -S -dxil-kernel-abi %t/over.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OVER
+# RUN: %python %t/generate.py 30 wide > %t/wide-max.ll
+# RUN: opt -S -dxil-kernel-abi %t/wide-max.ll | FileCheck %s --check-prefix=MAX
+# RUN: llc -filetype=obj %t/wide-max.ll -o %t/wide-max.dxil
+# RUN: %python %t/generate.py 31 wide > %t/wide-over.ll
+# RUN: not opt -S -dxil-kernel-abi %t/wide-over.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OVER
 
 # MAX: !dx.typeAnnotations
 # MAX: !{{[0-9]+}} = !{i32 252,
@@ -15,6 +20,15 @@ import sys
 count = int(sys.argv[1])
 params = ", ".join(f"i32 %a{i}" for i in range(count))
 body = "\n".join(f"  store i32 %a{i}, ptr %out" for i in range(count))
+if len(sys.argv) > 2:
+    params = "i32 %prefix, " + ", ".join(f"i64 %a{i}" for i in range(count))
+    params += ", i32 %tail"
+    body = "  store i32 %prefix, ptr %out\n"
+    body += "\n".join(
+        f"  %low{i} = trunc i64 %a{i} to i32\n  store i32 %low{i}, ptr %out"
+        for i in range(count)
+    )
+    body += "\n  store i32 %tail, ptr %out"
 print(
     'target triple = "dxil-pc-shadermodel6.0-compute"\n'
     f"define void @limit(ptr %out, {params}) #0 {{\n{body}\n  ret void\n}}\n"

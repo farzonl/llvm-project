@@ -22,6 +22,7 @@
 #include "llvm/Pass.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Local.h"
 
@@ -148,12 +149,28 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
     unsigned Element = RecordLayout->getElementContainingOffset(*Offset);
     Type *Ty = Record->getElementType(Element);
     uint64_t RelativeOffset = *Offset - RecordLayout->getElementOffset(Element);
-    while (auto *Nested = dyn_cast<StructType>(Ty)) {
+    while (Ty->isStructTy() || Ty->isArrayTy()) {
+      if (auto *Array = dyn_cast<ArrayType>(Ty)) {
+        Type *ElementType = Array->getElementType();
+        uint64_t Stride = Layout.getTypeAllocSize(ElementType);
+        if (!Stride || RelativeOffset / Stride >= Array->getNumElements()) {
+          fail("capture layout does not match array element offsets");
+          return nullptr;
+        }
+        RelativeOffset %= Stride;
+        Ty = ElementType;
+        continue;
+      }
+      auto *Nested = cast<StructType>(Ty);
       if (Nested->isOpaque() || Nested->getNumElements() == 0) {
         fail("capture layout contains an empty or opaque nested record");
         return nullptr;
       }
       const StructLayout *NestedLayout = Layout.getStructLayout(Nested);
+      if (RelativeOffset >= NestedLayout->getSizeInBytes()) {
+        fail("capture layout does not match record field offsets");
+        return nullptr;
+      }
       unsigned NestedElement =
           NestedLayout->getElementContainingOffset(RelativeOffset);
       RelativeOffset -= NestedLayout->getElementOffset(NestedElement);
@@ -217,9 +234,11 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
           fail("captured buffers require 64-bit default or generic pointers");
           return nullptr;
         }
-      } else if ((!Ty->isIntegerTy(32) && !Ty->isFloatTy()) ||
-                 FieldSizes[Field] != 4 || Offset % 4) {
-        fail("captures must be buffer pointers or 32-bit integer/float values");
+      } else if ((!Ty->isIntegerTy(32) && !Ty->isIntegerTy(64) &&
+                  !Ty->isFloatTy()) ||
+                 FieldSizes[Field] != Layout.getTypeStoreSize(Ty) ||
+                 Offset % FieldSizes[Field]) {
+        fail("captures must be buffer pointers, 32/64-bit integers, or floats");
         return nullptr;
       }
       Loads[Field].push_back(Load);
@@ -345,19 +364,28 @@ bool lowerKernel(Module &M) {
       return false;
   }
   SmallVector<Type *> ScalarTypes;
+  SmallVector<unsigned> ScalarOffsets;
+  unsigned ScalarBytes = 0;
+  auto AddScalar = [&](Type *Ty) {
+    unsigned Size = Ty->isIntegerTy(64) ? 8 : 4;
+    ScalarBytes = alignTo(ScalarBytes, Size);
+    ScalarOffsets.push_back(ScalarBytes);
+    ScalarTypes.push_back(Ty);
+    ScalarBytes += Size;
+  };
   for (Argument &Arg : Kernel->args()) {
     Type *Ty = Arg.getType();
-    if (Ty->isIntegerTy(32) || Ty->isFloatTy()) {
+    if (Ty->isIntegerTy(32) || Ty->isIntegerTy(64) || Ty->isFloatTy()) {
       if (Arg.use_empty()) {
         fail("unused scalar arguments are not supported");
         return false;
       }
-      ScalarTypes.push_back(Ty);
+      AddScalar(Ty);
       continue;
     }
     if (!Ty->isPointerTy() || Ty->getPointerAddressSpace() != 0) {
       fail("arguments must be default-address-space buffer pointers or "
-           "32-bit integer/float scalars");
+           "32/64-bit integer or float scalars");
       return false;
     }
     if (!checkPointer(Arg, Arg.hasAttribute("dx.readonly")))
@@ -377,10 +405,11 @@ bool lowerKernel(Module &M) {
         }
         DispatchQueries.push_back(Call);
       }
-  unsigned DispatchOffset = ScalarTypes.size() * 4;
+  unsigned DispatchOffset = ScalarBytes;
   if (!DispatchQueries.empty())
-    ScalarTypes.append(DispatchWords, Type::getInt32Ty(M.getContext()));
-  if (ScalarTypes.size() > 63) {
+    for (unsigned I = 0; I < DispatchWords; ++I)
+      AddScalar(Type::getInt32Ty(M.getContext()));
+  if (ScalarBytes > 252) {
     fail("scalar arguments exceed the 252-byte root constant limit");
     return false;
   }
@@ -438,22 +467,33 @@ bool lowerKernel(Module &M) {
   if (!ScalarTypes.empty()) {
     auto *Layout = StructType::create(M.getContext(), ScalarTypes,
                                       "__dx_kernel_args", true);
+    Type *ResourceLayout = Layout;
+    if (llvm::any_of(ScalarTypes,
+                     [](Type *Ty) { return Ty->isIntegerTy(64); })) {
+      SmallVector<unsigned> LayoutParameters{ScalarBytes};
+      llvm::append_range(LayoutParameters, ScalarOffsets);
+      ResourceLayout = TargetExtType::get(M.getContext(), "dx.Layout", {Layout},
+                                          LayoutParameters);
+    }
     ConstantHandleTy =
-        TargetExtType::get(M.getContext(), "dx.CBuffer", {Layout});
+        TargetExtType::get(M.getContext(), "dx.CBuffer", {ResourceLayout});
     ConstantHandle = Builder.CreateIntrinsic(
         ConstantHandleTy, Intrinsic::dx_resource_handlefrombinding,
         {Builder.getInt32(0), Builder.getInt32(0), Builder.getInt32(1),
          Builder.getInt32(0), Builder.CreateGlobalString(Layout->getName())});
-    unsigned Bytes = ScalarTypes.size() * 4;
+    unsigned Bytes = ScalarBytes;
     SmallVector<Metadata *> Fields{
         ConstantAsMetadata::get(Builder.getInt32(Bytes))};
     for (auto [Index, Ty] : enumerate(ScalarTypes))
       Fields.push_back(MDNode::get(
-          M.getContext(), {ConstantAsMetadata::get(Builder.getInt32(3)),
-                           ConstantAsMetadata::get(Builder.getInt32(Index * 4)),
-                           ConstantAsMetadata::get(Builder.getInt32(7)),
-                           ConstantAsMetadata::get(
-                               Builder.getInt32(Ty->isFloatTy() ? 9 : 4))}));
+          M.getContext(),
+          {ConstantAsMetadata::get(Builder.getInt32(3)),
+           ConstantAsMetadata::get(Builder.getInt32(ScalarOffsets[Index])),
+           ConstantAsMetadata::get(Builder.getInt32(7)),
+           ConstantAsMetadata::get(Builder.getInt32(Ty->isFloatTy() ? 9
+                                                    : Ty->isIntegerTy(64)
+                                                        ? 6
+                                                        : 4))}));
     M.getOrInsertNamedMetadata("dx.typeAnnotations")
         ->addOperand(MDNode::get(
             M.getContext(),
@@ -462,9 +502,11 @@ bool lowerKernel(Module &M) {
              MDNode::get(M.getContext(), Fields)}));
     Constants = json::Object{{"register", 0}, {"space", 0}, {"size", Bytes}};
   }
-  unsigned ScalarOffset = 0;
+  unsigned ScalarIndex = 0;
   for (Argument &Arg : Kernel->args()) {
     if (!Arg.getType()->isPointerTy()) {
+      unsigned ScalarOffset = ScalarOffsets[ScalarIndex++];
+      unsigned Size = Arg.getType()->isIntegerTy(64) ? 8 : 4;
       auto *Pointer = Builder.CreateIntrinsic(
           Intrinsic::dx_resource_getpointer,
           {Builder.getPtrTy(2), ConstantHandleTy, Builder.getInt32Ty()},
@@ -473,9 +515,8 @@ bool lowerKernel(Module &M) {
       Arg.replaceAllUsesWith(Builder.CreateLoad(Arg.getType(), Pointer));
       Arguments.push_back(json::Object{{"index", Arg.getArgNo()},
                                        {"kind", "scalar"},
-                                       {"size", 4},
+                                       {"size", Size},
                                        {"offset", ScalarOffset}});
-      ScalarOffset += 4;
       continue;
     }
     bool ReadOnly = Arg.hasAttribute("dx.readonly");

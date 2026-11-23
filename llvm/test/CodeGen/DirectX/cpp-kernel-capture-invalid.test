@@ -5,7 +5,7 @@
 # RUN: not opt -S -dxil-kernel-abi %t/overlap.ll -o /dev/null 2>&1 | FileCheck %s --check-prefix=OVERLAP
 # ESCAPE: buffer pointers may only be indexed, loaded, or stored
 # DYNAMIC: capture records may only be read at constant field offsets
-# WIDE: captures must be buffer pointers or 32-bit integer/float values
+# WIDE: captures must be buffer pointers, 32/64-bit integers, or floats
 # OVERLAP: capture fields must be ordered, nonoverlapping, and in bounds
 
 #--- escape.ll
@@ -38,16 +38,16 @@ attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
 !2 = !{i32 4, i32 4}
 
 #--- wide.ll
-target datalayout = "e-p:32:32-i64:64"
+target datalayout = "e-p:32:32-i128:128"
 target triple = "dxil-pc-shadermodel6.0-compute"
-%Capture = type { i64 }
+%Capture = type { i128 }
 define void @capture(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
-  %value = load i64, ptr %args
+  %value = load i128, ptr %args
   ret void
 }
 attributes #0 = { "dx.kernel" "hlsl.numthreads"="64,1,1" }
-!0 = !{i32 8, i32 8, !1}
-!1 = !{i32 0, i32 8}
+!0 = !{i32 16, i32 8, !1}
+!1 = !{i32 0, i32 16}
 
 #--- overlap.ll
 target datalayout = "e-p:32:32"

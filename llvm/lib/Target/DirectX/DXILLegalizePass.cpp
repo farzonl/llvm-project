@@ -592,6 +592,33 @@ public:
     for (int Stage = 0; Stage < NumStages; ++Stage) {
       ToRemove.clear();
       ReplacedValues.clear();
+      SmallVector<PHINode *> IntegerPhis;
+      if (Stage == Stage1)
+        for (BasicBlock &BB : F)
+          for (PHINode &Phi : BB.phis())
+            if (auto *Ty = getLegalIntegerType(Phi.getType())) {
+              auto *Replacement = PHINode::Create(
+                  Ty, Phi.getNumIncomingValues(), "", Phi.getIterator());
+              Replacement->takeName(&Phi);
+              Replacement->copyMetadata(Phi);
+              Replacement->setDebugLoc(Phi.getDebugLoc());
+              ReplacedValues[&Phi] = Replacement;
+              IntegerPhis.push_back(&Phi);
+              ToRemove.push_back(&Phi);
+              MadeChange = true;
+            }
+      // Seed complete PHIs before querying their operands' known bits.
+      for (PHINode *Phi : IntegerPhis) {
+        auto *Replacement = cast<PHINode>(ReplacedValues.lookup(Phi));
+        for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
+          BasicBlock *Predecessor = Phi->getIncomingBlock(I);
+          IRBuilder<> Builder(Predecessor->getTerminator());
+          Builder.SetCurrentDebugLocation(Phi->getDebugLoc());
+          Replacement->addIncoming(Builder.CreateZExt(Phi->getIncomingValue(I),
+                                                      Replacement->getType()),
+                                   Predecessor);
+        }
+      }
       for (BasicBlock *BB : ReversePostOrderTraversal<Function *>(&F))
         for (Instruction &I : *BB)
           for (auto &LegalizationFn : LegalizationPipeline[Stage])
@@ -600,6 +627,9 @@ public:
               break;
             }
 
+      // Break dead cycles between the original PHIs and their backedges.
+      for (Instruction *Inst : ToRemove)
+        Inst->dropAllReferences();
       for (auto *Inst : reverse(ToRemove))
         Inst->eraseFromParent();
     }

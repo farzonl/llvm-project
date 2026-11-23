@@ -300,8 +300,7 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
           error::ErrorCode::UNSUPPORTED,
           "DirectX capture layout requires native 64-bit pointer values");
     const auto *Offsets = Block->getArray("offsets");
-    if (!*Size || !Offsets || Offsets->empty() ||
-        Offsets->size() != Manifest.Arguments.size())
+    if (!*Size || !Offsets || Offsets->size() != Manifest.Arguments.size())
       return invalid(
           "capture requires a nonempty record and one offset per binding");
     DirectXCaptureLayoutTy Layout;

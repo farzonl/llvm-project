@@ -156,30 +156,55 @@ void CodeGenModule::EmitSYCLKernelCaller(const FunctionDecl *KernelEntryPointFn,
         Layout.push_back(Integer(RL.getSize().getQuantity()));
         Layout.push_back(
             Integer(Ctx.getTargetInfo().getPointerWidth(LangAS::Default) / 8));
-        auto AddFields = [&](auto &&Self, const RecordDecl *Record,
-                             uint64_t Base) -> void {
-          const ASTRecordLayout &RecordLayout = Ctx.getASTRecordLayout(Record);
-          for (const FieldDecl *Field : Record->fields()) {
-            uint64_t Offset =
-                Base + RecordLayout.getFieldOffset(Field->getFieldIndex()) / 8;
-            const auto *Nested = Field->getType()->getAs<RecordType>();
-            if (Nested && !Nested->getDecl()->isUnion() && !Field->isBitField())
-              Self(Self, Nested->getDecl(), Offset);
-            else {
-              llvm::SmallVector<llvm::Metadata *> FieldLayout{
-                  Integer(Offset),
-                  Integer(
-                      Ctx.getTypeSizeInChars(Field->getType()).getQuantity())};
+        auto AddFields = [&](auto &&Self, QualType Type, uint64_t Base,
+                             const FieldDecl *Field) -> void {
+          if (const auto *Array = Ctx.getAsConstantArrayType(Type)) {
+            QualType Element = Array->getElementType();
+            uint64_t Stride = Ctx.getTypeSizeInChars(Element).getQuantity();
+            for (uint64_t I = 0, N = Array->getSize().getZExtValue(); I < N;
+                 ++I)
+              Self(Self, Element, Base + I * Stride, nullptr);
+            return;
+          }
+          const auto *Nested = Type->getAs<RecordType>();
+          if (Nested && !Nested->getDecl()->isUnion() &&
+              (!Field || !Field->isBitField())) {
+            const RecordDecl *Record = Nested->getDecl();
+            const ASTRecordLayout &RecordLayout =
+                Ctx.getASTRecordLayout(Record);
+            if (const auto *CXXRecord = dyn_cast<CXXRecordDecl>(Record)) {
+              if (CXXRecord->getNumVBases()) {
+                getDiags().Report(diag::err_fe_error_backend)
+                    << "DirectX capture layout does not support virtual bases";
+                return;
+              }
+              for (const CXXBaseSpecifier &BaseClass : CXXRecord->bases()) {
+                const auto *BaseRecord =
+                    BaseClass.getType()->getAsCXXRecordDecl();
+                Self(Self, BaseClass.getType(),
+                     Base + RecordLayout.getBaseClassOffset(BaseRecord)
+                                .getQuantity(),
+                     nullptr);
+              }
+            }
+            for (const FieldDecl *Member : Record->fields())
+              Self(Self, Member->getType(),
+                   Base +
+                       RecordLayout.getFieldOffset(Member->getFieldIndex()) / 8,
+                   Member);
+          } else {
+            llvm::SmallVector<llvm::Metadata *> FieldLayout{
+                Integer(Base),
+                Integer(Ctx.getTypeSizeInChars(Type).getQuantity())};
+            if (Field)
               for (const auto *Annotation :
                    Field->specific_attrs<AnnotateAttr>())
                 if (Annotation->getAnnotation() == "sycl.accessor.pointer")
                   FieldLayout.push_back(Integer(1));
-              Layout.push_back(
-                  llvm::MDNode::get(getLLVMContext(), FieldLayout));
-            }
+            Layout.push_back(llvm::MDNode::get(getLLVMContext(), FieldLayout));
           }
         };
-        AddFields(AddFields, RD, 0);
+        AddFields(AddFields, CaptureType, 0, nullptr);
       }
     }
     Fn->setMetadata("dx.capture.layout",

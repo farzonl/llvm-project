@@ -78,6 +78,36 @@ template void updateBytes<unsigned char, 1025>(sycl::queue &,
 template void updateBytes<signed char, 5>(sycl::queue &,
                                           sycl::buffer<signed char> &);
 
+struct CaptureValues {
+  unsigned long long Values[2][2];
+  float Scale;
+  long long SignedValue;
+};
+
+void submitUnusedCapture(sycl::queue &Queue, sycl::buffer<int> &Buffer) {
+  Queue.submit([&](sycl::handler &Handler) {
+    auto Output = Buffer.get_access(Handler);
+    Handler.single_task<class BufferUnusedCapture>([Output] { (void)Output; });
+  });
+}
+
+void writeCapturedValues(sycl::queue &Queue, sycl::buffer<unsigned> &Buffer,
+                         unsigned Bias, const CaptureValues &Values) {
+  Queue.submit([&](sycl::handler &Handler) {
+    auto Output = Buffer.get_access(Handler);
+    Handler.single_task<class BufferArrayCapture>([=] {
+      Output[0] = Bias + static_cast<unsigned>(Values.Values[0][0]);
+      Output[1] = static_cast<unsigned>(Values.Values[0][1] >> 32);
+      Output[2] = static_cast<unsigned>(Values.Values[1][0]);
+      Output[3] = static_cast<unsigned>(Values.Values[1][1] >> 32);
+      Output[4] = static_cast<unsigned>(Values.Scale * Bias);
+      Output[5] = Values.SignedValue < -1
+                      ? static_cast<unsigned>(Values.SignedValue >> 32)
+                      : 0;
+    });
+  });
+}
+
 #ifndef __SYCL_DEVICE_ONLY__
 #  include <array>
 #  include <atomic>
@@ -141,6 +171,32 @@ void run(int Argc, char **Argv) {
   checkBytes<unsigned char, 5>(First, 3);
   checkBytes<unsigned char, 1025>(First, 16);
   checkBytes<signed char, 5>(First, 3);
+  int Unchanged = 73;
+  {
+    sycl::buffer<int> Buffer(&Unchanged, sycl::range<1>(1));
+    submitUnusedCapture(First, Buffer);
+  }
+  assert(Unchanged == 73);
+  CaptureValues Captured{{{0x123456789ABCDEF0ULL, 0xFEDCBA9876543210ULL},
+                          {0x0BADF00DDEADBEEFULL, 0x89ABCDEF01234567ULL}},
+                         0.5f,
+                         -0x100000003LL};
+  for (unsigned Bias : {6u, 10u}) {
+    std::array<unsigned, 6> Result{};
+    {
+      sycl::buffer<unsigned> Buffer(Result.data(), sycl::range<1>(6));
+      writeCapturedValues(First, Buffer, Bias, Captured);
+    }
+    assert(Result[0] == Bias + static_cast<unsigned>(Captured.Values[0][0]));
+    assert(Result[1] == static_cast<unsigned>(Captured.Values[0][1] >> 32));
+    assert(Result[2] == static_cast<unsigned>(Captured.Values[1][0]));
+    assert(Result[3] == static_cast<unsigned>(Captured.Values[1][1] >> 32));
+    assert(Result[4] == static_cast<unsigned>(Captured.Scale * Bias));
+    assert(Result[5] == static_cast<unsigned>(Captured.SignedValue >> 32));
+    Captured.Values[0][0] += 7;
+    Captured.Values[0][1] -= 0x100000000ULL;
+    Captured.SignedValue -= 0x100000000LL;
+  }
   std::array<int, 8> Input{};
   std::array<float, 8> Output{};
   for (unsigned I = 0; I < 8; ++I)
