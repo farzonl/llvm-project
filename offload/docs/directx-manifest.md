@@ -109,7 +109,8 @@ buffer allocations or copies them into root constants.
 `dx.local.specializable` retains prepared IR even for a fixed workgroup.
 `-dxil-kernel-local-allocations=` specializes the ordered used slots into
 separate groupshared arrays, coalescing aliases. The initial packaged image
-uses minimal aligned allocations and is never dispatched for a kernel with
+uses minimal aligned allocations large enough for constant accesses and is
+never dispatched for a kernel with
 local slots: a matching compiled/signed variant is mandatory even when its
 workgroup shape equals the packaged shape. Missing compiler tools fail
 explicitly. Fixed workgroup dimensions remain fixed; local-size changes do
@@ -121,9 +122,11 @@ incompatible image. Resource addresses, ordinary scalars, global ranges, and
 offsets are not specialization inputs. Each produced image is reflected and
 validated again, including its total static groupshared storage and the
 32768-byte limit; local allocations do not bypass existing shader validation.
-Current lowering supports non-atomic, nonvolatile 32-bit integer/float scalar
-accesses, including such fields in trivial aggregates. Narrow, wide, vector
-and general escaping local-pointer operations remain unsupported.
+Current lowering supports non-atomic, nonvolatile 32/64-bit integer and 32-bit
+float scalar accesses, including such fields in trivial aggregates. A 64-bit
+integer access is split into two 32-bit groupshared words without changing the
+allocation-token ABI. Narrow, vector, 64-bit floating-point and general escaping
+local-pointer operations remain unsupported.
 
 DirectX SYCL splitting keeps globals reachable from the kernel rather than
 rooting every non-discardable host global. Constructors/destructors that can

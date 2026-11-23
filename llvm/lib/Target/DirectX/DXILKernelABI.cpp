@@ -64,18 +64,20 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
       } else if (auto *Load = dyn_cast<LoadInst>(Use)) {
         if (Load->isAtomic() || Load->isVolatile() ||
             (!Load->getType()->isIntegerTy(32) &&
+             !Load->getType()->isIntegerTy(64) &&
              !Load->getType()->isFloatTy())) {
-          fail("local accessors currently require non-atomic 32-bit scalar "
-               "accesses");
+          fail("local accessors require non-atomic 32/64-bit integer or "
+               "32-bit float scalar accesses");
           return false;
         }
       } else if (auto *Store = dyn_cast<StoreInst>(Use)) {
         Type *Type = Store->getValueOperand()->getType();
         if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
             Store->isVolatile() ||
-            (!Type->isIntegerTy(32) && !Type->isFloatTy())) {
-          fail("local accessors currently require non-atomic 32-bit scalar "
-               "accesses");
+            (!Type->isIntegerTy(32) && !Type->isIntegerTy(64) &&
+             !Type->isFloatTy())) {
+          fail("local accessors require non-atomic 32/64-bit integer or "
+               "32-bit float scalar accesses");
           return false;
         }
       } else {
@@ -88,11 +90,25 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
           fail("local accessor constant accesses precede the allocation");
           return false;
         }
-        MinimumBytes = std::max(MinimumBytes, uint64_t(Offset) + 4);
+        Type *AccessType =
+            isa<LoadInst>(Use)
+                ? cast<LoadInst>(Use)->getType()
+                : cast<StoreInst>(Use)->getValueOperand()->getType();
+        MinimumBytes =
+            std::max(MinimumBytes,
+                     uint64_t(Offset) +
+                         Layout.getTypeStoreSize(AccessType).getFixedValue());
       }
     }
   }
   return true;
+}
+
+Value *getLocalWordPointer(IRBuilder<> &Builder, Value *Pointer, Value *Index) {
+  if (auto *Global = dyn_cast<GlobalVariable>(Pointer))
+    return Builder.CreateGEP(Global->getValueType(), Global,
+                             {Builder.getInt32(0), Index});
+  return Builder.CreateGEP(Builder.getInt32Ty(), Pointer, Index);
 }
 
 void replaceLocalPointer(Value *Old, Value *Pointer, const DataLayout &Layout) {
@@ -119,16 +135,47 @@ void replaceLocalPointer(Value *Old, Value *Pointer, const DataLayout &Layout) {
             Builder.CreateMul(
                 Builder.CreateIntCast(Variable, Builder.getInt32Ty(), true),
                 Builder.getInt32(Scale.sdiv(APInt(Bits, 4)).getSExtValue())));
-      Value *Address;
-      if (auto *Global = dyn_cast<GlobalVariable>(Pointer))
-        Address = Builder.CreateGEP(Global->getValueType(), Global,
-                                    {Builder.getInt32(0), Index});
-      else
-        Address = Builder.CreateGEP(Builder.getInt32Ty(), Pointer, Index);
+      Value *Address = getLocalWordPointer(Builder, Pointer, Index);
       if (auto *Instruction = dyn_cast<llvm::Instruction>(Address))
         Instruction->copyMetadata(*GEP);
       replaceLocalPointer(GEP, Address, Layout);
       GEP->eraseFromParent();
+    } else if (auto *Load = dyn_cast<LoadInst>(Use);
+               Load && Load->getType()->isIntegerTy(64)) {
+      IRBuilder<> Builder(Load);
+      Value *Result = nullptr;
+      for (unsigned Word = 0; Word != 2; ++Word) {
+        auto *Part = Builder.CreateAlignedLoad(
+            Builder.getInt32Ty(),
+            getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
+            commonAlignment(Load->getAlign(), Word * 4));
+        copyMetadataForLoad(*Part, *Load);
+        Part->setAAMetadata(Load->getAAMetadata().adjustForAccess(Word * 4, 4));
+        // A whole-value range is not a range for either split word.
+        Part->setMetadata(LLVMContext::MD_range, nullptr);
+        Value *WidePart = Builder.CreateZExt(Part, Builder.getInt64Ty());
+        Result = Word
+                     ? Builder.CreateOr(Result, Builder.CreateShl(WidePart, 32))
+                     : WidePart;
+      }
+      Load->replaceAllUsesWith(Result);
+      Load->eraseFromParent();
+    } else if (auto *Store = dyn_cast<StoreInst>(Use);
+               Store && Store->getValueOperand()->getType()->isIntegerTy(64)) {
+      IRBuilder<> Builder(Store);
+      for (unsigned Word = 0; Word != 2; ++Word) {
+        Value *Part = Store->getValueOperand();
+        if (Word)
+          Part = Builder.CreateLShr(Part, 32);
+        auto *NewStore = Builder.CreateAlignedStore(
+            Builder.CreateTrunc(Part, Builder.getInt32Ty()),
+            getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
+            commonAlignment(Store->getAlign(), Word * 4));
+        NewStore->copyMetadata(*Store);
+        NewStore->setAAMetadata(
+            Store->getAAMetadata().adjustForAccess(Word * 4, 4));
+      }
+      Store->eraseFromParent();
     } else if (auto *Load = dyn_cast<LoadInst>(Use);
                Load && Load->getType()->isFloatTy()) {
       IRBuilder<> Builder(Load);

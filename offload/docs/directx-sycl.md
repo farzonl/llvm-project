@@ -1043,8 +1043,10 @@ storage without allowing their workgroup dimensions to change.
 
 Supported element types are mutable trivial types aligned from 4 through
 16 bytes; supported memory operations are nonvolatile, non-atomic 32-bit
-integer/float scalar accesses, including fields of trivial aggregates.
-General vectors, narrow/wide local operations, nontrivial construction, the
+integer/float scalar accesses, including fields of trivial aggregates. The
+wide-local extension below also supports 64-bit integer scalar accesses.
+General vectors, narrow local operations, 64-bit floating-point operations,
+nontrivial construction, the
 zero-dimensional API, properties, and complete local-accessor conformance
 remain outside this increment. Submissions require `nd_range`; single-task
 and implicit-range kernels are rejected. This allocation implementation is
@@ -1111,9 +1113,10 @@ DirectX `group` and `nd_item` now provide the modern decorated-pointer
 `async_work_group_copy` overloads for global-to-local and local-to-global
 transfers, including source/destination strides. Source pointers can preserve
 constness; destination elements must be mutable and match the source element
-type. Supported local operations remain nonvolatile, non-atomic 32-bit
-integer/float scalar accesses. This does not enable legacy pointer overloads,
-general vector/narrow/wide local transfers, or hierarchical group execution.
+type. Supported local operations are nonvolatile, non-atomic 32/64-bit
+integer or 32-bit float scalar accesses. This does not enable legacy pointer
+overloads, general vector/narrow transfers, 64-bit floating-point transfers,
+or hierarchical group execution.
 Host calls and other device backends are explicitly unsupported.
 
 Work-items cooperatively transfer elements according to their local linear IDs.
@@ -1185,6 +1188,54 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
     test_error test_header test_range test_nd_range ^
   --devices NVIDIA AMD Intel --jobs 2 --timeout 900
 ```
+
+### 64-bit integer local storage and copies
+
+The local-memory ABI now accepts scalar 64-bit integer loads and stores,
+including the accesses used by cooperative copies. Values are split into two
+32-bit groupshared words and reconstructed without losing either sign or high
+bits. This does not require or implement 64-bit shared-memory atomics:
+concurrent accesses still need ordinary SYCL data-race avoidance and barriers.
+Narrow/vector local operations, volatile/atomic local operations, and 64-bit
+floating-point operations remain unsupported.
+
+Each split access retains valid word alignment, memory alias metadata, and debug
+locations. Whole-value range metadata is not copied onto the individual words.
+Constant-access bounds and packaged placeholder storage account for the full
+eight-byte access; undersized runtime allocations remain errors. Neither the
+manifest format nor the allocation-token/cache-key ABI changes.
+
+The existing `workgroup_copy.cpp` build/run command above now also tests signed
+64-bit data with nonzero high words, low words whose sign bit is set, both
+positive and negative values, neighbor-lane reads, both copy directions,
+strides, guards, and completed-event waits. Its largest wide case uses two
+2048-element allocations, totaling exactly **32768 bytes** of groupshared
+storage, including guards.
+
+The rebuilt copy test and the existing local-accessor, pointer/barrier, buffer,
+and workgroup-specialization regressions pass on NVIDIA, AMD, and Intel.
+Twelve focused compiler tests pass, including word-pair lowering, alignment,
+range-metadata handling, and insufficient-allocation rejection.
+
+The focused unchanged `test_device_event` remeasurement also passes its one
+test case per vendor, with the original zero-assertion success path. Reproduce
+it after rebuilding `opt` and configuring the specialization tools:
+
+```bat
+cmake --build "%COMPILER_BUILD%" --target opt
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\wide-local-final" ^
+  --targets test_device_event --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+This focused run measures one category, not the entire earlier baseline.
+The confirmed category count remains **7/97** from the previous combined
+measurement; no additional full-category CTS pass is claimed. Full group and
+ND-item execution still requires the remaining type/storage and hierarchical
+execution prerequisites.
 
 ### Adapter validation
 
