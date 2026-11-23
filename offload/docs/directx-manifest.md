@@ -57,7 +57,10 @@ captured entry name; Clang's host embedding registers them automatically.
 libsycl loads each image as a separate one-entry package so its manifest is
 preserved. See the [parallel SYCL demo](directx-sycl.md). Device index/range
 helpers now expose work-item, group, and range queries through the NDRange
-dispatch ABI below. Automatic driver/linker compilation remains future work.
+dispatch ABI below. The standard DirectX SYCL driver/linker pipeline splits
+device modules per kernel, signs DXIL, and packages each image with its own
+manifest and symbol table. Both normalized `dxilv1.0-...` triples and the
+unversioned `dxil-...` spelling are recognized by libsycl.
 
 ## NDRange dispatch ABI
 

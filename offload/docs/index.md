@@ -44,11 +44,12 @@ It preserves the separate-argument ABI.
 See the [capture validation test](directx-demo.md#validate-sycl-generated-captures-separately).
 
 The [parallel SYCL demo](directx-sycl.md) uses the in-tree libsycl with
-DirectX device USM and compiler-generated image registration. It executes a
+DirectX device USM and compiler-generated image registration. Its standard
+`-fsycl` pipeline links separate device inputs, splits per kernel, signs DXIL,
+and generates packaged manifests without custom device build commands. It executes a
 captured C++ lambda through fixed-workgroup `sycl::queue::parallel_for`.
 Its reusable NDRange ABI supports multidimensional IDs/ranges and 64-bit
-global offsets. OpenCL, dynamic workgroup specialization, and automatic
-DirectX driver splitting are not supported yet.
+global offsets. OpenCL and dynamic workgroup specialization are not supported yet.
 
 The [experimental launch manifest](directx-manifest.md) defines versioned JSON
 metadata for packaged shaders. Its parser and LLVM-native DXIL reflection/ABI

@@ -6,9 +6,12 @@ The host uses an in-order `sycl::queue`, device USM, queued `memcpy`,
 `parallel_for`, and `wait_and_throw`. It contains no liboffload calls, handwritten shaders,
 manifests, binary registration, or `#embed`.
 
-Clang generates the lambda capture layout and DXIL kernel. LLVM's standard
-packager generates its launch manifest and SYCL symbol table, and Clang embeds
-and registers the package during host compilation. libsycl preserves each
+Clang's `-fsycl --offload-targets=dxil-pc-shadermodel6.0-compute` pipeline
+generates the lambda capture layout and device bitcode. `clang-linker-wrapper`
+links device inputs through `clang-sycl-linker`, which splits the module per
+kernel, lowers the resource-backed ABI, emits and signs DXIL, and packages each
+kernel's launch manifest and SYCL symbol table. The host linker embeds and
+registers the resulting images. libsycl preserves each
 DXIL image's manifest when validating and loading it through liboffload.
 The backend is exposed as `sycl::backend::ext_llvm_directx`. Only device USM is
 supported; host and shared USM aspects are reported as unavailable.
@@ -29,19 +32,24 @@ compiler currently uses one thread per workgroup, allowing `single_task`
 and range submissions within native dispatch limits. General local-size
 selection and specialization remain future work.
 
-SYCL registration can contain multiple images, but each DirectX image must
-describe one kernel, and libsycl loads each as a separate program.
+SYCL registration can contain multiple images, but each DirectX image describes
+one kernel, and libsycl loads each as a separate program. Default relocatable
+device compilation supports separate COFF objects and translation units with
+multiple kernels or no kernels. The final device link must contain at least
+one kernel. `-fno-gpu-rdc` finalizes each translation unit during compilation,
+so each such unit must contain a kernel. DirectX currently requires per-kernel
+splitting; explicit `translation_unit` and `link_unit` split modes are rejected.
 
-The example's CMake still orchestrates separate host/device compilations and
-DXIL signing. Automatic DirectX splitting with `clang -fsycl`, device linking,
-and driver-managed signing remain future work. This does not add an OpenCL
-host API, OpenCL C kernel support, or OpenMP integration.
+The example uses standard compiler options rather than custom device build
+commands. This does not add an OpenCL host API, OpenCL C kernel support, or
+OpenMP integration.
 
 ## Build on Windows
 
 Use an x64 Visual Studio developer command prompt with CMake and Ninja.
 Provide a modified compiler build with the DirectX target and `clang`, `opt`,
-`llc`, `llvm-offload-binary`, and `clang-resource-headers` built, as described
+`llc`, `llvm-offload-binary`, `clang-sycl-linker`, `clang-linker-wrapper`, and
+`clang-resource-headers` built, as described
 for the [C++ demo](directx-demo.md#build-on-windows).
 Also provide the Release LLVM support-library build used by the
 [native runtime instructions](index.md#native-windows-build-and-validation).
@@ -68,7 +76,6 @@ cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL sycl-headers sycl-ls
 cmake -S offload\examples\directx-sycl -B build-directx-sycl -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
   "-DCMAKE_CXX_COMPILER=%COMPILER_BUILD%\bin\clang-cl.exe" ^
-  "-DLLVM_DIR=%COMPILER_BUILD%\lib\cmake\llvm" ^
   "-DOFFLOAD_RUNTIME_BUILD=%RUNTIME_BUILD%" ^
   "-DSYCL_INCLUDE_DIR=%LLVM_LIB_BUILD%\include" ^
   "-DSYCL_RUNTIME_DLL=%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" ^
@@ -82,9 +89,29 @@ pass. Out-of-line device helper calls and arbitrary device object storage
 remain unsupported; a successful C++ parse alone does not establish DXIL
 compatibility. Every generated shader is checked by the DXIL validator.
 
-The device compilation uses the Visual Studio `INCLUDE` environment inherited
-at configuration. The host compiler must contain this branch's SYCL/DirectX
-changes, not an unmodified installed Clang. Use DXIL validator 1.8 or newer.
+The driver discovers the Windows SDK and MSVC headers for both compilations.
+The host compiler must contain this branch's SYCL/DirectX changes, not an
+unmodified installed Clang. Use DXIL validator 1.8 or newer.
+
+The same application can be compiled directly, without CMake:
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /MD /EHsc ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  offload\examples\directx-sycl\vector-add.cpp /Fedirectx-sycl-vector-add.exe ^
+  /link "/libpath:%RUNTIME_BUILD%\lib"
+copy "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" .
+copy "%RUNTIME_BUILD%\lib\LLVMOffload.dll" .
+```
+
+Without `--dxil-validator`, `clang-sycl-linker` searches for `dxv` beside itself
+and then on `PATH`. Missing tools and validator failures fail the build.
+For separate compilation, use the same SYCL target options with `-c /Fo...`
+and again when linking the resulting objects. Do not link offload objects
+directly with `link.exe` or `lld-link.exe`: the compiler driver must run the
+device linker and registration wrapper.
 
 Only `directx-sycl-vector-add.exe`, `LLVMSYCL.dll`, and `LLVMOffload.dll` are
 needed at execution time, in addition to the Visual C++ runtime and a compatible
@@ -116,9 +143,9 @@ remains future work. The existing C++/liboffload demo reports GPU timing.
 On Windows, runtime shutdown releases programs and cached contexts before
 DLL detachment. DirectX driver teardown must not occur under the loader lock.
 
-## Multidimensional execution tests
+## Multidimensional and multi-kernel execution tests
 
-The native integration probe at
+The native geometry probe at
 `offload/unittests/Plugins/DirectX/Inputs/sycl-ndrange.cpp` builds through the
 same compiler/signing/embedding pipeline as the application:
 
@@ -137,6 +164,8 @@ foreach ($device in 0, 1, 2) {
     & ".\build-directx-sycl\directx-sycl-ndrange-$dims.exe" $device
     if ($LASTEXITCODE -ne 0) { throw "SYCL geometry test failed" }
   }
+  & .\build-directx-sycl\directx-sycl-multi-kernel.exe $device
+  if ($LASTEXITCODE -ne 0) { throw "SYCL multi-kernel test failed" }
 }
 ```
 
@@ -145,12 +174,15 @@ IDs and ranges, all three linear index forms, changed offsets above 32 bits,
 in-order queued upload/dispatch/readback, and trailing allocation guards.
 The liboffload native geometry test separately verifies changing group counts,
 blocking versus asynchronous submissions, and property snapshots.
+The multi-kernel probe separately compiles a two-kernel translation unit and
+a host-only translation unit, then verifies ordered initialization/scaling
+and trailing guards after compiler-managed device linking and image registration.
 
 ## Next steps
 
-Integrate the compiler driver/linker pipeline and workgroup specialization.
+Implement workgroup specialization and broaden the device memory model.
 OpenCL C address spaces, builtins and NDRange support are a separate frontend
 milestone that can reuse the target NDRange ABI; standard OpenCL applications
 additionally need a host runtime. General pointers, aggregates, local accessors,
-subgroups, atomics, reductions, and multi-kernel device compilation still need
+subgroups, atomics, reductions, and cross-image device calls still need
 compiler/runtime support before this can claim full SYCL or OpenCL compliance.
