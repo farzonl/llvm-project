@@ -1047,7 +1047,8 @@ through 16 bytes; supported memory operations were nonvolatile, non-atomic 32-bi
 integer/float scalar accesses, including fields of trivial aggregates. The
 wide-local extension below also supports 64-bit integer scalar accesses.
 The vector and alignment extensions below add SYCL value arrays and alignment
-through 128 bytes. Narrow local operations, 64-bit floating-point operations,
+through 128 bytes. The packed-byte extension below adds scalar 8-bit transfers.
+Sixteen-bit local operations, 64-bit floating-point operations,
 nontrivial construction, the
 zero-dimensional API, properties, and complete local-accessor conformance
 remain outside this increment. Submissions require `nd_range`; single-task
@@ -1445,6 +1446,75 @@ The runner correctly exits with failure for the two compile-failed categories.
 No CTS assertions or category sources are changed. The previously confirmed
 count remains **7/97**; this is an alignment prerequisite, not full group,
 ND-item, or SYCL conformance.
+
+### Packed 8-bit local transfers
+
+Local memory now supports ordinary signed and unsigned 8-bit loads/stores.
+Byte offsets are retained throughout pointer remapping, then split into a
+groupshared word index and bit offset. Four adjacent byte elements share one
+32-bit word. Writes use compare-exchange retry loops so independent lane writes
+cannot overwrite neighboring bytes; reads use atomic OR with zero to observe
+the word, then extract the requested byte. Potentially uninitialized neighboring
+bits are frozen before use. These are internal implementation operations, not
+an advertised user atomic API or permission for data races on the same byte.
+Barrier and eager cooperative-event semantics remain unchanged.
+
+Accessor allocation sizes are rounded up to complete four-byte words, while
+`size()` and `byte_size()` retain their logical element counts. The compiler and
+prepared-IR reader normalize subword element alignment to four-byte slot
+alignment; invalid source alignment is still rejected. Rounded allocation sizes
+and alignment gaps count toward the existing **32768-byte** workgroup limit.
+Non-byte accesses retain their four-byte-aligned offset requirement.
+
+DXIL preparation also emits typed-pointer casts for atomics on array allocations.
+Explicit groupshared word GEPs avoid folded byte-pointer constants that cannot
+be decoded correctly as legacy typed pointers. This fixes the validation failure
+encountered while implementing packed local storage.
+
+The existing cooperative-copy regression now tests signed-char 1D and
+unsigned-char 2D transfers with 32 lanes. Inputs cover every byte bit pattern;
+the tests check contiguous/strided copies in both directions, zero/partial
+counts, guards sharing words with data, neighbor-lane reads, and CPU-verified
+modular arithmetic. The largest case has two 16384-byte allocations including
+guards, exactly **32768 bytes**. Scalar, vector, and marray copy cases still run.
+
+All cases pass on NVIDIA, AMD, and Intel. The existing aligned local-accessor,
+buffer, pointer/barrier, and workgroup-specialization binaries also pass.
+Thirty-six focused compiler/atomic tests and 25 manifest/workgroup unit tests
+pass, including profiled retry-branch metadata, allocation bounds, atomic
+array pointer casts, and subword recipe-alignment validation. The pre-existing
+capture diagnostic mismatch remains unchanged and is not counted as passing.
+
+Use the existing `workgroup_copy.cpp` Windows compilation/run command after:
+
+```bat
+cmake --build "%COMPILER_BUILD%" --target clang opt llc
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL directx.unittests
+```
+
+This is **scalar 8-bit transfer support**, not all narrow/vector operations.
+Sixteen-bit transfers, scalar `half` construction, the deprecated `sycl::byte`
+interface, OpenCL compatibility names, and hierarchical group submission remain
+separate prerequisites.
+
+The unchanged five-category CTS measurement passes header, error, and
+device-event: **4/4 cases and 2/2 assertions per vendor**. Full group and ND-item
+still fail compilation and execute no tests. No CTS sources or assertions are
+changed, and the report retains both failed categories:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\local-byte-final" ^
+  --targets test_device_event test_group test_nd_item test_header test_error ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The runner exits with failure for group/ND-item compile failures and never runs
+their stale executables. Confirmed coverage remains **7/97 categories**.
 
 ### Adapter validation
 

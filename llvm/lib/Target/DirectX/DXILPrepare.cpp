@@ -111,7 +111,7 @@ static Value *maybeGenerateBitcast(IRBuilder<> &Builder,
 
   if (auto *ArrTy = dyn_cast<ArrayType>(ValTy)) {
     Type *ElTy = ArrTy->getElementType();
-    if (ElTy == Ty)
+    if (ElTy == Ty && !isa<AtomicRMWInst, AtomicCmpXchgInst>(Inst))
       return nullptr;
   }
 
@@ -131,7 +131,7 @@ static Value *maybeGenerateBitcast(IRBuilder<> &Builder,
         ValTy = AI->getAllocatedType();
       if (auto *ArrTy = dyn_cast<ArrayType>(ValTy)) {
         Type *ElTy = ArrTy->getElementType();
-        if (ElTy == Ty)
+        if (ElTy == Ty && !isa<AtomicRMWInst, AtomicCmpXchgInst>(Inst))
           return nullptr;
       }
       break;

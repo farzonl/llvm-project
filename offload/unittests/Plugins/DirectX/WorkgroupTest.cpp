@@ -169,6 +169,22 @@ TEST(DirectXWorkgroupTest, ValidatesLocalAllocationRecipeFields) {
   Manifest.Capture->Local[0].Alignment = 16;
   expectError(readRecipe(Encoded, Manifest), error::ErrorCode::INVALID_BINARY,
               "local allocation");
+  IR.replace(IR.find("!1 = !{i32 0, i32 8, i32 2, i32 4}"),
+             StringRef("!1 = !{i32 0, i32 8, i32 2, i32 4}").size(),
+             "!1 = !{i32 0, i32 8, i32 2, i32 1}");
+  Manifest.Capture->Local[0].Alignment = 4;
+  Encoded = encodeBase64(recipeBitcode(IR));
+  Result = readRecipe(Encoded, Manifest);
+  ASSERT_TRUE(static_cast<bool>(Result)) << toString(Result.takeError());
+  for (unsigned Alignment : {0u, 3u}) {
+    std::string InvalidIR = IR;
+    InvalidIR.replace(InvalidIR.find("!1 = !{i32 0, i32 8, i32 2, i32 1}"),
+                      StringRef("!1 = !{i32 0, i32 8, i32 2, i32 1}").size(),
+                      "!1 = !{i32 0, i32 8, i32 2, i32 " +
+                          std::to_string(Alignment) + "}");
+    expectError(readRecipe(encodeBase64(recipeBitcode(InvalidIR)), Manifest),
+                error::ErrorCode::INVALID_BINARY, "local allocation");
+  }
 }
 
 TEST(DirectXWorkgroupTest, RejectsMismatchedImageIdentity) {

@@ -88,7 +88,7 @@ void launchCopy(sycl::queue &Queue, sycl::buffer<T> &Input,
       if (I == 0)
         E1.wait();
       for (std::size_t Index = I; Index < Count; Index += Step) {
-        if constexpr (IsWideCopy<T>) {
+        if constexpr (IsWideCopy<T> || sizeof(T) == 1) {
           std::size_t Next = Index + 1 == Count ? 0 : Index + 1;
           A[Index + 1] = A[Index + 1] + T(3) * B[Next + 1] + T(7);
         } else
@@ -170,6 +170,15 @@ template void launchCopy<sycl::vec<long long, 16>, 1>(
     sycl::buffer<sycl::vec<long long, 16>> &, sycl::nd_range<1>, std::size_t,
     std::size_t, std::size_t, std::size_t);
 
+template void launchCopy<signed char, 1>(sycl::queue &,
+                                         sycl::buffer<signed char> &,
+                                         sycl::buffer<signed char> &,
+                                         sycl::nd_range<1>, std::size_t,
+                                         std::size_t, std::size_t, std::size_t);
+template void launchCopy<unsigned char, 2>(
+    sycl::queue &, sycl::buffer<unsigned char> &, sycl::buffer<unsigned char> &,
+    sycl::nd_range<2>, std::size_t, std::size_t, std::size_t, std::size_t);
+
 #ifndef __SYCL_DEVICE_ONLY__
 #  include <cassert>
 #  include <iostream>
@@ -182,8 +191,12 @@ void verifyCopy(const std::vector<T> &Actual, const std::vector<T> &Expected) {
     if constexpr (sycl::detail::IsValueArray<T>::value) {
       for (std::size_t C = 0; C < T::size(); ++C)
         assert(Actual[I][C] == Expected[I][C]);
-    } else
+    } else {
+      if (Actual[I] != Expected[I])
+        std::cerr << "copy mismatch at " << I << ": actual " << +Actual[I]
+                  << ", expected " << +Expected[I] << '\n';
       assert(Actual[I] == Expected[I]);
+    }
 }
 
 template <typename T, int D>
@@ -193,7 +206,8 @@ void checkCopy(sycl::queue &Queue, sycl::range<D> LocalRange) {
   for (std::size_t Count :
        {std::size_t(0), std::size_t(1), LocalRange.size() - 1,
         LocalRange.size() + 3,
-        std::size_t(IsWideCopy<T> || sycl::detail::IsValueArray<T>::value
+        std::size_t(IsWideCopy<T> || sycl::detail::IsValueArray<T>::value ||
+                            sizeof(T) == 1
                         ? 32768 / (2 * sizeof(T)) - 2
                         : 257)}) {
     for (auto Strides : {sycl::range<2>(1, 1), sycl::range<2>(3, 5)}) {
@@ -214,6 +228,8 @@ void checkCopy(sycl::queue &Queue, sycl::range<D> LocalRange) {
         } else if constexpr (IsWideCopy<T>) {
           long long Value = 0x1234567887654300LL + I % 137;
           Input[I] = I % 2 ? -Value : Value;
+        } else if constexpr (sizeof(T) == 1) {
+          Input[I] = T(static_cast<unsigned char>(I * 37 + 19));
         } else
           Input[I] = T(static_cast<int>(I % 137) - 70);
       }
@@ -222,7 +238,7 @@ void checkCopy(sycl::queue &Queue, sycl::range<D> LocalRange) {
         std::size_t Base = 4 + Group * Span;
         for (std::size_t I = 0; I < Count; ++I) {
           T Value;
-          if constexpr (IsWideCopy<T>) {
+          if constexpr (IsWideCopy<T> || sizeof(T) == 1) {
             std::size_t Next = I + 1 == Count ? 0 : I + 1;
             Value = Input[Base + I * Strides[0]] +
                     T(3) * Input[Base + Next * Strides[0]] + T(7);
@@ -262,6 +278,8 @@ int main(int Argc, char **Argv) {
     checkCopy<sycl::vec<int, 8>>(Queue, sycl::range<1>(8));
     checkCopy<sycl::vec<float, 16>>(Queue, sycl::range<2>(2, 3));
     checkCopy<sycl::vec<long long, 16>>(Queue, sycl::range<1>(8));
+    checkCopy<signed char>(Queue, sycl::range<1>(32));
+    checkCopy<unsigned char>(Queue, sycl::range<2>(4, 8));
     std::cout
         << Device.get_info<sycl::info::device::name>()
         << ": scalar/vector cooperative copies, strides, guards and event "

@@ -22,10 +22,12 @@
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ProfDataUtils.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
@@ -141,11 +143,12 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
       if (auto *Load = dyn_cast<LoadInst>(Use)) {
         AccessType = Load->getType();
         if (Load->isAtomic() || Load->isVolatile() ||
-            (!AccessType->getScalarType()->isIntegerTy(32) &&
+            (!AccessType->getScalarType()->isIntegerTy(8) &&
+             !AccessType->getScalarType()->isIntegerTy(32) &&
              !AccessType->getScalarType()->isIntegerTy(64) &&
              !AccessType->getScalarType()->isFloatTy()) ||
             isa<ScalableVectorType>(AccessType)) {
-          fail("local accessors require non-atomic 32/64-bit integer or "
+          fail("local accessors require non-atomic 8/32/64-bit integer or "
                "32-bit float scalar or fixed-vector accesses");
           return false;
         }
@@ -153,11 +156,12 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
         AccessType = Store->getValueOperand()->getType();
         if (Store->getPointerOperand() != Pointer || Store->isAtomic() ||
             Store->isVolatile() ||
-            (!AccessType->getScalarType()->isIntegerTy(32) &&
+            (!AccessType->getScalarType()->isIntegerTy(8) &&
+             !AccessType->getScalarType()->isIntegerTy(32) &&
              !AccessType->getScalarType()->isIntegerTy(64) &&
              !AccessType->getScalarType()->isFloatTy()) ||
             isa<ScalableVectorType>(AccessType)) {
-          fail("local accessors require non-atomic 32/64-bit integer or "
+          fail("local accessors require non-atomic 8/32/64-bit integer or "
                "32-bit float scalar or fixed-vector accesses");
           return false;
         }
@@ -186,94 +190,155 @@ bool checkLocalPointer(Value *Root, const DataLayout &Layout,
   return true;
 }
 
-Value *getLocalWordPointer(IRBuilder<> &Builder, Value *Pointer, Value *Index) {
-  if (auto *Global = dyn_cast<GlobalVariable>(Pointer))
+Value *getLocalWordPointer(IRBuilder<> &Builder, Value *Pointer, Value *Index,
+                           bool Materialize = false) {
+  if (auto *Global = dyn_cast<GlobalVariable>(Pointer)) {
+    if (Materialize)
+      return Builder.Insert(GetElementPtrInst::Create(
+          Global->getValueType(), Global, {Builder.getInt32(0), Index}));
     return Builder.CreateGEP(Global->getValueType(), Global,
                              {Builder.getInt32(0), Index});
+  }
   return Builder.CreateGEP(Builder.getInt32Ty(), Pointer, Index);
 }
 
-void replaceLocalPointer(Value *Old, Value *Pointer, const DataLayout &Layout) {
+void storeLocalByte(StoreInst &Store, Value *Pointer, Value *Offset) {
+  IRBuilder<> Builder(&Store);
+  Value *Shift =
+      Builder.CreateShl(Builder.CreateAnd(Offset, Builder.getInt32(3)), 3);
+  Value *Mask =
+      Builder.CreateNot(Builder.CreateShl(Builder.getInt32(255), Shift));
+  Value *Byte = Builder.CreateShl(
+      Builder.CreateZExt(Store.getValueOperand(), Builder.getInt32Ty()), Shift);
+  BasicBlock *Before = Store.getParent();
+  BasicBlock *After = Before->splitBasicBlock(&Store, "local.byte.end");
+  BasicBlock *Loop = BasicBlock::Create(Store.getContext(), "local.byte.retry",
+                                        Before->getParent(), After);
+  Before->getTerminator()->setSuccessor(0, Loop);
+  Builder.SetInsertPoint(Loop);
+  auto *Expected = Builder.CreatePHI(Builder.getInt32Ty(), 2);
+  Expected->addIncoming(Builder.getInt32(0), Before);
+  Value *Updated = Builder.CreateOr(Builder.CreateAnd(Expected, Mask), Byte);
+  // Different lanes can own different bytes in the same groupshared word.
+  auto *Exchange =
+      Builder.CreateAtomicCmpXchg(Pointer, Expected, Updated, Align(4),
+                                  AtomicOrdering::SequentiallyConsistent,
+                                  AtomicOrdering::SequentiallyConsistent);
+  // Unwritten neighboring bytes must not poison the replacement word.
+  Value *Original =
+      Builder.CreateFreeze(Builder.CreateExtractValue(Exchange, 0));
+  Expected->addIncoming(Original, Loop);
+  auto *Branch = Builder.CreateCondBr(Builder.CreateICmpEQ(Original, Expected),
+                                      After, Loop);
+  setExplicitlyUnknownBranchWeightsIfProfiled(*Branch, "dxil-kernel-abi");
+  Store.eraseFromParent();
+}
+
+void replaceLocalPointer(Value *Old, Value *Base, const DataLayout &Layout,
+                         Value *ByteOffset) {
   for (User *Use : make_early_inc_range(Old->users())) {
     if (auto *Cast = dyn_cast<AddrSpaceCastInst>(Use)) {
-      replaceLocalPointer(Cast, Pointer, Layout);
+      replaceLocalPointer(Cast, Base, Layout, ByteOffset);
       Cast->eraseFromParent();
     } else if (auto *GEP = dyn_cast<GetElementPtrInst>(Use)) {
       unsigned Bits = Layout.getIndexSizeInBits(GEP->getPointerAddressSpace());
       APInt ConstantOffset(Bits, 0);
       SmallMapVector<Value *, APInt, 4> Variables;
-      if (!GEP->collectOffset(Layout, Bits, Variables, ConstantOffset) ||
-          !ConstantOffset.srem(APInt(Bits, 4)).isZero() ||
-          llvm::any_of(Variables, [Bits](const auto &Variable) {
-            return !Variable.second.srem(APInt(Bits, 4)).isZero();
-          }))
-        fail("local accessor indexing requires four-byte-aligned strides");
+      if (!GEP->collectOffset(Layout, Bits, Variables, ConstantOffset))
+        fail("local accessor indexing requires a bounded byte offset");
       IRBuilder<> Builder(GEP);
-      Value *Index =
-          Builder.getInt32(ConstantOffset.sdiv(APInt(Bits, 4)).getSExtValue());
+      Value *Index = Builder.CreateAdd(
+          ByteOffset, Builder.getInt32(ConstantOffset.getSExtValue()));
       for (auto &[Variable, Scale] : Variables)
         Index = Builder.CreateAdd(
-            Index,
-            Builder.CreateMul(
-                Builder.CreateIntCast(Variable, Builder.getInt32Ty(), true),
-                Builder.getInt32(Scale.sdiv(APInt(Bits, 4)).getSExtValue())));
-      Value *Address = getLocalWordPointer(Builder, Pointer, Index);
-      if (auto *Instruction = dyn_cast<llvm::Instruction>(Address))
-        Instruction->copyMetadata(*GEP);
-      replaceLocalPointer(GEP, Address, Layout);
+            Index, Builder.CreateMul(Builder.CreateIntCast(
+                                         Variable, Builder.getInt32Ty(), true),
+                                     Builder.getInt32(Scale.getSExtValue())));
+      replaceLocalPointer(GEP, Base, Layout, Index);
       GEP->eraseFromParent();
-    } else if (auto *Load = dyn_cast<LoadInst>(Use);
-               Load && Load->getType()->isIntegerTy(64)) {
-      IRBuilder<> Builder(Load);
-      Value *Result = nullptr;
-      for (unsigned Word = 0; Word != 2; ++Word) {
-        auto *Part = Builder.CreateAlignedLoad(
-            Builder.getInt32Ty(),
-            getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
-            commonAlignment(Load->getAlign(), Word * 4));
-        copyMetadataForLoad(*Part, *Load);
-        Part->setAAMetadata(Load->getAAMetadata().adjustForAccess(Word * 4, 4));
-        // A whole-value range is not a range for either split word.
-        Part->setMetadata(LLVMContext::MD_range, nullptr);
-        Value *WidePart = Builder.CreateZExt(Part, Builder.getInt64Ty());
-        Result = Word
-                     ? Builder.CreateOr(Result, Builder.CreateShl(WidePart, 32))
-                     : WidePart;
-      }
-      Load->replaceAllUsesWith(Result);
-      Load->eraseFromParent();
-    } else if (auto *Store = dyn_cast<StoreInst>(Use);
-               Store && Store->getValueOperand()->getType()->isIntegerTy(64)) {
-      IRBuilder<> Builder(Store);
-      for (unsigned Word = 0; Word != 2; ++Word) {
-        Value *Part = Store->getValueOperand();
-        if (Word)
-          Part = Builder.CreateLShr(Part, 32);
-        auto *NewStore = Builder.CreateAlignedStore(
-            Builder.CreateTrunc(Part, Builder.getInt32Ty()),
-            getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
-            commonAlignment(Store->getAlign(), Word * 4));
-        NewStore->copyMetadata(*Store);
-        NewStore->setAAMetadata(
-            Store->getAAMetadata().adjustForAccess(Word * 4, 4));
-      }
-      Store->eraseFromParent();
-    } else if (auto *Load = dyn_cast<LoadInst>(Use);
-               Load && Load->getType()->isFloatTy()) {
-      IRBuilder<> Builder(Load);
-      auto *Bits = Builder.CreateAlignedLoad(Builder.getInt32Ty(), Pointer,
-                                             Load->getAlign());
-      Bits->copyMetadata(*Load);
-      Load->replaceAllUsesWith(Builder.CreateBitCast(Bits, Load->getType()));
-      Load->eraseFromParent();
-    } else if (auto *Store = dyn_cast<StoreInst>(Use);
-               Store && Store->getValueOperand()->getType()->isFloatTy()) {
-      IRBuilder<> Builder(Store);
-      Store->setOperand(0, Builder.CreateBitCast(Store->getValueOperand(),
-                                                 Builder.getInt32Ty()));
-      Store->setOperand(1, Pointer);
     } else {
-      Use->replaceUsesOfWith(Old, Pointer);
+      IRBuilder<> AddressBuilder(cast<Instruction>(Use));
+      Type *AccessType =
+          isa<LoadInst>(Use)
+              ? cast<LoadInst>(Use)->getType()
+              : cast<StoreInst>(Use)->getValueOperand()->getType();
+      if (!AccessType->isIntegerTy(8) &&
+          computeKnownBits(ByteOffset, Layout).countMinTrailingZeros() < 2)
+        fail("local accessor indexing requires four-byte-aligned strides "
+             "for wide accesses");
+      Value *Pointer = getLocalWordPointer(
+          AddressBuilder, Base, AddressBuilder.CreateLShr(ByteOffset, 2),
+          AccessType->isIntegerTy(8));
+      if (auto *Load = dyn_cast<LoadInst>(Use);
+          Load && Load->getType()->isIntegerTy(8)) {
+        IRBuilder<> Builder(Load);
+        auto *Word = Builder.CreateAtomicRMW(
+            AtomicRMWInst::Or, Pointer, Builder.getInt32(0), Align(4),
+            AtomicOrdering::SequentiallyConsistent);
+        Value *Bits = Builder.CreateFreeze(Word);
+        Value *Shift = Builder.CreateShl(
+            Builder.CreateAnd(ByteOffset, Builder.getInt32(3)), 3);
+        Load->replaceAllUsesWith(Builder.CreateTrunc(
+            Builder.CreateLShr(Bits, Shift), Load->getType()));
+        Load->eraseFromParent();
+      } else if (auto *Store = dyn_cast<StoreInst>(Use);
+                 Store && Store->getValueOperand()->getType()->isIntegerTy(8)) {
+        storeLocalByte(*Store, Pointer, ByteOffset);
+      } else if (auto *Load = dyn_cast<LoadInst>(Use);
+                 Load && Load->getType()->isIntegerTy(64)) {
+        IRBuilder<> Builder(Load);
+        Value *Result = nullptr;
+        for (unsigned Word = 0; Word != 2; ++Word) {
+          auto *Part = Builder.CreateAlignedLoad(
+              Builder.getInt32Ty(),
+              getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
+              commonAlignment(Load->getAlign(), Word * 4));
+          copyMetadataForLoad(*Part, *Load);
+          Part->setAAMetadata(
+              Load->getAAMetadata().adjustForAccess(Word * 4, 4));
+          // A whole-value range is not a range for either split word.
+          Part->setMetadata(LLVMContext::MD_range, nullptr);
+          Value *WidePart = Builder.CreateZExt(Part, Builder.getInt64Ty());
+          Result =
+              Word ? Builder.CreateOr(Result, Builder.CreateShl(WidePart, 32))
+                   : WidePart;
+        }
+        Load->replaceAllUsesWith(Result);
+        Load->eraseFromParent();
+      } else if (auto *Store = dyn_cast<StoreInst>(Use);
+                 Store &&
+                 Store->getValueOperand()->getType()->isIntegerTy(64)) {
+        IRBuilder<> Builder(Store);
+        for (unsigned Word = 0; Word != 2; ++Word) {
+          Value *Part = Store->getValueOperand();
+          if (Word)
+            Part = Builder.CreateLShr(Part, 32);
+          auto *NewStore = Builder.CreateAlignedStore(
+              Builder.CreateTrunc(Part, Builder.getInt32Ty()),
+              getLocalWordPointer(Builder, Pointer, Builder.getInt32(Word)),
+              commonAlignment(Store->getAlign(), Word * 4));
+          NewStore->copyMetadata(*Store);
+          NewStore->setAAMetadata(
+              Store->getAAMetadata().adjustForAccess(Word * 4, 4));
+        }
+        Store->eraseFromParent();
+      } else if (auto *Load = dyn_cast<LoadInst>(Use);
+                 Load && Load->getType()->isFloatTy()) {
+        IRBuilder<> Builder(Load);
+        auto *Bits = Builder.CreateAlignedLoad(Builder.getInt32Ty(), Pointer,
+                                               Load->getAlign());
+        Bits->copyMetadata(*Load);
+        Load->replaceAllUsesWith(Builder.CreateBitCast(Bits, Load->getType()));
+        Load->eraseFromParent();
+      } else if (auto *Store = dyn_cast<StoreInst>(Use);
+                 Store && Store->getValueOperand()->getType()->isFloatTy()) {
+        IRBuilder<> Builder(Store);
+        Store->setOperand(0, Builder.CreateBitCast(Store->getValueOperand(),
+                                                   Builder.getInt32Ty()));
+        Store->setOperand(1, Pointer);
+      } else {
+        Use->replaceUsesOfWith(Old, Pointer);
+      }
     }
   }
 }
@@ -482,12 +547,12 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       auto Marker = Integer(Field->getOperand(2));
       auto Alignment = Integer(Field->getOperand(3));
       if (!Marker || *Marker != 2 || !Alignment || !isPowerOf2_32(*Alignment) ||
-          *Alignment < 4 || *Alignment > 128 || !Ty->isPointerTy() ||
+          *Alignment > 128 || !Ty->isPointerTy() ||
           Ty->getPointerAddressSpace() != 3 || *Size != 8 || *Offset % 8) {
         fail("local captures require an aligned 64-bit local pointer field");
         return nullptr;
       }
-      LocalAlignments[I] = *Alignment;
+      LocalAlignments[I] = std::max(*Alignment, 4u);
     } else if (Field->getNumOperands() == 3) {
       auto AccessorPointer = Integer(Field->getOperand(2));
       if (!AccessorPointer || *AccessorPointer != 1 || !Ty->isPointerTy()) {
@@ -812,7 +877,7 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       Value *Base = Builder.CreateInBoundsGEP(
           Allocation.second->getValueType(), Allocation.second,
           {Builder.getInt32(0), Builder.getInt32(0)});
-      replaceLocalPointer(Load, Base, Layout);
+      replaceLocalPointer(Load, Base, Layout, Builder.getInt32(0));
       Load->eraseFromParent();
     }
     Loads[I].clear();

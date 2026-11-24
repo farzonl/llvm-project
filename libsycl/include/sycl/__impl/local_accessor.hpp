@@ -40,7 +40,7 @@ template <typename T, int Dimensions = 1> class local_accessor {
                         "the 32768-byte workgroup limit");
       Bytes *= Range[I];
     }
-    return Bytes;
+    return (Bytes + 3) & ~std::size_t(3);
   }
 
 public:

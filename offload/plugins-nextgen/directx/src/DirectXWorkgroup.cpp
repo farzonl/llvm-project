@@ -135,10 +135,13 @@ llvm::omp::target::plugin::directx::readWorkgroupIR(
       auto *Width = mdconst::dyn_extract<ConstantInt>(Field->getOperand(1));
       auto *Marker = mdconst::dyn_extract<ConstantInt>(Field->getOperand(2));
       auto *Alignment = mdconst::dyn_extract<ConstantInt>(Field->getOperand(3));
-      Found |= Offset && Width && Marker && Alignment &&
-               Offset->getZExtValue() == Local.Offset &&
-               Width->getZExtValue() == 8 && Marker->getZExtValue() == 2 &&
-               Alignment->getZExtValue() == Local.Alignment;
+      Found |=
+          Offset && Width && Marker && Alignment &&
+          Alignment->getType()->isIntegerTy(32) &&
+          Alignment->getValue().isPowerOf2() &&
+          Offset->getZExtValue() == Local.Offset &&
+          Width->getZExtValue() == 8 && Marker->getZExtValue() == 2 &&
+          std::max(Alignment->getZExtValue(), uint64_t(4)) == Local.Alignment;
     }
     if (!Found)
       return Invalid("local allocation does not match the capture recipe");

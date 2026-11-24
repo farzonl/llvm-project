@@ -34,7 +34,7 @@
 ; WIDE: zext i32 {{.*}} to i64
 ; SMALL: local accessor constant accesses exceed the requested allocation
 ; PARTIAL: memory copies require a constant word-aligned size
-; VOLATILE: local accessors require non-atomic 32/64-bit integer or 32-bit float scalar or fixed-vector accesses
+; VOLATILE: local accessors require non-atomic 8/32/64-bit integer or 32-bit float scalar or fixed-vector accesses
 
 ;--- float.ll
 target datalayout = "e-p:64:64-p3:64:64-i64:64"

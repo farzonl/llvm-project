@@ -122,7 +122,7 @@ incompatible image. Resource addresses, ordinary scalars, global ranges, and
 offsets are not specialization inputs. Each produced image is reflected and
 validated again, including its total static groupshared storage and the
 32768-byte limit; local allocations do not bypass existing shader validation.
-Current lowering supports non-atomic, nonvolatile 32/64-bit integer and 32-bit
+Current lowering supports non-atomic, nonvolatile 8/32/64-bit integer and 32-bit
 float scalar and fixed-vector accesses, including such fields in trivial
 aggregates. Fixed vectors are scalarized before pointer remapping. A 64-bit
 integer access is split into two 32-bit groupshared words without changing the
@@ -130,13 +130,26 @@ allocation-token ABI. Constant, nonvolatile word-aligned memory copies up to
 32768 bytes are expanded into 32-bit accesses; all source words are read before
 the destination is written to preserve overlapping `memmove` semantics.
 Copy expansion preserves the original address-space cast chains so all pointer
-users are validated and remapped. Narrow, 64-bit floating-point and general
+users are validated and remapped. Sixteen-bit, 64-bit floating-point and general
 escaping local-pointer operations remain unsupported. Local slot alignment
 supports powers of two from 4 through 128 bytes. The compiler, manifest parser,
 and runtime include inter-allocation alignment gaps in the 32768-byte limit.
 Repeated slots with one allocation identity count once and must agree on size
 and alignment. New over-aligned images require the matching updated runtime;
 older runtimes reject their manifests rather than silently ignoring alignment.
+
+Eight-bit local elements are packed into 32-bit groupshared words. Capture
+alignment of one or two bytes is normalized to a four-byte slot alignment,
+and requested storage is rounded up to complete words; the accessor's logical
+byte size is unchanged. Prepared-IR validation applies the same normalization
+while still rejecting zero/non-power-of-two alignment. Pointer remapping retains
+byte offsets, and non-byte accesses still require four-byte-aligned offsets.
+Byte stores use compare-exchange retry loops rather than ordinary read/modify/
+write, preserving neighboring bytes owned by other lanes. Byte loads read a
+word using atomic OR with zero and extract the requested byte. These internal
+operations do not enable user atomic or volatile local accesses. Potentially
+uninitialized neighboring bits are frozen before constructing replacement
+words. Sixteen-bit local operations remain unsupported.
 
 DirectX SYCL splitting keeps globals reachable from the kernel rather than
 rooting every non-discardable host global. Constructors/destructors that can
