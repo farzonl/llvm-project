@@ -1828,6 +1828,67 @@ does not claim to implement that support or make the whole category pass.
 Confirmed CTS coverage remains **14/97**; no new GPU execution result is claimed
 for `bit_cast`.
 
+### DirectX private byte-storage legalization
+
+Private byte comparisons now lower closed pointer graphs rooted in a static
+single-instance scalar or scalar-written wrapper allocation. Each logical byte
+uses one `i32` word. Byte GEPs and loop-carried pointer PHIs become integer
+offsets into that storage, so neither illegal `i8` memory operations nor
+incompatible typed-pointer PHIs reach DXIL emission. Integer and floating-point
+scalar stores are scattered by their bit representation; signed byte extension
+still uses the original byte's sign bit.
+
+Constant `inttoptr` values can be stored and inspected as bytes. The kernel ABI
+pass performs this lowering **before** replacing the source data layout with
+the native DXIL layout: an eight-byte source pointer retains all eight bytes,
+while a native four-byte pointer retains only four. Pointer width is never
+inferred from the integer operand of `inttoptr`. This does not implement
+dereferencing those values or arbitrary pointer roundtrips.
+
+The transformation does not change control flow or branch metadata. Debug
+addresses that no longer describe the scattered representation are marked
+unavailable, rather than redirected to misleading storage. Existing scalar
+`i8` and typed-array legalization remain unchanged.
+
+Seventeen focused compiler regressions pass. They cover high-word pointer
+bytes, source/native pointer widths, dynamic byte offsets, signed integer
+bytes, scalar-written wrappers, floating-point representations, debug records,
+and an explicit diagnostic for unsupported nonconstant private pointer storage.
+The debug-free emitted regression shader passes DXIL validation.
+
+The native `private_byte_storage.cpp` regression passes on NVIDIA GeForce RTX
+5060, AMD Radeon RX 7600 XT, and Intel UHD Graphics 770. It verifies all eight
+distinct bytes of a constant pointer, its wrapper, and a dynamically constructed
+integer. The loop count comes from uploaded input; inspection of the packaged
+optimized kernel confirms three private `[8 x i32]` allocations and dynamic
+offset PHIs, so these checks are not merely constant-folded host-side results.
+
+```bat
+"%COMPILER_BUILD%\bin\clang-cl.exe" /nologo /std:c++17 /MD /EHsc /O2 /W4 /WX ^
+  /clang:-fsycl /clang:--offload-targets=dxil-pc-shadermodel6.0-compute ^
+  "/I%LLVM_LIB_BUILD%\include" ^
+  /clang:-Xoffload-linker "/clang:--dxil-validator=%DXV%" ^
+  "%LLVM_SOURCE%\libsycl\test\basic\private_byte_storage.cpp" ^
+  "%RUNTIME_BUILD%\lib\LLVMSYCL.lib" ^
+  /Fe:"%CTS_BUILD%\private-byte-storage.exe" ^
+  /Fo:"%CTS_BUILD%\private-byte-storage.obj"
+set "PATH=%RUNTIME_BUILD%\lib;%LLVM_LIB_BUILD%\bin;%PATH%"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+for %D in (0 1 2) do "%CTS_BUILD%\private-byte-storage.exe" %D
+```
+
+The unchanged `test_bit_cast` category advances beyond the original pointer
+and wrapper kernels but still fails device linking at the pointer-to-two-float
+`marray` case. That kernel stores floating-point fields at distinct byte
+offsets, loads their combined bits as a pointer, stores that nonconstant pointer,
+and converts it back to an integer. This needs a separate, representation-safe
+lowering for pointer-valued loads and stores; the current implementation does
+not synthesize unsupported pointer casts. Replaying this remaining kernel now
+reports the unsupported storage explicitly instead of asserting during integer
+extension. No CTS source or assertion was changed, no full-category GPU run is
+claimed, and confirmed coverage remains **14/97**.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

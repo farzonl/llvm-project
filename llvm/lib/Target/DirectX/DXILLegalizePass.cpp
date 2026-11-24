@@ -9,12 +9,16 @@
 #include "DirectX.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/PostOrderIterator.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugProgramInstruction.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ProfDataUtils.h"
 #include "llvm/Pass.h"
@@ -41,6 +45,182 @@ static IntegerType *getLegalIntegerType(Type *Ty) {
 }
 
 enum class IntegerExtension { None, Zero, Sign };
+
+bool llvm::legalizePrivateByteStorage(Function &F) {
+  SmallVector<AllocaInst *> Allocations;
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      if (auto *AI = dyn_cast<AllocaInst>(&I))
+        Allocations.push_back(AI);
+  bool Changed = false;
+  for (AllocaInst *AI : Allocations) {
+    if (AI->getAllocatedType()->isIntegerTy(8) ||
+        AI->getAllocatedType()->isArrayTy() ||
+        !AI->getAllocatedType()->isSized() ||
+        F.getDataLayout()
+            .getTypeAllocSize(AI->getAllocatedType())
+            .isScalable() ||
+        !F.getDataLayout().isLittleEndian())
+      continue;
+    SmallVector<Value *> Worklist{AI};
+    SmallPtrSet<Value *, 16> Seen;
+    SmallVector<Instruction *> Accesses;
+    SmallVector<GetElementPtrInst *> GEPs;
+    SmallVector<PHINode *> Phis;
+    bool HasBytes = false;
+    bool HasByteAddressing = false;
+    bool Supported = true;
+    uint64_t Bytes = F.getDataLayout().getTypeAllocSize(AI->getAllocatedType());
+    while (!Worklist.empty()) {
+      Value *Pointer = Worklist.pop_back_val();
+      if (!Seen.insert(Pointer).second)
+        continue;
+      for (User *U : Pointer->users()) {
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
+          if (!GEP->getType()->isPointerTy() ||
+              !GEP->getSourceElementType()->isIntegerTy(8) ||
+              GEP->getNumIndices() != 1) {
+            Supported = false;
+            continue;
+          }
+          HasBytes = true;
+          HasByteAddressing = true;
+          GEPs.push_back(GEP);
+          Worklist.push_back(GEP);
+        } else if (auto *Phi = dyn_cast<PHINode>(U)) {
+          HasByteAddressing = true;
+          Worklist.push_back(Phi);
+        } else if (auto *Load = dyn_cast<LoadInst>(U)) {
+          HasBytes |= Load->getType()->isIntegerTy(8);
+          Supported &= !Load->isAtomic() && !Load->isVolatile() &&
+                       Load->getType()->isIntegerTy(8);
+          Accesses.push_back(Load);
+        } else if (auto *Store = dyn_cast<StoreInst>(U)) {
+          Supported &= Store->getPointerOperand() == Pointer &&
+                       !Store->isAtomic() && !Store->isVolatile();
+          Value *Stored = Store->getValueOperand();
+          if (Stored->getType()->isPointerTy()) {
+            auto *CE = dyn_cast<ConstantExpr>(Stored);
+            Supported &= CE && CE->getOpcode() == Instruction::IntToPtr &&
+                         !F.getDataLayout().isNonIntegralPointerType(
+                             Stored->getType()) &&
+                         Pointer == AI;
+          } else
+            Supported &= (Stored->getType()->isIntegerTy() ||
+                          Stored->getType()->isFloatingPointTy()) &&
+                         Stored->getType()->getScalarSizeInBits() <= 64 &&
+                         (Pointer == AI || Stored->getType()->isIntegerTy(8));
+          if (Supported)
+            Supported =
+                F.getDataLayout().getTypeStoreSize(Stored->getType()) <= Bytes;
+          Accesses.push_back(Store);
+        } else if (!isa<LifetimeIntrinsic>(U))
+          Supported = false;
+      }
+    }
+    if (!HasBytes || !HasByteAddressing || !Supported ||
+        !AI->isStaticAlloca() ||
+        !cast<ConstantInt>(AI->getArraySize())->isOne())
+      continue;
+    // Only rewrite a closed pointer graph belonging to this allocation.
+    for (Value *Pointer : Seen)
+      if (auto *Phi = dyn_cast<PHINode>(Pointer))
+        for (Value *Incoming : Phi->incoming_values())
+          Supported &= Seen.contains(Incoming);
+    if (!Supported)
+      continue;
+    // The scattered representation no longer describes the original address.
+    for (Value *Pointer : Seen) {
+      SmallVector<DbgVariableRecord *> Records;
+      findDbgUsers(Pointer, Records);
+      for (DbgVariableRecord *Record : Records) {
+        if (Record->isDbgAssign() && Record->getAddress() == Pointer)
+          Record->setKillAddress();
+        if (is_contained(Record->location_ops(), Pointer))
+          Record->setKillLocation();
+      }
+    }
+    IRBuilder<> Builder(AI);
+    auto *Storage = Builder.CreateAlloca(
+        ArrayType::get(Builder.getInt32Ty(), Bytes), nullptr, AI->getName());
+    Storage->setAlignment(std::max(AI->getAlign(), Align(4)));
+    Storage->setDebugLoc(AI->getDebugLoc());
+    // Integer offsets avoid pointer PHIs with incompatible DXIL pointee types.
+    auto *IndexTy = F.getDataLayout().getIndexType(AI->getType());
+    DenseMap<Value *, Value *> Offsets;
+    Offsets[AI] = ConstantInt::get(IndexTy, 0);
+    for (Value *Pointer : Seen)
+      if (auto *Phi = dyn_cast<PHINode>(Pointer)) {
+        auto *Offset = PHINode::Create(IndexTy, Phi->getNumIncomingValues(),
+                                       Phi->getName(), Phi->getIterator());
+        Offset->setDebugLoc(Phi->getDebugLoc());
+        Offsets[Phi] = Offset;
+        Phis.push_back(Phi);
+      }
+    for (GetElementPtrInst *GEP : GEPs) {
+      IRBuilder<> B(GEP);
+      Offsets[GEP] = B.CreateAdd(
+          Offsets.lookup(GEP->getPointerOperand()),
+          B.CreateSExtOrTrunc(GEP->getOperand(1), IndexTy), GEP->getName());
+    }
+    for (PHINode *Phi : Phis) {
+      auto *Offset = cast<PHINode>(Offsets.lookup(Phi));
+      for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I)
+        Offset->addIncoming(Offsets.lookup(Phi->getIncomingValue(I)),
+                            Phi->getIncomingBlock(I));
+    }
+    auto Address = [&](Value *Offset, Instruction *Before) {
+      return GetElementPtrInst::Create(Storage->getAllocatedType(), Storage,
+                                       {ConstantInt::get(IndexTy, 0), Offset},
+                                       "", Before->getIterator());
+    };
+    for (Instruction *Access : Accesses) {
+      IRBuilder<> B(Access);
+      if (auto *Load = dyn_cast<LoadInst>(Access)) {
+        auto *Word = B.CreateAlignedLoad(
+            B.getInt32Ty(),
+            Address(Offsets.lookup(Load->getPointerOperand()), Load), Align(4));
+        Word->setDebugLoc(Load->getDebugLoc());
+        Load->replaceAllUsesWith(B.CreateTrunc(Word, B.getInt8Ty()));
+      } else {
+        auto *Store = cast<StoreInst>(Access);
+        Value *Stored = Store->getValueOperand();
+        if (Stored->getType()->isPointerTy()) {
+          auto *Representation = B.getIntNTy(
+              F.getDataLayout().getPointerTypeSizeInBits(Stored->getType()));
+          Stored = B.CreateZExtOrTrunc(
+              cast<ConstantExpr>(Stored)->getOperand(0), Representation);
+        } else if (Stored->getType()->isFloatingPointTy())
+          Stored = B.CreateBitCast(
+              Stored, B.getIntNTy(Stored->getType()->getScalarSizeInBits()));
+        unsigned Width = Stored->getType()->getIntegerBitWidth();
+        for (unsigned Byte = 0; Byte < (Width + 7) / 8; ++Byte) {
+          Value *Part = Byte ? B.CreateLShr(Stored, Byte * 8) : Stored;
+          Part = B.CreateAnd(B.CreateZExtOrTrunc(Part, B.getInt32Ty()), 255);
+          Value *Offset =
+              B.CreateAdd(Offsets.lookup(Store->getPointerOperand()),
+                          ConstantInt::get(IndexTy, Byte));
+          auto *Word =
+              B.CreateAlignedStore(Part, Address(Offset, Store), Align(4));
+          Word->setDebugLoc(Store->getDebugLoc());
+        }
+      }
+      Access->eraseFromParent();
+    }
+    for (auto *GEP : GEPs)
+      GEP->dropAllReferences();
+    for (auto *Phi : Phis)
+      Phi->dropAllReferences();
+    for (auto *GEP : GEPs)
+      GEP->eraseFromParent();
+    for (auto *Phi : Phis)
+      Phi->eraseFromParent();
+    AI->replaceAllUsesWith(Storage);
+    AI->eraseFromParent();
+    Changed = true;
+  }
+  return Changed;
+}
 
 static bool legalizeInteger(Instruction &I,
                             SmallVectorImpl<Instruction *> &ToRemove,
@@ -248,14 +428,19 @@ static bool legalizeI8Memory(Instruction &I,
       Load && I.getType()->isIntegerTy(8)) {
     Value *Pointer = ReplacedValues.lookup_or(Load->getPointerOperand(),
                                               Load->getPointerOperand());
-    Type *ElementType = Pointer->getType();
+    Type *ElementType = nullptr;
     if (auto *AI = dyn_cast<AllocaInst>(Pointer))
       ElementType = AI->getAllocatedType();
     if (auto *GEP = dyn_cast<GetElementPtrInst>(Pointer)) {
       ElementType = GEP->getResultElementType();
     }
-    if (ElementType->isArrayTy())
+    if (ElementType && ElementType->isArrayTy())
       ElementType = ElementType->getArrayElementType();
+    if (!ElementType || !ElementType->isIntegerTy() ||
+        getLegalIntegerType(ElementType))
+      reportFatalUsageError(
+          "DXIL legalization cannot determine the i8 load's storage type; "
+          "nonconstant private pointer representations are not supported");
     LoadInst *NewLoad = Builder.CreateLoad(ElementType, Pointer);
     ReplacedValues[Load] = NewLoad;
     ToRemove.push_back(Load);
@@ -587,6 +772,7 @@ public:
 
   bool runLegalizationPipeline(Function &F) {
     bool MadeChange = removeUnreachableBlocks(F);
+    MadeChange |= legalizePrivateByteStorage(F);
     SmallVector<Instruction *> ToRemove;
     DenseMap<Value *, Value *> ReplacedValues;
     for (int Stage = 0; Stage < NumStages; ++Stage) {

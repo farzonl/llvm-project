@@ -1266,6 +1266,10 @@ bool lowerKernel(Module &M) {
     }
     Size->eraseFromParent();
   }
+  // Preserve private object representations before switching to the DXIL ABI.
+  for (Function &F : M)
+    if (!F.isDeclaration())
+      legalizePrivateByteStorage(F);
   M.setDataLayout(M.getTargetTriple().computeDataLayout());
   // Executable DXIL uses its native ABI, not the capture's host language ABI.
   if (M.getModuleFlag("wchar_size"))

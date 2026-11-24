@@ -31,6 +31,8 @@ class raw_ostream;
 void initializeDXILKernelABILegacyPass(PassRegistry &);
 ModulePass *createDXILKernelABILegacyPass();
 
+bool legalizePrivateByteStorage(Function &F);
+
 /// Initializer for dxil writer pass
 void initializeDXILWriterLegacyPass(PassRegistry &);
 
