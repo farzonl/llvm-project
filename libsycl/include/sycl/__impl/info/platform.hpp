@@ -18,6 +18,7 @@
 #include <sycl/__impl/info/desc_base.hpp>
 
 #include <string>
+#include <vector>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
 
@@ -40,6 +41,9 @@ struct name : detail::info_desc_tag<name, sycl::platform> {
 };
 struct vendor : detail::info_desc_tag<vendor, sycl::platform> {
   using return_type = std::string;
+};
+struct extensions : detail::info_desc_tag<extensions, sycl::platform> {
+  using return_type = std::vector<std::string>;
 };
 } // namespace platform
 } // namespace info

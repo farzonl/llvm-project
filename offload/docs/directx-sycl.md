@@ -1624,6 +1624,48 @@ the full configuration does not pass; this inventory is not SYCL conformance.
 Earlier seven-category counts above are historical focused measurements,
 superseded by this full **10/97** inventory.
 
+### Platform extension queries and first inventory-driven closure
+
+The first ranked objective closes the full unchanged `platform` category.
+`platform::has_extension` and the
+`get_info<info::platform::extensions>` descriptor are now available. The query
+returns an empty extension list because libsycl currently implements no
+extension-string contracts; `has_extension` performs exact membership checks
+against that same list. It does not infer OpenCL extensions from DirectX
+hardware features or claim that optional SYCL aspects are extensions.
+The extension-list result is deliberate capability reporting, not a fallback
+for a failed backend query. Existing name/vendor/version queries and `has`
+aspect reporting are unchanged. `has_extension` uses the standard SYCL 2020
+deprecation annotation; the new symbols require the matching rebuilt runtime.
+
+The existing five platform discovery/grouping/capability unit tests pass.
+The whole unchanged CTS platform category builds and passes on NVIDIA, AMD,
+and Intel: **4/4 cases and 57/57 assertions per vendor**, with complete totals,
+no skipped cases, and no failed assertions. No CTS test or assertion is changed.
+
+This advances cumulative confirmed coverage from **10/97 to 11/97**.
+The earlier ten-category passing baseline plus this platform measurement
+account for **118 cases and 12,622 assertions per vendor** across those
+eleven categories. Only platform was rebuilt and remeasured in this increment;
+this is not a fresh full-suite measurement. The earlier full-inventory failures
+and all-skipped categories remain documented, not silently reclassified.
+
+Rebuild the runtime/public headers together and run without filtering cases:
+
+```bat
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL PlatformTests
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\platform-extensions-final" ^
+  --targets test_platform --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The next ranked objective is deprecated byte compatibility and full scalar
+category closure, followed by vector deduction guides.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

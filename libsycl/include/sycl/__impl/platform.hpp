@@ -107,6 +107,9 @@ public:
   /// given aspect.
   bool has(aspect asp) const;
 
+  __SYCL2020_DEPRECATED("Use platform::has instead")
+  bool has_extension(const std::string &Extension) const;
+
   /// Returns all SYCL platforms from all backends that are available in the
   /// system.
   ///

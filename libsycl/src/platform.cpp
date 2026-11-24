@@ -13,6 +13,7 @@
 #include <detail/device_impl.hpp>
 #include <detail/platform_impl.hpp>
 
+#include <algorithm>
 #include <cassert>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
@@ -40,9 +41,19 @@ std::vector<device> platform::get_devices(info::device_type type) const {
 
 bool platform::has(aspect asp) const { return impl->has(asp); }
 
+bool platform::has_extension(const std::string &Extension) const {
+  const auto Extensions = get_info<info::platform::extensions>();
+  return std::find(Extensions.begin(), Extensions.end(), Extension) !=
+         Extensions.end();
+}
+
 template <typename Param>
 detail::is_platform_info_desc_t<Param> platform::get_info() const {
-  return impl->getInfo<Param>();
+  if constexpr (std::is_same_v<Param, info::platform::extensions>) {
+    // No extension-string contracts are currently implemented by libsycl.
+    return {};
+  } else
+    return impl->getInfo<Param>();
 }
 
 context platform::khr_get_default_context() const {
@@ -56,6 +67,7 @@ context platform::khr_get_default_context() const {
 _LIBSYCL_EXPORT_GET_INFO(version)
 _LIBSYCL_EXPORT_GET_INFO(name)
 _LIBSYCL_EXPORT_GET_INFO(vendor)
+_LIBSYCL_EXPORT_GET_INFO(extensions)
 #undef _LIBSYCL_EXPORT_GET_INFO
 
 _LIBSYCL_END_NAMESPACE_SYCL
