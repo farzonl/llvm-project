@@ -1516,6 +1516,114 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 The runner exits with failure for group/ND-item compile failures and never runs
 their stale executables. Confirmed coverage remains **7/97 categories**.
 
+### Full 97-category inventory
+
+The 2026-11-24 inventory attempts **all 97 configured categories**, retaining
+full-conformance, deprecated-feature, half, and double test configuration.
+OpenCL interop remains disabled as in the earlier baseline. No CTS sources,
+assertions, category selection, or feature-test settings were changed during
+this inventory. The checkout retains the existing adapter-only additions:
+`LibSYCL` in CMake's known-implementation list and its identity registration
+in `disabled_for_test_case.h`. Neither addition changes a test or assertion.
+LLVM revision `4a8d553815b24d4c2bcda13153b660ede0d31b10` and CTS revision
+`b74823b4179358851d7949d816e41e6f1a7e105a` identify this baseline.
+The compiler/linker tools, validator, staged runtime DLLs, target manifest, and
+copied public SYCL headers were SHA256-hashed before measurement and verified
+unchanged afterward. Builds use two jobs; each successfully built executable
+is attempted on NVIDIA, AMD, and Intel.
+
+| Outcome | Categories |
+|---|---:|
+| Object compilation fails | 82 |
+| Objects compile, executable/device link fails | 3 |
+| Executable builds, but every test is skipped on each vendor | 2 |
+| Executable builds and tests pass on all three vendors | 10 |
+| Unmeasured categories | 0 |
+
+The **10/97 confirmed passing categories** are `device_event`, `error`,
+`header`, `id`, `item`, `kernel_args`, `language`, `namespace`, `nd_range`, and
+`range`. The last three newly confirmed categories relative to the earlier
+seven-category baseline are `kernel_args`, `language`, and `namespace`.
+They were already supported: the inventory increases measured coverage
+without implementing additional functionality.
+
+The ten passing categories report **114/114 cases and 12,565/12,565 assertions
+per vendor**. These are totals from the passing categories, not complete
+executed-suite totals. `is_device_copyable` skips its one case because
+`SYCL_DEVICE_COPYABLE` is undefined; `sycl_external` skips all six cases because
+`SYCL_EXTERNAL` is unsupported. Neither is counted as passing. The unchanged
+measurement runner records their nonzero process outcomes as failed runs and
+cannot parse the skipped-case summary, so its aggregate `counts_complete`
+remains false. The raw logs establish that these are all-skipped categories,
+not observed failing assertions. Failed builds never run stale executables.
+
+The three executable/device-link failures are:
+
+- `bit_cast`: an assertion in the DXIL array flattener rejects a GEP whose
+  pointer operand is a PHI.
+- `exception_handling`: the kernel ABI rejects a kernel without the expected
+  by-value capture record/layout; these tests contain empty-capture kernels.
+- `pointers`: DXIL validation rejects an unused external constant-array
+  declaration and remaining i8 operations.
+
+The compile failures expose several shared families:
+
+| Family | Observed blockers and scope |
+|---|---|
+| Compatibility names / shared CTS helpers | Missing `host_image` is the first diagnostic in 25 kernel-bundle/ID-related categories. The shared helper also references missing image targets and placeholder names. These names do not implement images or guarantee bundle execution. |
+| Numeric value types | Missing `rounding_mode` is the first diagnostic in seven vector categories. Other gaps include vector deduction guides, boolean marray aliases, compound/bitwise/increment operators, and scalar relational overloads. |
+| Application API surface | Accessor iterators, zero-dimensional local accessors, buffer allocators/properties, context/queue information, extension queries, host tasks, and USM allocators are incomplete. |
+| Workgroup execution | Group/ND-item still need byte/half compatibility and transfer prerequisites; group, hierarchical, and h-item tests also require hierarchical execution. |
+| Larger runtime/compiler capabilities | User atomics/fences and capability queries, reductions, subgroups, math builtins, images, specialization constants, and broader kernel/program APIs remain substantial work. |
+
+These families overlap. The report keeps up to twenty diagnostics per build;
+the complete logs remain authoritative. First-error frequency is an indicator
+of shared blockers, **not a prediction of how many categories a small fix will
+make pass**. Compile-error limits and subsequent device-link/runtime failures
+can conceal additional requirements.
+
+#### Ranked next objectives
+
+The inventory changes the priority from predetermined ND-item work to the
+following evidence-based candidates. Effort is relative, not a schedule or a
+guarantee of a category pass:
+
+| Rank | Objective | Evidence / expected effort |
+|---|---|---|
+| 1 | Complete the platform extension-query API and close `platform` | Its reported compilation blocker is `platform::has_extension`. Small API completion using truthful extension reporting; verify the entire category. |
+| 2 | Implement the deprecated byte interface and close `scalars` | Its reported errors are the two missing `sycl::byte` uses. Small compatibility work, also removing a group/ND-item blocker; do not assume those larger categories then pass. |
+| 3 | Implement standard vector deduction guides and close `vector_deduction_guides` | The category exercises host-side construction/type/value checks for 1/2/3/4/8/16 elements. Small, bounded library change without new GPU execution machinery. |
+| 4 | Support valid empty-capture kernels and retry `exception_handling` | Object compilation already succeeds. A focused compiler/ABI prerequisite, with asynchronous-error behavior still needing validation after linking works. |
+| 5 | Complete shared compatibility names, then rebuild the kernel-ID/bundle family | Twenty-five categories encounter the same helper-level first error. Small naming work may reveal many downstream blockers; close the cheapest kernel-ID or zero-kernel category actually supported, rather than promising 25 passes. |
+
+Marray API completion is the next candidate family after these: six configured
+marray categories expose library gaps that can share operator implementations,
+but narrow/private device operations may add backend work. ND-item, general
+atomics/subgroups, hierarchical execution, and OpenCL/OpenMP integration should
+not displace cheaper demonstrated category candidates merely because they were
+the previous workstream. Every closure requires the full unchanged applicable
+category to pass on all three vendors; skipped feature tests are not progress.
+
+Reproduce without a `--targets` filter, keeping compiler/runtime/header inputs
+fixed for the duration:
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" ^
+  --report-dir "%CTS_BUILD%\full-inventory-2026-11-24" ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The report directory contains `baseline.json`, per-stage/per-device logs, and
+the original `inputs.json` hash record. The runner exits with failure because
+the full configuration does not pass; this inventory is not SYCL conformance.
+Earlier seven-category counts above are historical focused measurements,
+superseded by this full **10/97** inventory.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
