@@ -12,7 +12,7 @@
 
 #include <sycl/sycl.hpp>
 
-struct alignas(16) Aligned {
+struct alignas(128) Aligned {
   int Value[4];
 };
 template <int D> class LocalStorageKernel;
@@ -126,6 +126,7 @@ int main(int Argc, char **Argv) {
     checkLocal(Queue, sycl::range<2>(2, 3), sycl::range<2>(5, 3));
     checkLocal(Queue, sycl::range<3>(2, 3, 2), sycl::range<3>(4, 3, 2));
     checkLocal(Queue, sycl::range<1>(8), sycl::range<1>(11), 7);
+    checkLocal(Queue, sycl::range<1>(8), sycl::range<1>(240));
     checkFixed(Queue, 33);
     checkFixed(Queue, 48);
     checkFixed(Queue, 8192);
@@ -184,7 +185,7 @@ int main(int Argc, char **Argv) {
     assert(Rejected);
     Rejected = false;
     try {
-      checkLocal(Queue, sycl::range<1>(8), sycl::range<1>(2048));
+      checkLocal(Queue, sycl::range<1>(8), sycl::range<1>(241));
     } catch (const sycl::exception &Error) {
       Rejected = std::string(Error.what()).find("exceed 32768 bytes") !=
                  std::string::npos;

@@ -132,7 +132,11 @@ the destination is written to preserve overlapping `memmove` semantics.
 Copy expansion preserves the original address-space cast chains so all pointer
 users are validated and remapped. Narrow, 64-bit floating-point and general
 escaping local-pointer operations remain unsupported. Local slot alignment
-remains limited to 16 bytes.
+supports powers of two from 4 through 128 bytes. The compiler, manifest parser,
+and runtime include inter-allocation alignment gaps in the 32768-byte limit.
+Repeated slots with one allocation identity count once and must agree on size
+and alignment. New over-aligned images require the matching updated runtime;
+older runtimes reject their manifests rather than silently ignoring alignment.
 
 DirectX SYCL splitting keeps globals reachable from the kernel rather than
 rooting every non-discardable host global. Constructors/destructors that can

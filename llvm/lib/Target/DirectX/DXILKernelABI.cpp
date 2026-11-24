@@ -482,7 +482,7 @@ Function *flattenCapture(Function &Kernel, json::Object &Capture) {
       auto Marker = Integer(Field->getOperand(2));
       auto Alignment = Integer(Field->getOperand(3));
       if (!Marker || *Marker != 2 || !Alignment || !isPowerOf2_32(*Alignment) ||
-          *Alignment < 4 || *Alignment > 16 || !Ty->isPointerTy() ||
+          *Alignment < 4 || *Alignment > 128 || !Ty->isPointerTy() ||
           Ty->getPointerAddressSpace() != 3 || *Size != 8 || *Offset % 8) {
         fail("local captures require an aligned 64-bit local pointer field");
         return nullptr;

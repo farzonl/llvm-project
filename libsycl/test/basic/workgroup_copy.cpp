@@ -157,6 +157,19 @@ template void launchCopy<sycl::marray<int, 3>, 1>(
     sycl::buffer<sycl::marray<int, 3>> &, sycl::nd_range<1>, std::size_t,
     std::size_t, std::size_t, std::size_t);
 
+template void launchCopy<sycl::vec<int, 8>, 1>(
+    sycl::queue &, sycl::buffer<sycl::vec<int, 8>> &,
+    sycl::buffer<sycl::vec<int, 8>> &, sycl::nd_range<1>, std::size_t,
+    std::size_t, std::size_t, std::size_t);
+template void launchCopy<sycl::vec<float, 16>, 2>(
+    sycl::queue &, sycl::buffer<sycl::vec<float, 16>> &,
+    sycl::buffer<sycl::vec<float, 16>> &, sycl::nd_range<2>, std::size_t,
+    std::size_t, std::size_t, std::size_t);
+template void launchCopy<sycl::vec<long long, 16>, 1>(
+    sycl::queue &, sycl::buffer<sycl::vec<long long, 16>> &,
+    sycl::buffer<sycl::vec<long long, 16>> &, sycl::nd_range<1>, std::size_t,
+    std::size_t, std::size_t, std::size_t);
+
 #ifndef __SYCL_DEVICE_ONLY__
 #  include <cassert>
 #  include <iostream>
@@ -246,6 +259,9 @@ int main(int Argc, char **Argv) {
     checkCopy<sycl::vec<float, 3>>(Queue, sycl::range<2>(2, 3));
     checkCopy<sycl::vec<long long, 2>>(Queue, sycl::range<1>(8));
     checkCopy<sycl::marray<int, 3>>(Queue, sycl::range<1>(8));
+    checkCopy<sycl::vec<int, 8>>(Queue, sycl::range<1>(8));
+    checkCopy<sycl::vec<float, 16>>(Queue, sycl::range<2>(2, 3));
+    checkCopy<sycl::vec<long long, 16>>(Queue, sycl::range<1>(8));
     std::cout
         << Device.get_info<sycl::info::device::name>()
         << ": scalar/vector cooperative copies, strides, guards and event "

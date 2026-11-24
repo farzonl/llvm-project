@@ -360,7 +360,7 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
         auto Allocation = Slot->getInteger("allocation");
         if (!Allocation || *Allocation <= 0 || !(uint64_t(*Allocation) >> 32) ||
             !uint32_t(*Allocation) || uint32_t(*Allocation) > 32768 ||
-            !isPowerOf2_32(*Alignment) || *Alignment < 4 || *Alignment > 16 ||
+            !isPowerOf2_32(*Alignment) || *Alignment < 4 || *Alignment > 128 ||
             uint32_t(*Allocation) % *Alignment || *Offset % 8 ||
             *Offset < LocalEnd || *Offset > *Size || 8 > *Size - *Offset)
           return invalid(
@@ -377,7 +377,7 @@ Expected<DirectXManifestTy> DirectXManifestTy::parse(StringRef JSON) {
             It->second != std::make_pair(uint32_t(*Allocation), *Alignment))
           return invalid("inconsistent aliased local capture allocations");
         if (Inserted)
-          Total += uint32_t(*Allocation);
+          Total = alignTo(Total, *Alignment) + uint32_t(*Allocation);
         if (Total > 32768)
           return invalid("local capture allocations exceed 32768 bytes");
         Layout.Local.push_back({*Offset, *Alignment, uint64_t(*Allocation)});

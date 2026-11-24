@@ -179,9 +179,28 @@ TEST(DirectXManifestTest, ValidatesLocalCaptureSlotsAndAliases) {
   ASSERT_TRUE(static_cast<bool>(Manifest)) << toString(Manifest.takeError());
   ASSERT_EQ(Manifest->Capture->Local.size(), 2u);
   EXPECT_EQ(Manifest->Capture->Local[1].Allocation, Token);
+  for (unsigned Alignment : {32u, 64u, 128u}) {
+    uint64_t AlignedToken = (uint64_t(1) << 32) | Alignment;
+    (*Object.getObject("capture"))["local"] = json::Array{
+        Slot(0, Alignment, AlignedToken), Slot(8, Alignment, AlignedToken)};
+    auto Aligned = DirectXManifestTy::parse(encode(Object));
+    ASSERT_TRUE(static_cast<bool>(Aligned)) << toString(Aligned.takeError());
+    EXPECT_EQ(Aligned->Capture->Local[1].Alignment, Alignment);
+  }
+  (*Object.getObject("capture"))["local"] =
+      json::Array{Slot(0, 4, (uint64_t(1) << 32) | 4),
+                  Slot(8, 128, (uint64_t(2) << 32) | 32640)};
+  auto Boundary = DirectXManifestTy::parse(encode(Object));
+  ASSERT_TRUE(static_cast<bool>(Boundary)) << toString(Boundary.takeError());
   for (auto Slots :
        {json::Array{Slot(1, 4, Token)}, json::Array{Slot(24, 4, Token)},
         json::Array{Slot(0, 3, Token)}, json::Array{Slot(0, 4, 64)},
+        json::Array{Slot(0, 256, (uint64_t(1) << 32) | 256)},
+        json::Array{Slot(0, 128, Token)},
+        json::Array{Slot(0, 4, Token), Slot(8, 128, Token + 64)},
+        json::Array{Slot(0, 4, (uint64_t(1) << 32) | 4),
+                    Slot(8, 128, (uint64_t(2) << 32) | 32640),
+                    Slot(16, 4, (uint64_t(3) << 32) | 4)},
         json::Array{Slot(0, 4, uint64_t(1) << 32)},
         json::Array{Slot(0, 4, Token), Slot(0, 4, Token)},
         json::Array{Slot(0, 4, Token), Slot(8, 4, Token + 4)},

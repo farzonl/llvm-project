@@ -21,10 +21,10 @@ template <typename T, int Dimensions = 1> class local_accessor {
                     (std::is_trivially_default_constructible_v<T> ||
                      detail::IsValueArray<T>::value) &&
                     std::is_trivially_destructible_v<T> &&
-                    !std::is_const_v<T> && alignof(T) <= 16,
+                    !std::is_const_v<T> && alignof(T) <= 128,
                 "Local accessors require mutable trivial elements or "
                 "trivially copyable SYCL value arrays "
-                "with alignment at most 16");
+                "with alignment at most 128");
   using DecoratedElement = typename detail::DecoratedElement<
       T, access::address_space::local_space>::type;
   [[clang::annotate("sycl.local.pointer")]] DecoratedElement *MPointer =

@@ -1042,11 +1042,12 @@ matching variant; the minimally sized packaged image is never a fallback for
 an allocation-bearing submission. Fixed workgroup kernels can specialize local
 storage without allowing their workgroup dimensions to change.
 
-Supported element types are mutable trivial types aligned from 4 through
-16 bytes; supported memory operations are nonvolatile, non-atomic 32-bit
+Supported element types initially were mutable trivial types aligned from 4
+through 16 bytes; supported memory operations were nonvolatile, non-atomic 32-bit
 integer/float scalar accesses, including fields of trivial aggregates. The
 wide-local extension below also supports 64-bit integer scalar accesses.
-General vectors, narrow local operations, 64-bit floating-point operations,
+The vector and alignment extensions below add SYCL value arrays and alignment
+through 128 bytes. Narrow local operations, 64-bit floating-point operations,
 nontrivial construction, the
 zero-dimensional API, properties, and complete local-accessor conformance
 remain outside this increment. Submissions require `nd_range`; single-task
@@ -1307,15 +1308,15 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 
 Only these three categories were remeasured in this run. The previously
 confirmed count remains **7/97**, with no new full-category pass claimed.
-The group/ND-item prerequisites still include narrow types, broader local
-alignment, legacy interfaces, and hierarchical group execution.
+The group/ND-item prerequisites still include narrow types, legacy interfaces,
+and hierarchical group execution.
 
 ### Vector local storage and cooperative copies
 
 Local accessors now accept trivially copyable SYCL `vec` and `marray` value
 arrays, even when their default constructor is not trivial. Like scalar local
 storage, their device contents are not initialized by constructing the accessor.
-The existing mutable-element, trivial-destruction, **16-byte alignment**, and
+This increment retained mutable-element, trivial-destruction, **16-byte alignment**, and
 **32768-byte total workgroup storage** limits remain in force.
 
 The compiler accepts fixed-vector accesses of 32/64-bit integers and 32-bit
@@ -1328,7 +1329,8 @@ loads/stores. This handles compiler-generated vector assignments without a
 special vector-copy path in `group`; all words are loaded first so overlapping
 `memmove` remains correct. Address-space casts are preserved until remapping.
 Atomic and volatile accesses, narrow components, 64-bit floating point, and
-larger local alignments are not enabled by this increment.
+larger local alignments were not enabled by this increment. The following
+alignment extension raises that limit.
 
 Cooperative-copy synchronization and eager event completion are unchanged.
 The existing native regression now includes `vec<int, 4>`, padded
@@ -1378,6 +1380,71 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 The runner exits with failure because group and ND-item do not compile; it does
 not run stale executables for those categories. The previously confirmed count
 remains **7/97**, not a new group/ND-item category pass or full SYCL conformance.
+
+### Over-aligned local storage
+
+Local accessor elements and captured local slots now support power-of-two
+alignment through **128 bytes**, covering the alignment of standard SYCL
+vectors up to sixteen 64-bit components. The frontend already records element
+alignment; the public accessor, compiler ABI, and manifest validator now accept
+the larger values. The compiled groupshared globals retain that alignment.
+The token and specialization-cache formats are unchanged. New over-aligned
+packages need the matching compiler and runtime; older runtimes reject them.
+
+Manifest validation now accounts for alignment gaps between independent local
+allocations, matching compiler and runtime accounting. Aliases count once and
+must still agree on allocation size and alignment. Invalid alignment,
+unaligned sizes, inconsistent aliases, and totals exceeding **32768 bytes**
+remain explicit errors. This does not enable narrow local operations, scalar
+`half` construction, 64-bit floating-point execution, atomics, or volatile
+accesses.
+
+The cooperative-copy regression adds `vec<int, 8>` (32-byte alignment),
+`vec<float, 16>` (64), and `vec<long long, 16>` (128). Each runs contiguous and
+strided transfers in both directions, distinct component values, guard checks,
+barriers, zero/partial counts, and a largest pair of allocations totaling
+exactly **32768 bytes**, including guards. The local-accessor regression now
+mixes 128-byte-aligned aggregates with integer/float allocations, checks aliases
+and neighbor-lane visibility, accepts a near-limit layout, and rejects the
+next larger layout.
+
+Both rebuilt native tests pass on NVIDIA, AMD, and Intel. Existing aligned
+buffer, multidimensional buffer, pointer/barrier, and workgroup-specialization
+binaries also pass with the updated DLLs. Thirteen focused compiler tests and
+25 manifest/workgroup unit tests pass. The unrelated pre-existing
+`cpp-kernel-capture-invalid.test` diagnostic mismatch described above remains
+unchanged and is not counted as passing.
+
+Use the existing Windows compilation commands for `workgroup_copy.cpp` and
+`local_accessor.cpp` after rebuilding all three components:
+
+```bat
+cmake --build "%COMPILER_BUILD%" --target clang opt llc
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL directx.unittests
+```
+
+The unchanged CTS remeasurement retains five selected categories. Header,
+error, and device-event pass **4/4 cases and 2/2 assertions per vendor**.
+Group and ND-item still fail compilation and execute no tests. Their current
+diagnostics include missing `sycl::byte`, scalar `half` local-accessor
+construction, `sycl::opencl` compatibility names, and hierarchical group
+submission; the former over-16-byte local-alignment errors are gone.
+
+```bat
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\local-alignment-final" ^
+  --targets test_device_event test_group test_nd_item test_header test_error ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The runner correctly exits with failure for the two compile-failed categories.
+No CTS assertions or category sources are changed. The previously confirmed
+count remains **7/97**; this is an alignment prerequisite, not full group,
+ND-item, or SYCL conformance.
 
 ### Adapter validation
 
