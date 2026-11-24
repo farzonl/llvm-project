@@ -216,11 +216,6 @@ bool DXILFlattenArraysVisitor::visitGetElementPtrInst(GetElementPtrInst &GEP) {
     return false;
 
   Value *PtrOperand = GEP.getPointerOperand();
-  // It shouldn't(?) be possible for the pointer operand of a GEP to be a PHI
-  // node unless HLSL has pointers. If this assumption is incorrect or HLSL gets
-  // pointer types, then the handling of this case can be implemented later.
-  assert(!isa<PHINode>(PtrOperand) &&
-         "Pointer operand of GEP should not be a PHI Node");
 
   // Replace a GEP ConstantExpr pointer operand with a GEP instruction so that
   // it can be visited
@@ -284,14 +279,14 @@ bool DXILFlattenArraysVisitor::visitGetElementPtrInst(GetElementPtrInst &GEP) {
       RootTy = GlobalVar->getValueType();
     } else if (auto *Alloca = dyn_cast<AllocaInst>(PtrOperand))
       RootTy = Alloca->getAllocatedType();
-    assert(!isMultiDimensionalArray(RootTy) &&
-           "Expected root array type to be flattened");
-
     // If the root type is not an array, we don't need to do any flattening
     if (!isa<ArrayType>(RootTy))
       return false;
 
-    Info.RootFlattenedArrayType = cast<ArrayType>(RootTy);
+    // Through a PHI, the GEP source type still describes the original array.
+    // Keep offsets relative to that pointer, using an equivalent flat type.
+    auto [TotalElements, BaseType] = getElementCountAndType(RootTy);
+    Info.RootFlattenedArrayType = ArrayType::get(BaseType, TotalElements);
   }
 
   // GEPs without users or GEPs with non-GEP users should be replaced such that

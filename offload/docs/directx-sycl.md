@@ -1802,9 +1802,31 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
   --devices NVIDIA AMD Intel --jobs 2 --timeout 900
 ```
 
-The next DirectX-specific objective is the pointer-PHI assertion in DXIL array
-flattening exposed by the full `bit_cast` category, rather than additional
-unrelated libsycl API completion.
+### DirectX array accesses through pointer PHIs
+
+The DXIL array flattener no longer assumes that a GEP's pointer operand cannot
+be a PHI. Scalar GEPs through loop-carried pointers are left unchanged.
+For array GEPs whose base is a PHI, the original source type supplies the
+element count and stride; an equivalent flattened array type expresses the
+same byte offsets relative to the selected pointer. This also handles loops
+advancing by a complete multidimensional array. The transformation neither
+duplicates memory accesses nor changes control flow or branch metadata.
+
+The focused regression covers a scalar pointer loop, a multidimensional-array
+pointer loop, and dynamically indexed accesses through a PHI selecting between
+two flattened private arrays. Both pass-manager entry points are checked with
+IR verification. Seven focused compiler tests pass, including the existing
+array-flattening and capture-ABI regressions.
+
+Replaying the preserved failing `bit_cast` CTS kernel through the flattener
+now succeeds. Full DXIL emission of that kernel reaches a separate legalizer
+assertion: an `i8` load through a pointer PHI is incorrectly inferred to load a
+pointer, which then reaches integer extension. The kernel also stores pointer
+values in private memory. These operations need their own DirectX private-byte
+memory and pointer-representation lowering; accepting a PHI in array flattening
+does not claim to implement that support or make the whole category pass.
+Confirmed CTS coverage remains **14/97**; no new GPU execution result is claimed
+for `bit_cast`.
 
 ### Adapter validation
 
