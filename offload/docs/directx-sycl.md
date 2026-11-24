@@ -1754,6 +1754,58 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 The next ranked objective is valid empty-capture kernels and a complete retry
 of the exception-handling category, retaining its original error assertions.
 
+### DirectX empty-capture kernel ABI
+
+The DirectX compiler ABI and specialization-recipe reader now accept capture
+layout metadata containing only the record size and pointer width, without any
+field entries. This is the layout emitted for a C++ captureless lambda.
+Previously both paths required at least one field: fixing compiler emission
+alone produced signed DXIL but still failed runtime image compatibility.
+
+The existing capture ABI is preserved. The host passes one complete nonzero-size
+object record (one byte for the tested empty lambda), while the executable has
+no capture arguments or resource/scalar bindings. Record-size, pointer-width,
+by-value parameter, and field-access validation remain in force. No dummy field,
+dummy buffer, generic SYCL API change, or relaxed image-compatibility fallback
+is used.
+
+Four focused compiler regressions pass, including the new empty-capture case,
+DXIL object emission, rejection of padding reads, and malformed record size.
+All twelve DirectX workgroup-recipe tests pass with tools configured; the new
+test accepts an empty recipe layout and rejects mismatched sizes or bindings.
+The unchanged exception-handling CTS executable now builds, signs, validates,
+loads, and runs its captureless kernels on NVIDIA, AMD, and Intel:
+**2/2 cases per vendor**. Its original success paths report zero assertions and
+use failure assertions on errors. This verifies ordinary host exception
+propagation and successful asynchronous submissions, not device-side exception
+throwing or comprehensive asynchronous backend-failure handling.
+
+Kernel-argument and language CTS regressions also pass, totaling **4/4 cases
+and 1/1 assertion per vendor** across the three selected categories. No CTS
+source, assertion, or feature configuration is changed. Cumulative confirmed
+coverage advances from **13/97 to 14/97**, accounting for **123 cases and
+13,119 assertions per vendor** across earlier passing measurements and this
+closure. Only these three categories were remeasured here.
+
+Rebuild both the compiler and DirectX runtime, then refresh both staged DLLs:
+
+```bat
+cmake --build "%COMPILER_BUILD%" --target clang opt llc
+cmake --build "%RUNTIME_BUILD%" --target LLVMOffload directx.unittests
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\empty-capture-final" ^
+  --targets test_exception_handling test_kernel_args test_language ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The next DirectX-specific objective is the pointer-PHI assertion in DXIL array
+flattening exposed by the full `bit_cast` category, rather than additional
+unrelated libsycl API completion.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

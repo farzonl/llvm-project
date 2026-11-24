@@ -456,7 +456,7 @@ void replaceBufferPointer(Value *Old, Value *Pointer) {
 
 Function *flattenCapture(Function &Kernel, json::Object &Capture) {
   auto *MD = Kernel.getMetadata("dx.capture.layout");
-  if (!MD || MD->getNumOperands() < 3 || Kernel.arg_size() != 1 ||
+  if (!MD || MD->getNumOperands() < 2 || Kernel.arg_size() != 1 ||
       !Kernel.getArg(0)->hasByValAttr()) {
     fail("capture kernels require one by-value record and a capture layout");
     return nullptr;

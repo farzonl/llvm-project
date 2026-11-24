@@ -151,6 +151,35 @@ TEST(DirectXWorkgroupTest, RequiresSYCLCapture) {
               "SYCL capture");
 }
 
+TEST(DirectXWorkgroupTest, EmptyCaptureRecipe) {
+  constexpr StringLiteral EmptyRecipe = R"(
+target datalayout = "e-p:64:64-i64:64"
+target triple = "dxil-pc-shadermodel6.0-compute"
+%Capture = type { i8 }
+define void @main(ptr byval(%Capture) %args) #0 !dx.capture.layout !0 {
+  ret void
+}
+attributes #0 = {
+  "dx.kernel" "dx.workgroup.specializable" "hlsl.numthreads"="1,1,1"
+}
+!0 = !{i32 1, i32 8}
+)";
+  auto Manifest = manifest();
+  Manifest.Capture = DirectXCaptureLayoutTy{1, {}};
+  Manifest.Arguments.clear();
+  auto Encoded = encodeBase64(recipeBitcode(EmptyRecipe));
+  auto Result = readRecipe(Encoded, Manifest);
+  ASSERT_TRUE(static_cast<bool>(Result)) << toString(Result.takeError());
+  ASSERT_TRUE(*Result);
+  Manifest.Capture->Size = 2;
+  expectError(readRecipe(Encoded, Manifest), error::ErrorCode::INVALID_BINARY,
+              "capture record");
+  Manifest = manifest();
+  Manifest.Capture->Size = 1;
+  expectError(readRecipe(Encoded, Manifest), error::ErrorCode::INVALID_BINARY,
+              "capture field");
+}
+
 TEST(DirectXWorkgroupTest, ValidatesLocalAllocationRecipeFields) {
   std::string IR = Recipe.str();
   IR.replace(IR.find("\"dx.workgroup.specializable\""),

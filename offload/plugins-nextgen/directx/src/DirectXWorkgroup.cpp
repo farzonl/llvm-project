@@ -88,7 +88,7 @@ llvm::omp::target::plugin::directx::readWorkgroupIR(
       Model.getMinor().value_or(0) != Manifest.ShaderModel[1])
     return Invalid("target or kernel count does not match the image");
   auto *Layout = Kernel->getMetadata("dx.capture.layout");
-  auto *SizeMD = Layout && Layout->getNumOperands() >= 3
+  auto *SizeMD = Layout && Layout->getNumOperands() >= 2
                      ? dyn_cast<ConstantAsMetadata>(Layout->getOperand(0))
                      : nullptr;
   auto *Size = SizeMD ? dyn_cast<ConstantInt>(SizeMD->getValue()) : nullptr;

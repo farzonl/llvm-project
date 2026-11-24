@@ -69,6 +69,12 @@ arrays. These arrays may only be indexed and read; their scalar fields count
 against the root-constant budget. Pointer arrays,
 padded element records, other scalar types, virtual bases, and pointer escapes
 remain unsupported.
+Captureless C++ functors use the same ABI: their nonzero-size empty object
+record has no capture-field metadata operands, an empty `offsets` array, and
+no resource/scalar bindings. Both compiler lowering and prepared-IR validation
+accept this fieldless layout while retaining record-size, pointer-width,
+by-value argument, and field-access validation. The host still supplies the
+complete object record; this is not a zero-size launch argument.
 Root constants align each scalar to its width, counting alignment gaps against
 the 252-byte budget. Kernels with 64-bit scalars use the existing `dx.Layout`
 type to describe the exact cbuffer byte size and offsets independently of the
