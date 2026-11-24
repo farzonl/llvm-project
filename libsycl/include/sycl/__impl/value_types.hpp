@@ -162,6 +162,8 @@ public:
 #undef _LIBSYCL_VEC_COMPONENT
 };
 
+template <typename T, typename... U> vec(T, U...) -> vec<T, sizeof...(U) + 1>;
+
 #define _LIBSYCL_VALUE_BINARY(Class, SizeType, Op)                              \
   template <typename T, SizeType N>                                            \
   constexpr Class<T, N> operator Op(const Class<T, N> &X,                       \

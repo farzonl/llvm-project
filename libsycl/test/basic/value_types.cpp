@@ -18,6 +18,21 @@ static_assert(sycl::bit_cast<std::uint16_t>(sycl::half(1.0)) == 0x3c00);
 static_assert(sycl::bit_cast<std::uint16_t>(
                   std::numeric_limits<sycl::half>::denorm_min()) == 1);
 
+constexpr int First = 3;
+constexpr int Second = 5;
+constexpr sycl::vec Deduced(First, Second, 7);
+static_assert(
+    std::is_same_v<std::remove_cv_t<decltype(Deduced)>, sycl::vec<int, 3>>);
+static_assert(Deduced[0] == 3 && Deduced[1] == 5 && Deduced[2] == 7);
+constexpr sycl::vec Copied(Deduced);
+static_assert(
+    std::is_same_v<std::remove_cv_t<decltype(Copied)>, sycl::vec<int, 3>>);
+static_assert(Copied[2] == 7);
+constexpr sycl::vec Single(First);
+static_assert(
+    std::is_same_v<std::remove_cv_t<decltype(Single)>, sycl::vec<int, 1>>);
+static_assert(Single[0] == 3);
+
 int main() {
   for (unsigned Bits = 0; Bits != 65536; ++Bits) {
     auto Value = sycl::bit_cast<sycl::half>(static_cast<std::uint16_t>(Bits));

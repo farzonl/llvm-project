@@ -1708,6 +1708,52 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 The next ranked objective is vector deduction guides and the full unchanged
 deduction-guide category.
 
+### Vector deduction guides
+
+The standard `vec(T, U...) -> vec<T, sizeof...(U) + 1>` deduction guide is now
+available. Scalar arguments determine the element type from the first argument
+and the vector length from the argument count; the existing vector-size and
+constructor rules still apply. Explicit vector types, their layout, and copy
+construction semantics are unchanged.
+
+The focused `value_types.cpp` regression checks constant-evaluated deduction
+from const scalar lvalues, three-element type/value preservation, single-element
+deduction, and copy deduction retaining the original vector type rather than
+creating a vector of vectors. Its existing half conversion and explicit
+vector/marray checks also pass with C++17 and warnings treated as errors.
+
+The entire unchanged `vector_deduction_guides` CTS category passes:
+**1/1 case and 480/480 assertions** for each NVIDIA, AMD, and Intel selection.
+It checks host-side type/value deduction across the full configured scalar type
+set and lengths 1/2/3/4/8/16. It does not dispatch a GPU kernel or establish
+broader vector arithmetic/device-language support. The scalar and platform
+categories also pass in the same run, totaling **7/7 cases and 554/554
+assertions per vendor selection**, with complete totals and no skipped or
+failed cases. CTS sources, assertions, and configuration are unchanged.
+
+Cumulative confirmed coverage advances from **12/97 to 13/97**,
+accounting for **121 cases and 13,119 assertions per vendor** across the
+earlier passing baseline and the three inventory-driven closures. Only the
+three selected categories were rebuilt and remeasured in this increment;
+the cumulative count is not a fresh full-suite measurement.
+
+Rebuild the runtime/public headers together and reproduce:
+
+```bat
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\vector-deduction-final" ^
+  --targets test_vector_deduction_guides test_scalars test_platform ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The next ranked objective is valid empty-capture kernels and a complete retry
+of the exception-handling category, retaining its original error assertions.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration
