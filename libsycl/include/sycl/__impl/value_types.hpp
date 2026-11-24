@@ -9,10 +9,10 @@
 #ifndef _LIBSYCL___IMPL_VALUE_TYPES_HPP
 #define _LIBSYCL___IMPL_VALUE_TYPES_HPP
 
-#include <sycl/__impl/half.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <sycl/__impl/half.hpp>
 #include <type_traits>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
