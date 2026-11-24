@@ -1666,6 +1666,48 @@ python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
 The next ranked objective is deprecated byte compatibility and full scalar
 category closure, followed by vector deduction guides.
 
+### Deprecated byte compatibility and scalar category closure
+
+`sycl::byte` is now available as an unsigned eight-bit integer alias,
+`std::uint8_t`, with the standard SYCL 2020 deprecation annotation recommending
+`std::byte`. It retains integer conversion/arithmetic semantics; it is not an
+alias of the distinct C++17 `std::byte` enum. This library compatibility addition
+does not change buffer/local storage, barriers, packing, or advertised device
+aspects.
+
+The full unchanged scalar CTS category builds and passes on NVIDIA, AMD, and
+Intel: **2/2 cases and 17/17 assertions per vendor**. Deprecated-feature, half,
+double, and full-conformance test settings are unchanged. Optional device
+branches still follow the reported aspects; this does not enable FP16/FP64
+arithmetic. The platform, header, and error categories also pass in the same
+remeasurement, totaling **9/9 cases and 76/76 assertions per vendor** across
+the four selected categories, with complete totals and no failing or skipped
+cases. No CTS source or assertion is changed.
+
+Cumulative confirmed coverage advances from **11/97 to 12/97**, accounting for
+**120 cases and 12,639 assertions per vendor** across the earlier passing
+baseline and the platform/scalar closures. Only the four selected categories
+were remeasured here; the other earlier results are not a fresh full-suite run.
+Byte compatibility also removes one known group/ND-item compilation blocker,
+but no new group or ND-item pass is claimed.
+
+Rebuild the runtime/public headers together, then reproduce:
+
+```bat
+cmake --build "%RUNTIME_BUILD%" --target LLVMSYCL
+cmake -E copy_if_different "%RUNTIME_BUILD%\lib\LLVMOffload.dll" "%CTS_BUILD%\bin"
+cmake -E copy_if_different "%LLVM_LIB_BUILD%\bin\LLVMSYCL.dll" "%CTS_BUILD%\bin"
+set "OFFLOAD_DIRECTX_COMPILER_PATH=%COMPILER_BUILD%\bin"
+set "OFFLOAD_DIRECTX_DXIL_VALIDATOR=%DXV%"
+python "%LLVM_SOURCE%\libsycl\test\cts\measure.py" ^
+  --build-dir "%CTS_BUILD%" --report-dir "%CTS_BUILD%\scalar-byte-final" ^
+  --targets test_scalars test_platform test_header test_error ^
+  --devices NVIDIA AMD Intel --jobs 2 --timeout 900
+```
+
+The next ranked objective is vector deduction guides and the full unchanged
+deduction-guide category.
+
 ### Adapter validation
 
 The adapter has a separate smoke test using the existing two-kernel integration

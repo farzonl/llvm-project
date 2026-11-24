@@ -12,9 +12,12 @@
 #include <sycl/__impl/half.hpp>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
 _LIBSYCL_BEGIN_NAMESPACE_SYCL
+
+using byte __SYCL2020_DEPRECATED("Use std::byte instead") = std::uint8_t;
 
 template <typename T, int N> class vec;
 template <typename T, std::size_t N> class marray;
